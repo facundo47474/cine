@@ -1,0 +1,80 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum MirrorFormat {
+  MP4
+  HLS
+  EMBED
+}
+
+enum MirrorStatus {
+  ACTIVE
+  UNDER_REVIEW
+  DOWN
+}
+
+model Movie {
+  id            String         @id @default(uuid())
+  tmdbId        Int?           @unique
+  title         String
+  originalTitle String?
+  synopsis      String         @db.Text
+  posterUrl     String
+  backdropUrl   String?
+  releaseYear   Int
+  durationMins  Int            @default(120)
+  rating        Float          @default(7.0)
+  qualityBadge  String         @default("HD")
+  genres        String[]       @default([])
+  isAvailable   Boolean        @default(true)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  mirrors       MirrorLink[]
+  watchHistory  WatchHistory[]
+
+  @@index([isAvailable])
+  @@index([title])
+}
+
+model MirrorLink {
+  id                  String       @id @default(uuid())
+  movieId             String
+  serverName          String
+  language            String       @default("Latino")
+  rawUrl              String       @db.Text
+  format              MirrorFormat @default(MP4)
+  quality             String       @default("1080p")
+  priority            Int          @default(1)
+  status              MirrorStatus @default(ACTIVE)
+  consecutiveFailures Int          @default(0)
+  lastCheckedAt       DateTime?
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  movie               Movie        @relation(fields: [movieId], references: [id], onDelete: Cascade)
+
+  @@index([movieId, status, priority])
+  @@index([status])
+}
+
+model WatchHistory {
+  id              String   @id @default(uuid())
+  deviceSessionId String
+  movieId         String
+  progressSeconds Int      @default(0)
+  durationSeconds Int      @default(7200)
+  completed       Boolean  @default(false)
+  updatedAt       DateTime @updatedAt
+
+  movie           Movie    @relation(fields: [movieId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceSessionId, movieId])
+  @@index([deviceSessionId, updatedAt])
+}
