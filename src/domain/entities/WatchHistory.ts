@@ -1,6 +1,6 @@
 export interface WatchHistoryProps {
   id: string;
-  deviceSessionId: string;
+  userId: string;
   movieId: string;
   progressSeconds: number;
   durationSeconds: number;
@@ -12,7 +12,7 @@ export class WatchHistory {
   constructor(private props: WatchHistoryProps) {}
 
   get id(): string { return this.props.id; }
-  get deviceSessionId(): string { return this.props.deviceSessionId; }
+  get userId(): string { return this.props.userId; }
   get movieId(): string { return this.props.movieId; }
   get progressSeconds(): number { return this.props.progressSeconds; }
   get durationSeconds(): number { return this.props.durationSeconds; }
@@ -21,7 +21,10 @@ export class WatchHistory {
 
   public getProgressPercentage(): number {
     if (this.props.durationSeconds <= 0) return 0;
-    return Math.min(100, Math.round((this.props.progressSeconds / this.props.durationSeconds) * 100));
+    return Math.min(
+      100,
+      Math.round((this.props.progressSeconds / this.props.durationSeconds) * 100)
+    );
   }
 
   public toObject(): WatchHistoryProps {

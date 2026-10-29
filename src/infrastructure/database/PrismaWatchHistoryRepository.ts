@@ -10,12 +10,12 @@ import { Movie } from "@/domain/entities/Movie";
 export class PrismaWatchHistoryRepository implements IWatchHistoryRepository {
   constructor(private readonly db: PrismaClient) {}
 
-  public async findByDeviceSession(
-    deviceSessionId: string,
+  public async findByUserId(
+    userId: string,
     limit: number = 12
   ): Promise<WatchHistoryWithMovie[]> {
     const rows = await this.db.watchHistory.findMany({
-      where: { deviceSessionId },
+      where: { userId },
       include: { movie: true },
       orderBy: { updatedAt: "desc" },
       take: limit,
@@ -24,7 +24,7 @@ export class PrismaWatchHistoryRepository implements IWatchHistoryRepository {
     return rows.map((row) => ({
       history: new WatchHistory({
         id: row.id,
-        deviceSessionId: row.deviceSessionId,
+        userId: row.userId,
         movieId: row.movieId,
         progressSeconds: row.progressSeconds,
         durationSeconds: row.durationSeconds,
@@ -50,13 +50,13 @@ export class PrismaWatchHistoryRepository implements IWatchHistoryRepository {
   }
 
   public async findMovieProgress(
-    deviceSessionId: string,
+    userId: string,
     movieId: string
   ): Promise<WatchHistory | null> {
     const row = await this.db.watchHistory.findUnique({
       where: {
-        deviceSessionId_movieId: {
-          deviceSessionId,
+        userId_movieId: {
+          userId,
           movieId,
         },
       },
@@ -66,7 +66,7 @@ export class PrismaWatchHistoryRepository implements IWatchHistoryRepository {
 
     return new WatchHistory({
       id: row.id,
-      deviceSessionId: row.deviceSessionId,
+      userId: row.userId,
       movieId: row.movieId,
       progressSeconds: row.progressSeconds,
       durationSeconds: row.durationSeconds,
@@ -77,13 +77,16 @@ export class PrismaWatchHistoryRepository implements IWatchHistoryRepository {
 
   public async saveProgress(input: SaveProgressInput): Promise<WatchHistory> {
     const safeDuration = Math.max(1, input.durationSeconds);
-    const safeProgress = Math.max(0, Math.min(input.progressSeconds, safeDuration));
+    const safeProgress = Math.max(
+      0,
+      Math.min(input.progressSeconds, safeDuration)
+    );
     const isCompleted = safeProgress / safeDuration >= 0.92;
 
     const row = await this.db.watchHistory.upsert({
       where: {
-        deviceSessionId_movieId: {
-          deviceSessionId: input.deviceSessionId,
+        userId_movieId: {
+          userId: input.userId,
           movieId: input.movieId,
         },
       },
@@ -93,7 +96,7 @@ export class PrismaWatchHistoryRepository implements IWatchHistoryRepository {
         completed: isCompleted,
       },
       create: {
-        deviceSessionId: input.deviceSessionId,
+        userId: input.userId,
         movieId: input.movieId,
         progressSeconds: safeProgress,
         durationSeconds: safeDuration,
@@ -103,7 +106,7 @@ export class PrismaWatchHistoryRepository implements IWatchHistoryRepository {
 
     return new WatchHistory({
       id: row.id,
-      deviceSessionId: row.deviceSessionId,
+      userId: row.userId,
       movieId: row.movieId,
       progressSeconds: row.progressSeconds,
       durationSeconds: row.durationSeconds,

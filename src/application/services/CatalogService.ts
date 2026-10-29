@@ -11,12 +11,6 @@ import {
 } from "../dto/CatalogFeedDto";
 import { Movie, MovieProps } from "@/domain/entities/Movie";
 
-/**
- * Servicio de Catálogo Masivo Híbrido y Reproducción (Versión 2.0).
- * - Unifica el catálogo local VIP de PostgreSQL con el catálogo infinito de TMDB.
- * - Ejecuta Persistencia Just-In-Time (Lazy Upsert) cuando el usuario reproduce un título nuevo.
- * - Cifra todos los mirrors con TokenCryptoService (AES-256-GCM).
- */
 export class CatalogService {
   constructor(
     private readonly movieRepository: IMovieRepository,
@@ -80,9 +74,6 @@ export class CatalogService {
     return movies.map((m) => m.toObject());
   }
 
-  /**
-   * Construye el Home Feed completo en paralelo sin bloquear el hilo principal.
-   */
   public async getHomeFeed(): Promise<HomeFeedDto> {
     const localMovies = await this.movieRepository.findAvailableCatalog();
     const localByTmdbId = new Map<number, Movie>();
@@ -166,9 +157,6 @@ export class CatalogService {
     };
   }
 
-  /**
-   * Exploración y búsqueda paginada combinando resultados locales de PostgreSQL y TMDB.
-   */
   public async exploreCatalog(
     params: ExploreCatalogParams
   ): Promise<ExploreCatalogResponseDto> {
@@ -229,10 +217,28 @@ export class CatalogService {
   }
 
   /**
-   * Obtiene los datos de reproducción de una película (por UUID o slug "tmdb-12345").
-   * Si la película proviene del catálogo global de TMDB y aún no existe en PostgreSQL,
-   * realiza un Lazy Upsert automático con sus Mirrors generados por IMirrorResolver.
+   * Verifica si una película guardada en la BD tiene más de 1 servidor, enlaces antiguos
+   * o el contenedor intermedio de embed69 sin extraer hacia Streamwish directo.
    */
+  private needsAutomaticMirrorUpgrade(movie: Movie): boolean {
+    if (!movie.tmdbId) return false;
+    const playable = movie.getPlayableMirrors();
+    if (playable.length !== 1) return true;
+
+    const singleMirror = playable[0];
+    if (singleMirror.serverName !== "Streamwish") return true;
+    if (singleMirror.rawUrl.includes("embed69.org")) return true;
+    if (
+      /(vidsrc|vidlink|multiembed|2embed|autoembed|embed\.su|youtube\.com)/i.test(
+        singleMirror.rawUrl
+      )
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
   public async getMoviePlaybackData(
     idOrTmdbSlug: string
   ): Promise<MoviePlaybackDto | null> {
@@ -250,7 +256,7 @@ export class CatalogService {
 
       movie = await this.movieRepository.findByTmdbId(tmdbId);
 
-      if (!movie || movie.getPlayableMirrors().length === 0) {
+      if (!movie || this.needsAutomaticMirrorUpgrade(movie)) {
         const metadata = await this.tmdbGateway.fetchMovieMetadata(tmdbId);
         const defaultMirrors =
           await this.mirrorResolver.resolveDefaultMirrorsForTmdb(
@@ -271,18 +277,14 @@ export class CatalogService {
           rating: metadata.rating,
           qualityBadge: "HD",
           genres: metadata.genres,
-          mirrors: defaultMirrors,
+          mirrors: defaultMirrors.slice(0, 1),
         });
       }
     } else {
       movie = await this.movieRepository.findByIdWithMirrors(idOrTmdbSlug);
 
-      if (
-        movie &&
-        movie.tmdbId &&
-        movie.getPlayableMirrors().length === 0
-      ) {
-        const backupMirrors =
+      if (movie && movie.tmdbId && this.needsAutomaticMirrorUpgrade(movie)) {
+        const freshMirrors =
           await this.mirrorResolver.resolveDefaultMirrorsForTmdb(
             movie.tmdbId,
             movie.title,
@@ -300,14 +302,15 @@ export class CatalogService {
           rating: movie.rating,
           qualityBadge: movie.qualityBadge,
           genres: movie.genres,
-          mirrors: backupMirrors,
+          mirrors: freshMirrors.slice(0, 1),
         });
       }
     }
 
     if (!movie) return null;
 
-    const playableMirrors = movie.getPlayableMirrors();
+    // Entregar exclusivamente la Opción 1
+    const playableMirrors = movie.getPlayableMirrors().slice(0, 1);
     const ttlHours = Number(process.env.STREAM_TOKEN_TTL_HOURS || "4");
     const expiresAt = new Date(
       Date.now() + ttlHours * 3600 * 1000
@@ -316,7 +319,7 @@ export class CatalogService {
     const streams: SignedMirrorStreamDto[] = playableMirrors.map((mirror) => {
       const token = this.tokenCryptoService.encryptStreamToken({
         mirrorId: mirror.id,
-        movieId: movie.id,
+        movieId: movie!.id,
         rawUrl: mirror.rawUrl,
         format: mirror.format,
       });
@@ -352,36 +355,9 @@ export class CatalogService {
     };
   }
 
-  /**
-   * Re-sincroniza forzosamente los mirrors en español para una película existente.
-   */
   public async refreshMovieMirrors(
     movieId: string
   ): Promise<MoviePlaybackDto | null> {
-    const movie = await this.movieRepository.findByIdWithMirrors(movieId);
-    if (!movie || !movie.tmdbId) return null;
-
-    const freshMirrors = await this.mirrorResolver.resolveDefaultMirrorsForTmdb(
-      movie.tmdbId,
-      movie.title,
-      movie.releaseYear
-    );
-
-    const updated = await this.movieRepository.upsertMovieWithMirrors({
-      tmdbId: movie.tmdbId,
-      title: movie.title,
-      originalTitle: movie.originalTitle,
-      synopsis: movie.synopsis,
-      posterUrl: movie.posterUrl,
-      backdropUrl: movie.backdropUrl,
-      releaseYear: movie.releaseYear,
-      durationMins: movie.durationMins,
-      rating: movie.rating,
-      qualityBadge: movie.qualityBadge,
-      genres: movie.genres,
-      mirrors: freshMirrors,
-    });
-
-    return this.getMoviePlaybackData(updated.id);
+    return this.getMoviePlaybackData(movieId);
   }
 }

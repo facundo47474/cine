@@ -1,17 +1,8 @@
 "use client";
 
-import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import Hls from "hls.js";
-import {
-  AlertTriangle,
-  CheckCircle2,
-  Globe,
-  RefreshCw,
-  Server,
-  Shield,
-  ShieldAlert,
-  Tv,
-} from "lucide-react";
+import { AlertTriangle, Maximize2, Minimize2 } from "lucide-react";
 import { SignedMirrorStreamDto } from "@/application/dto/PlaybackStreamDto";
 import { MirrorFormat } from "@/domain/enums/MirrorFormat";
 
@@ -21,8 +12,16 @@ interface SmartVideoPlayerProps {
   durationMins: number;
   streams: SignedMirrorStreamDto[];
   initialProgressSeconds: number;
-  onRefreshMirrors?: () => Promise<void>;
-  isRefreshingMirrors?: boolean;
+}
+
+interface FullscreenContainerElement extends HTMLDivElement {
+  webkitRequestFullscreen?: () => Promise<void> | void;
+  msRequestFullscreen?: () => Promise<void> | void;
+}
+
+interface FullscreenDocument extends Document {
+  webkitFullscreenElement?: Element | null;
+  webkitExitFullscreen?: () => Promise<void> | void;
 }
 
 export default function SmartVideoPlayer({
@@ -31,50 +30,23 @@ export default function SmartVideoPlayer({
   durationMins,
   streams,
   initialProgressSeconds,
-  onRefreshMirrors,
-  isRefreshingMirrors = false,
 }: SmartVideoPlayerProps) {
+  const playerContainerRef = useRef<FullscreenContainerElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const lastSavedSecRef = useRef<number>(initialProgressSeconds);
 
-  const [selectedLanguage, setSelectedLanguage] = useState<string>("Todos");
-  // Sandbox desactivado por defecto para evitar el bloqueo "Please Disable Sandbox" en proveedores de embed
-  const [sandboxEnabled, setSandboxEnabled] = useState<boolean>(false);
-  const [activeMirrorId, setActiveMirrorId] = useState<string>(
-    streams[0]?.mirrorId || ""
-  );
-  const [failedMirrorIds, setFailedMirrorIds] = useState<string[]>([]);
-  const [failoverBanner, setFailoverBanner] = useState<string | null>(null);
   const [allMirrorsDown, setAllMirrorsDown] = useState<boolean>(
     streams.length === 0
   );
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [isCssFullscreen, setIsCssFullscreen] = useState<boolean>(false);
 
   useEffect(() => {
-    if (streams.length > 0) {
-      setActiveMirrorId(streams[0].mirrorId);
-      setAllMirrorsDown(false);
-    }
+    setAllMirrorsDown(streams.length === 0);
   }, [streams]);
 
-  const availableLanguages = useMemo(() => {
-    const langs = Array.from(new Set(streams.map((s) => s.language)));
-    return ["Todos", ...langs];
-  }, [streams]);
-
-  const filteredStreams = useMemo(() => {
-    if (selectedLanguage === "Todos") return streams;
-    return streams.filter(
-      (s) => s.language.toLowerCase() === selectedLanguage.toLowerCase()
-    );
-  }, [streams, selectedLanguage]);
-
-  const currentStream: SignedMirrorStreamDto | undefined = useMemo(() => {
-    return (
-      filteredStreams.find((s) => s.mirrorId === activeMirrorId) ||
-      filteredStreams[0] ||
-      streams[0]
-    );
-  }, [filteredStreams, activeMirrorId, streams]);
+  // Única opción activa (Opción 1 - Streamwish)
+  const currentStream: SignedMirrorStreamDto | undefined = streams[0];
 
   const saveWatchProgress = useCallback(
     async (currentSeconds: number, totalDurationSeconds: number) => {
@@ -99,35 +71,126 @@ export default function SmartVideoPlayer({
     [movieId, durationMins]
   );
 
+  useEffect(() => {
+    if (!currentStream || currentStream.format !== MirrorFormat.EMBED) return;
+
+    const totalSec = Math.max(600, durationMins * 60);
+    let simulatedCurrent =
+      lastSavedSecRef.current > 0 ? lastSavedSecRef.current : 60;
+
+    saveWatchProgress(simulatedCurrent, totalSec);
+
+    const interval = setInterval(() => {
+      simulatedCurrent = Math.min(totalSec - 120, simulatedCurrent + 15);
+      saveWatchProgress(simulatedCurrent, totalSec);
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, [currentStream, durationMins, saveWatchProgress]);
+
+  // Sincronizar estado con eventos de Fullscreen nativo (Android / Desktop / iPadOS)
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const doc = document as FullscreenDocument;
+      const active = Boolean(
+        doc.fullscreenElement || doc.webkitFullscreenElement
+      );
+      setIsFullscreen(active);
+      if (!active) {
+        try {
+          if (screen.orientation && "unlock" in screen.orientation) {
+            screen.orientation.unlock();
+          }
+        } catch {
+          // Ignorar en navegadores que no soportan orientation unlock
+        }
+      }
+    };
+
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    document.addEventListener(
+      "webkitfullscreenchange",
+      handleFullscreenChange as EventListener
+    );
+
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+      document.removeEventListener(
+        "webkitfullscreenchange",
+        handleFullscreenChange as EventListener
+      );
+    };
+  }, []);
+
+  // Bloquear el scroll del body cuando se activa el modo pantalla completa en iOS (CSS fallback)
+  useEffect(() => {
+    if (isCssFullscreen) {
+      document.body.style.overflow = "hidden";
+      document.body.style.touchAction = "none";
+    } else {
+      document.body.style.overflow = "";
+      document.body.style.touchAction = "";
+    }
+    return () => {
+      document.body.style.overflow = "";
+      document.body.style.touchAction = "";
+    };
+  }, [isCssFullscreen]);
+
+  const toggleFullscreen = useCallback(async () => {
+    const container = playerContainerRef.current;
+    const doc = document as FullscreenDocument;
+
+    // Salir si ya está en pantalla completa (nativa o CSS iOS)
+    if (isFullscreen || isCssFullscreen) {
+      if (doc.fullscreenElement && doc.exitFullscreen) {
+        await doc.exitFullscreen().catch(() => {});
+      } else if (doc.webkitFullscreenElement && doc.webkitExitFullscreen) {
+        await doc.webkitExitFullscreen();
+      }
+      setIsCssFullscreen(false);
+      setIsFullscreen(false);
+      return;
+    }
+
+    if (!container) return;
+
+    try {
+      if (container.requestFullscreen) {
+        await container.requestFullscreen();
+        try {
+          const orientation = screen.orientation as unknown as {
+            lock?: (mode: string) => Promise<void>;
+          };
+          if (orientation?.lock) {
+            await orientation.lock("landscape").catch(() => {});
+          }
+        } catch {
+          // Ignorar si el dispositivo no permite bloqueo de orientación
+        }
+        return;
+      }
+
+      if (container.webkitRequestFullscreen) {
+        await container.webkitRequestFullscreen();
+        return;
+      }
+
+      // Fallback para iOS Safari (iPhone) donde requestFullscreen en contenedores de iframe no está disponible
+      setIsCssFullscreen(true);
+    } catch {
+      setIsCssFullscreen(true);
+    }
+  }, [isFullscreen, isCssFullscreen]);
+
   const handleStreamError = useCallback(
-    async (failedStream: SignedMirrorStreamDto) => {
-      const updatedFailed = failedMirrorIds.includes(failedStream.mirrorId)
-        ? failedMirrorIds
-        : [...failedMirrorIds, failedStream.mirrorId];
-
-      setFailedMirrorIds(updatedFailed);
-
+    (failedStream: SignedMirrorStreamDto) => {
       fetch(`/api/mirrors/${failedStream.mirrorId}/report`, {
         method: "POST",
       }).catch(() => {});
-
-      const nextAvailable = streams.find(
-        (s) =>
-          s.mirrorId !== failedStream.mirrorId &&
-          !updatedFailed.includes(s.mirrorId)
-      );
-
-      if (nextAvailable) {
-        setFailoverBanner(
-          `El servidor "${failedStream.serverName}" no respondió. Conmutando automáticamente a "${nextAvailable.serverName}"...`
-        );
-        setSelectedLanguage("Todos");
-        setActiveMirrorId(nextAvailable.mirrorId);
-      } else {
-        setAllMirrorsDown(true);
-      }
+      setAllMirrorsDown(true);
     },
-    [failedMirrorIds, streams]
+    []
   );
 
   useEffect(() => {
@@ -177,172 +240,42 @@ export default function SmartVideoPlayer({
 
   if (allMirrorsDown || !currentStream) {
     return (
-      <div className="w-full aspect-video rounded-xl bg-zinc-900 border border-red-500/30 flex flex-col items-center justify-center p-8 text-center space-y-4">
-        <AlertTriangle className="w-12 h-12 text-red-500" />
-        <div className="space-y-2 max-w-md">
-          <h3 className="text-lg font-bold text-white">
-            Enlaces temporalmente no disponibles
-          </h3>
-          <p className="text-sm text-zinc-400">
-            Todos los mirrors actuales de{" "}
-            <span className="text-white font-semibold">{movieTitle}</span> no
-            respondieron.
-          </p>
-          {onRefreshMirrors && (
-            <button
-              onClick={onRefreshMirrors}
-              disabled={isRefreshingMirrors}
-              className="mt-2 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-netflix-red text-white text-xs font-bold hover:bg-red-700 transition"
-            >
-              <RefreshCw className={`w-4 h-4 ${isRefreshingMirrors ? "animate-spin" : ""}`} />
-              Re-sincronizar Servidores en Español
-            </button>
-          )}
-        </div>
+      <div className="w-full aspect-video rounded-xl sm:rounded-2xl bg-zinc-900 border border-white/10 flex flex-col items-center justify-center p-6 sm:p-8 text-center space-y-3">
+        <AlertTriangle className="w-9 h-9 sm:w-10 sm:h-10 text-netflix-red" />
+        <h3 className="text-sm sm:text-base font-bold text-white">
+          Este título no se encuentra disponible en este momento
+        </h3>
+        <p className="text-xs text-zinc-400 max-w-md">
+          Intenta nuevamente en unos minutos o explora otra película de nuestro catálogo.
+        </p>
       </div>
     );
   }
 
+  const activeFull = isFullscreen || isCssFullscreen;
+
   return (
-    <div className="space-y-4">
-      <div className="bg-zinc-900/95 border border-white/10 rounded-xl p-4 space-y-3 shadow-lg">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 text-xs font-bold text-zinc-400 mr-1">
-              <Globe className="w-4 h-4 text-netflix-red" />
-              Audio / Idioma:
-            </span>
-            {availableLanguages.map((lang) => (
-              <button
-                key={lang}
-                onClick={() => {
-                  setSelectedLanguage(lang);
-                  const firstInLang =
-                    lang === "Todos"
-                      ? streams[0]
-                      : streams.find((s) => s.language === lang);
-                  if (firstInLang) {
-                    setActiveMirrorId(firstInLang.mirrorId);
-                  }
-                }}
-                className={`px-3 py-1 rounded-full text-xs font-bold transition ${
-                  selectedLanguage === lang
-                    ? "bg-white text-black shadow"
-                    : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
-                }`}
-              >
-                {lang}
-              </button>
-            ))}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            {onRefreshMirrors && (
-              <button
-                type="button"
-                onClick={onRefreshMirrors}
-                disabled={isRefreshingMirrors}
-                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-semibold bg-netflix-red/20 text-red-300 border border-netflix-red/40 hover:bg-netflix-red/30 transition disabled:opacity-50"
-                title="Actualiza los enlaces guardados en Supabase con los nuevos servidores en Español"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingMirrors ? "animate-spin" : ""}`} />
-                <span>
-                  {isRefreshingMirrors
-                    ? "Actualizando..."
-                    : "Actualizar Mirrors Español"}
-                </span>
-              </button>
-            )}
-
-            <button
-              type="button"
-              onClick={() => setSandboxEnabled((prev) => !prev)}
-              className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-semibold border transition ${
-                sandboxEnabled
-                  ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/25"
-                  : "bg-zinc-800 text-zinc-300 border-white/15 hover:bg-zinc-700"
-              }`}
-            >
-              {sandboxEnabled ? (
-                <>
-                  <Shield className="w-3.5 h-3.5" />
-                  <span>Sandbox: Activado</span>
-                </>
-              ) : (
-                <>
-                  <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Modo Compatible (Sin bloqueo Sandbox)</span>
-                </>
-              )}
-            </button>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-1.5 text-xs font-semibold text-zinc-400 mr-1">
-            <Server className="w-4 h-4 text-netflix-red" />
-            <span>Servidores:</span>
-          </div>
-
-          {filteredStreams.map((stream) => {
-            const isFailed = failedMirrorIds.includes(stream.mirrorId);
-            const isSelected = currentStream.mirrorId === stream.mirrorId;
-
-            return (
-              <button
-                key={stream.mirrorId}
-                onClick={() => {
-                  setFailoverBanner(null);
-                  setActiveMirrorId(stream.mirrorId);
-                }}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition border ${
-                  isSelected
-                    ? "bg-netflix-red text-white border-netflix-red shadow-md"
-                    : isFailed
-                    ? "bg-red-950/40 text-red-300 border-red-500/30 line-through"
-                    : "bg-zinc-800 text-zinc-300 border-white/10 hover:bg-zinc-700"
-                }`}
-              >
-                <span>{stream.serverName}</span>
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-black/30">
-                  {stream.language} • {stream.format}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {failoverBanner && (
-        <div className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs">
-          <div className="flex items-center gap-2">
-            <RefreshCw className="w-4 h-4 animate-spin flex-shrink-0" />
-            <span>{failoverBanner}</span>
-          </div>
-          <button
-            onClick={() => setFailoverBanner(null)}
-            className="text-amber-200 hover:text-white underline text-[11px]"
-          >
-            Ocultar
-          </button>
-        </div>
-      )}
-
-      <div className="relative w-full aspect-video rounded-xl overflow-hidden bg-black border border-white/10 shadow-2xl">
+    <div className="w-full">
+      <div
+        ref={playerContainerRef}
+        className={
+          activeFull
+            ? "fixed inset-0 z-[9999] w-screen h-[100dvh] bg-black flex items-center justify-center"
+            : "relative w-full aspect-video rounded-xl sm:rounded-2xl overflow-hidden bg-black border border-white/10 shadow-2xl"
+        }
+      >
         {currentStream.format === MirrorFormat.EMBED ? (
           <iframe
-            key={`${currentStream.mirrorId}-${sandboxEnabled ? "sb" : "nosb"}`}
+            key={currentStream.mirrorId}
             src={currentStream.streamUrl}
             title={movieTitle}
             className="w-full h-full border-0"
-            {...(sandboxEnabled
-              ? {
-                  sandbox:
-                    "allow-scripts allow-same-origin allow-forms allow-presentation",
-                }
-              : {})}
-            allow="autoplay; fullscreen; picture-in-picture"
+            allow="autoplay *; fullscreen *; picture-in-picture *; encrypted-media *; accelerometer *; gyroscope *"
             allowFullScreen
+            // @ts-expect-error Atributos legacy requeridos por WebKit en iOS/Android WebView
+            webkitallowfullscreen="true"
+            mozallowfullscreen="true"
+            playsInline
             onError={() => handleStreamError(currentStream)}
           />
         ) : (
@@ -351,6 +284,7 @@ export default function SmartVideoPlayer({
             ref={videoRef}
             controls
             playsInline
+            webkit-playsinline="true"
             className="w-full h-full bg-black"
             onTimeUpdate={(e) => {
               const el = e.currentTarget;
@@ -359,28 +293,30 @@ export default function SmartVideoPlayer({
             onError={() => handleStreamError(currentStream)}
           />
         )}
-      </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-400 px-1">
-        <div className="flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-          <span>
-            Servidor activo:{" "}
-            <strong className="text-zinc-200">{currentStream.serverName}</strong>{" "}
-            ({currentStream.quality} • {currentStream.format} • Token AES-256-GCM)
-          </span>
-        </div>
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5">
-            <Tv className="w-3.5 h-3.5" />
-            <button
-              onClick={() => handleStreamError(currentStream)}
-              className="text-netflix-red hover:underline font-medium"
-            >
-              Cambiar al siguiente Mirror
-            </button>
-          </div>
-        </div>
+        {/* Botón auxiliar de pantalla completa para iOS Safari y Android */}
+        <button
+          type="button"
+          onClick={toggleFullscreen}
+          aria-label={
+            activeFull ? "Salir de pantalla completa" : "Pantalla completa"
+          }
+          className="absolute top-3 right-3 z-30 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-black/75 hover:bg-netflix-red text-white text-xs font-semibold backdrop-blur-md border border-white/20 shadow-lg transition active:scale-95"
+        >
+          {activeFull ? (
+            <>
+              <Minimize2 className="w-3.5 h-3.5" />
+              <span>Salir</span>
+            </>
+          ) : (
+            <>
+              <Maximize2 className="w-3.5 h-3.5" />
+              <span className="hidden xs:inline sm:inline">
+                Pantalla completa
+              </span>
+            </>
+          )}
+        </button>
       </div>
     </div>
   );

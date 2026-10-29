@@ -19,6 +19,19 @@ enum MirrorStatus {
   DOWN
 }
 
+model User {
+  id           String         @id @default(uuid())
+  email        String         @unique
+  name         String?
+  avatarUrl    String?
+  googleId     String?        @unique
+  lastLoginAt  DateTime       @default(now())
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  watchHistory WatchHistory[]
+}
+
 model Movie {
   id            String         @id @default(uuid())
   tmdbId        Int?           @unique
@@ -66,15 +79,16 @@ model MirrorLink {
 
 model WatchHistory {
   id              String   @id @default(uuid())
-  deviceSessionId String
+  userId          String
   movieId         String
   progressSeconds Int      @default(0)
   durationSeconds Int      @default(7200)
   completed       Boolean  @default(false)
   updatedAt       DateTime @updatedAt
 
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   movie           Movie    @relation(fields: [movieId], references: [id], onDelete: Cascade)
 
-  @@unique([deviceSessionId, movieId])
-  @@index([deviceSessionId, updatedAt])
+  @@unique([userId, movieId])
+  @@index([userId, updatedAt])
 }

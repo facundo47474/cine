@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
+import { getServerSession } from "next-auth";
 import { catalogService, watchHistoryService } from "@/infrastructure/container";
+import { authOptions } from "@/infrastructure/auth/authOptions";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +10,16 @@ export async function GET(
   { params }: { params: { id: string } }
 ) {
   try {
+    const session = await getServerSession(authOptions);
+    const userId = (session?.user as { id?: string } | undefined)?.id;
+
+    if (!userId) {
+      return NextResponse.json(
+        { ok: false, error: "No autorizado." },
+        { status: 401 }
+      );
+    }
+
     const idOrTmdbSlug = decodeURIComponent(params.id);
     const playbackData = await catalogService.getMoviePlaybackData(idOrTmdbSlug);
 
@@ -19,16 +30,10 @@ export async function GET(
       );
     }
 
-    const cookieStore = cookies();
-    const deviceSessionId = cookieStore.get("piloto_device_id")?.value || "";
-
-    // Usamos siempre el UUID real (playbackData.id) para no romper la FK de WatchHistory
-    const savedProgressSeconds = deviceSessionId
-      ? await watchHistoryService.getMovieProgress(
-          deviceSessionId,
-          playbackData.id
-        )
-      : 0;
+    const savedProgressSeconds = await watchHistoryService.getMovieProgress(
+      userId,
+      playbackData.id
+    );
 
     return NextResponse.json({
       ok: true,

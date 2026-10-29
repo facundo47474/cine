@@ -16,22 +16,15 @@ export interface ContinueWatchingItemDto {
   updatedAt: string;
 }
 
-/**
- * Servicio de Historial de Reproducción ("Continuar viendo")
- * Identifica al usuario mediante una sesión anónima en cookie (UUID) sin obligar a login en la v1.
- */
 export class WatchHistoryService {
   constructor(private readonly historyRepository: IWatchHistoryRepository) {}
 
   public async getContinueWatching(
-    deviceSessionId: string
+    userId: string
   ): Promise<ContinueWatchingItemDto[]> {
-    if (!deviceSessionId) return [];
+    if (!userId) return [];
 
-    const records = await this.historyRepository.findByDeviceSession(
-      deviceSessionId,
-      12
-    );
+    const records = await this.historyRepository.findByUserId(userId, 12);
 
     return records
       .filter((item) => item.movie.isAvailable && !item.history.completed)
@@ -50,12 +43,12 @@ export class WatchHistoryService {
   }
 
   public async getMovieProgress(
-    deviceSessionId: string,
+    userId: string,
     movieId: string
   ): Promise<number> {
-    if (!deviceSessionId || !movieId) return 0;
+    if (!userId || !movieId) return 0;
     const history = await this.historyRepository.findMovieProgress(
-      deviceSessionId,
+      userId,
       movieId
     );
     return history ? history.progressSeconds : 0;

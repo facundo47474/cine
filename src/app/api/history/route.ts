@@ -1,22 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import crypto from "crypto";
+import { getServerSession } from "next-auth";
 import { watchHistoryService } from "@/infrastructure/container";
+import { authOptions } from "@/infrastructure/auth/authOptions";
 
 export const dynamic = "force-dynamic";
 
-const DEVICE_COOKIE_NAME = "piloto_device_id";
-
 export async function GET() {
   try {
-    const cookieStore = cookies();
-    const deviceSessionId = cookieStore.get(DEVICE_COOKIE_NAME)?.value;
+    const session = await getServerSession(authOptions);
+    const userId = (session?.user as { id?: string } | undefined)?.id;
 
-    if (!deviceSessionId) {
-      return NextResponse.json({ ok: true, items: [] });
+    if (!userId) {
+      return NextResponse.json(
+        { ok: false, error: "Debes iniciar sesión." },
+        { status: 401 }
+      );
     }
 
-    const items = await watchHistoryService.getContinueWatching(deviceSessionId);
+    const items = await watchHistoryService.getContinueWatching(userId);
     return NextResponse.json({ ok: true, items });
   } catch (error) {
     console.error("[GET /api/history] Error:", error);
@@ -29,6 +30,16 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
+    const session = await getServerSession(authOptions);
+    const userId = (session?.user as { id?: string } | undefined)?.id;
+
+    if (!userId) {
+      return NextResponse.json(
+        { ok: false, error: "Debes iniciar sesión." },
+        { status: 401 }
+      );
+    }
+
     const body = await request.json();
     const { movieId, progressSeconds, durationSeconds } = body;
 
@@ -39,30 +50,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const cookieStore = cookies();
-    let deviceSessionId = cookieStore.get(DEVICE_COOKIE_NAME)?.value;
-
-    if (!deviceSessionId) {
-      deviceSessionId = crypto.randomUUID();
-    }
-
     const saved = await watchHistoryService.recordProgress({
-      deviceSessionId,
+      userId,
       movieId,
       progressSeconds: Math.floor(progressSeconds),
       durationSeconds: Math.floor(durationSeconds || 7200),
     });
 
-    const response = NextResponse.json({ ok: true, progress: saved });
-
-    response.cookies.set(DEVICE_COOKIE_NAME, deviceSessionId, {
-      httpOnly: true,
-      sameSite: "lax",
-      path: "/",
-      maxAge: 60 * 60 * 24 * 365, // 1 año
-    });
-
-    return response;
+    return NextResponse.json({ ok: true, progress: saved });
   } catch (error) {
     console.error("[POST /api/history] Error:", error);
     return NextResponse.json(

@@ -4,13 +4,15 @@ import {
   InvalidTokenError,
   TokenExpiredError,
 } from "@/application/services/TokenCryptoService";
+import { resolveStreamwishFromEmbed69 } from "@/infrastructure/providers/AutoEmbedMirrorResolver";
 
 export const dynamic = "force-dynamic";
 
 /**
  * Endpoint Proxy de Reproducción (/api/stream/[token]).
- * Desencripta el token AES-256-GCM en tiempo real, verifica que no haya expirado
- * y redirige mediante HTTP 302 hacia el recurso de video sin exponer la URL cruda en el HTML inicial.
+ * Desencripta el token AES-256-GCM en tiempo real y, si apunta a un contenedor Embed69,
+ * extrae directamente el stream de Streamwish (Opción 1) para garantizar compatibilidad
+ * con pantalla completa en Android e iOS sin selectores adicionales.
  */
 export async function GET(
   _request: NextRequest,
@@ -20,9 +22,22 @@ export async function GET(
     const rawToken = decodeURIComponent(params.token);
     const payload = tokenCryptoService.decryptStreamToken(rawToken);
 
-    const response = NextResponse.redirect(payload.rawUrl, { status: 302 });
+    let targetUrl = payload.rawUrl;
+
+    if (targetUrl.includes("embed69.org/f/")) {
+      const directStreamwish = await resolveStreamwishFromEmbed69(targetUrl);
+      if (directStreamwish) {
+        targetUrl = directStreamwish;
+      }
+    }
+
+    const response = NextResponse.redirect(targetUrl, { status: 302 });
     response.headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
     response.headers.set("Referrer-Policy", "no-referrer");
+    response.headers.set(
+      "Permissions-Policy",
+      "fullscreen=*, autoplay=*, picture-in-picture=*"
+    );
     return response;
   } catch (error) {
     if (error instanceof TokenExpiredError) {

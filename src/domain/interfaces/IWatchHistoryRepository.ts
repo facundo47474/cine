@@ -7,14 +7,14 @@ export interface WatchHistoryWithMovie {
 }
 
 export interface SaveProgressInput {
-  deviceSessionId: string;
+  userId: string;
   movieId: string;
   progressSeconds: number;
   durationSeconds: number;
 }
 
 export interface IWatchHistoryRepository {
-  findByDeviceSession(deviceSessionId: string, limit?: number): Promise<WatchHistoryWithMovie[]>;
-  findMovieProgress(deviceSessionId: string, movieId: string): Promise<WatchHistory | null>;
+  findByUserId(userId: string, limit?: number): Promise<WatchHistoryWithMovie[]>;
+  findMovieProgress(userId: string, movieId: string): Promise<WatchHistory | null>;
   saveProgress(input: SaveProgressInput): Promise<WatchHistory>;
 }

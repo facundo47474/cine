@@ -79,45 +79,46 @@ export default function ProviderFilterBar({
     selectedProviderId !== undefined || selectedGenreId !== undefined;
 
   return (
-    <section className="max-w-7xl mx-auto px-4 sm:px-8 space-y-4">
-      {/* Hub de Plataformas de Streaming */}
-      <div className="bg-zinc-900/80 backdrop-blur-md border border-white/10 rounded-2xl p-4 space-y-4 shadow-xl">
+    <section className="max-w-7xl mx-auto px-3 sm:px-8 space-y-3 sm:space-y-4">
+      <div className="bg-zinc-900/80 backdrop-blur-md border border-white/10 rounded-xl sm:rounded-2xl p-3 sm:p-4 space-y-3 sm:space-y-4 shadow-xl">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-zinc-400">
-            <Tv className="w-4 h-4 text-netflix-red" />
-            <span>Explorar por Plataforma Oficial</span>
+          <div className="flex items-center gap-2 text-[11px] sm:text-xs font-bold uppercase tracking-wider text-zinc-400">
+            <Tv className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-netflix-red" />
+            <span>Explorar por Plataforma</span>
           </div>
 
           {hasActiveFilters && (
             <button
+              type="button"
               onClick={onResetFilters}
               className="text-xs font-semibold text-netflix-red hover:underline flex items-center gap-1"
             >
               <Sparkles className="w-3.5 h-3.5" />
-              Limpiar filtros y volver al Home Feed
+              Limpiar filtros
             </button>
           )}
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 sm:gap-2.5">
           {STREAMING_PROVIDERS.map((prov) => {
             const isSelected = selectedProviderId === prov.id;
             return (
               <button
+                type="button"
                 key={prov.name}
                 onClick={() => onSelectProvider(prov.id)}
-                className={`relative overflow-hidden rounded-xl px-4 py-3 text-left transition-all border ${
+                className={`relative overflow-hidden rounded-xl px-3 sm:px-4 py-2.5 sm:py-3 text-left transition-all border ${
                   isSelected
-                    ? `bg-gradient-to-br ${prov.badgeColor} text-white border-white/40 shadow-lg scale-[1.02]`
+                    ? `bg-gradient-to-br ${prov.badgeColor} text-white border-white/40 shadow-lg sm:scale-[1.02]`
                     : "bg-zinc-800/70 hover:bg-zinc-800 text-zinc-300 border-white/5 hover:border-white/20"
                 }`}
               >
-                <div className="flex items-center justify-between">
-                  <span className="text-xs sm:text-sm font-black tracking-tight">
+                <div className="flex items-center justify-between gap-1">
+                  <span className="text-xs sm:text-sm font-black tracking-tight truncate">
                     {prov.name}
                   </span>
                   <Film
-                    className={`w-4 h-4 ${
+                    className={`w-3.5 h-3.5 sm:w-4 sm:h-4 flex-shrink-0 ${
                       isSelected ? "text-white" : "text-zinc-500"
                     }`}
                   />
@@ -127,9 +128,8 @@ export default function ProviderFilterBar({
           })}
         </div>
 
-        {/* Píldoras de Géneros */}
         <div className="pt-2 border-t border-white/5 flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
-          <div className="flex items-center gap-1.5 text-xs font-semibold text-zinc-400 pr-2 flex-shrink-0">
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-zinc-400 pr-1 flex-shrink-0">
             <Layers className="w-3.5 h-3.5 text-netflix-red" />
             <span>Género:</span>
           </div>
@@ -137,9 +137,10 @@ export default function ProviderFilterBar({
             const isSelected = selectedGenreId === genre.id;
             return (
               <button
+                type="button"
                 key={genre.name}
                 onClick={() => onSelectGenre(genre.id)}
-                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold flex-shrink-0 transition border ${
+                className={`px-3 sm:px-3.5 py-1.5 rounded-full text-xs font-semibold flex-shrink-0 transition border ${
                   isSelected
                     ? "bg-white text-black border-white shadow"
                     : "bg-black/40 text-zinc-300 border-white/10 hover:border-white/30 hover:text-white"
