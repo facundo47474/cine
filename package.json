@@ -13,12 +13,18 @@
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate dev",
     "db:seed": "tsx --env-file=.env prisma/seed.ts",
-    "health-check": "tsx --env-file=.env scripts/health-check.ts"
+    "health-check": "tsx --env-file=.env scripts/health-check.ts",
+    "android:sync": "npx cap sync android",
+    "android:open": "npx cap open android",
+    "android:build": "npx cap sync android && cd android && ./gradlew assembleDebug"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
+    "@capacitor/android": "^7.0.1",
+    "@capacitor/cli": "^7.0.1",
+    "@capacitor/core": "^7.0.1",
     "@prisma/client": "^5.22.0",
     "hls.js": "^1.5.17",
     "lucide-react": "^0.454.0",

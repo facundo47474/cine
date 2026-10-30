@@ -54,12 +54,31 @@ export default function SmartVideoPlayer({
   const lastSavedSecRef = useRef<number>(initialProgressSeconds);
   const presentationConnectionRef = useRef<PresentationConnection | null>(null);
 
+  const isBraveBrowser = useMemo(() => {
+    if (typeof window === "undefined") return false;
+
+    const userAgent = navigator.userAgent || "";
+    const braveFlag = Boolean(
+      (navigator as Navigator & { brave?: { isBrave?: boolean } }).brave?.isBrave
+    );
+
+    return userAgent.toLowerCase().includes("brave") || braveFlag;
+  }, []);
+
+  const safeStreams = useMemo(
+    () =>
+      streams.filter(
+        (stream) => !isBraveBrowser || stream.format !== MirrorFormat.EMBED
+      ),
+    [streams, isBraveBrowser]
+  );
+
   const orderedStreams = useMemo(() => {
-    const sorted = [...streams].sort((a, b) => a.priority - b.priority);
+    const sorted = [...safeStreams].sort((a, b) => a.priority - b.priority);
     const matching = sorted.filter((s) => s.language === preferredLanguage);
     const fallback = sorted.filter((s) => s.language !== preferredLanguage);
     return [...matching, ...fallback];
-  }, [streams, preferredLanguage]);
+  }, [safeStreams, preferredLanguage]);
 
   const [activeIndex, setActiveIndex] = useState<number>(0);
   const [allMirrorsDown, setAllMirrorsDown] = useState<boolean>(
@@ -79,9 +98,6 @@ export default function SmartVideoPlayer({
   const currentStream: SignedMirrorStreamDto | undefined =
     orderedStreams[activeIndex];
 
-  /**
-   * Carga e inicialización automática del SDK Oficial de Google Cast.
-   */
   useEffect(() => {
     const initializeCastContext = () => {
       try {
@@ -121,10 +137,6 @@ export default function SmartVideoPlayer({
     }
   }, []);
 
-  /**
-   * Bloqueo de window.open y recuperación automática de foco cuando un anuncio
-   * dentro del iframe intenta desviar al usuario hacia una ventana emergente.
-   */
   useEffect(() => {
     const originalWindowOpen = window.open;
     window.open = () => null;
@@ -145,9 +157,6 @@ export default function SmartVideoPlayer({
     };
   }, []);
 
-  /**
-   * Sincronización con el estado de Pantalla Completa nativa del contenedor.
-   */
   useEffect(() => {
     const handleFullscreenChange = () => {
       const doc = document as FullscreenDocument;
@@ -194,11 +203,7 @@ export default function SmartVideoPlayer({
     }
   }, []);
 
-  /**
-   * Flujo de Transmisión Nativa de 1 Clic (Google Cast SDK + W3C PresentationRequest + AirPlay + RemotePlayback).
-   */
   const handleCastClick = useCallback(async () => {
-    // Caso A: Desconexión inmediata si ya está transmitiendo a la TV
     if (isCasting) {
       try {
         window.cast?.framework?.CastContext.getInstance().endCurrentSession(true);
@@ -220,7 +225,6 @@ export default function SmartVideoPlayer({
 
     const videoEl = videoRef.current;
 
-    // Caso B: Apple AirPlay nativo en Safari / iOS / macOS
     if (videoEl && typeof videoEl.webkitShowPlaybackTargetPicker === "function") {
       try {
         videoEl.webkitShowPlaybackTargetPicker();
@@ -230,7 +234,6 @@ export default function SmartVideoPlayer({
       }
     }
 
-    // Caso C: Stream Directo MP4/HLS con Google Cast SDK
     if (
       currentStream.format !== MirrorFormat.EMBED &&
       window.cast?.framework &&
@@ -274,11 +277,10 @@ export default function SmartVideoPlayer({
           return;
         }
       } catch {
-        // Si el usuario cancela o el receptor requiere PresentationRequest, continuamos
+        // Silencioso
       }
     }
 
-    // Caso D: Stream EMBED o Universal vía W3C PresentationRequest Nativo
     const tvUrl = new URL(currentStream.streamUrl, window.location.origin);
     tvUrl.searchParams.set("tv", "1");
 
@@ -303,7 +305,7 @@ export default function SmartVideoPlayer({
         connection.addEventListener("terminate", handleDisconnect);
         return;
       } catch {
-        // Si el navegador no completó PresentationRequest, intentamos CastContext o RemotePlayback
+        // Silencioso
       }
     }
 
@@ -320,11 +322,10 @@ export default function SmartVideoPlayer({
           return;
         }
       } catch {
-        // Silencioso si el usuario cierra el selector nativo
+        // Silencioso
       }
     }
 
-    // Caso E: Remote Playback API nativa en <video>
     if (videoEl?.remote?.prompt) {
       try {
         await videoEl.remote.prompt();
@@ -334,9 +335,6 @@ export default function SmartVideoPlayer({
     }
   }, [isCasting, currentStream, movieTitle]);
 
-  /**
-   * Escucha el evento personalizado disparado desde la barra de acciones de la película.
-   */
   useEffect(() => {
     const handleExternalCastTrigger = () => {
       void handleCastClick();
@@ -351,10 +349,6 @@ export default function SmartVideoPlayer({
     };
   }, [handleCastClick]);
 
-  /**
-   * Absorbe la primera interacción publicitaria y libera los controles del reproductor,
-   * rearmando el escudo únicamente tras 4 minutos sin interacción.
-   */
   const handleShieldAbsorb = useCallback(() => {
     setShieldActive(false);
     window.focus();
@@ -393,9 +387,6 @@ export default function SmartVideoPlayer({
     [movieId, durationMins]
   );
 
-  /**
-   * Registro periódico de progreso cada 15 segundos para reproductores EMBED.
-   */
   useEffect(() => {
     if (!currentStream || currentStream.format !== MirrorFormat.EMBED) return;
 
@@ -485,11 +476,14 @@ export default function SmartVideoPlayer({
       <div className="w-full aspect-video rounded-2xl bg-zinc-900 border border-white/10 flex flex-col items-center justify-center p-8 text-center space-y-3">
         <AlertTriangle className="w-10 h-10 text-netflix-red" />
         <h3 className="text-base font-bold text-white">
-          Este título no se encuentra disponible en este momento
+          {isBraveBrowser
+            ? "Brave está bloqueando fuentes con anuncios emergentes"
+            : "Este título no se encuentra disponible en este momento"}
         </h3>
         <p className="text-xs text-zinc-400 max-w-md">
-          Intenta nuevamente en unos minutos o explora otra película de nuestro
-          catálogo.
+          {isBraveBrowser
+            ? "Se priorizaron enlaces directos HLS/MP4 para evitar anuncios emergentes. Si no hay reproducción disponible, prueba otro título."
+            : "Intenta nuevamente en unos minutos o explora otra película de nuestro catálogo."}
         </p>
       </div>
     );
@@ -513,8 +507,7 @@ export default function SmartVideoPlayer({
               {`Reproduciendo en ${castDeviceName || "tu Smart TV"}`}
             </h3>
             <p className="text-xs sm:text-sm text-zinc-400">
-              La película se está transmitiendo directamente a la pantalla
-              grande.
+              La película se está transmitiendo directamente a la pantalla grande.
             </p>
           </div>
           <button
@@ -564,7 +557,6 @@ export default function SmartVideoPlayer({
         />
       )}
 
-      {/* Controles flotantes superiores: Transmitir a TV (1-Clic Nativo) y Pantalla Completa */}
       <div className="absolute top-3 right-3 z-20 flex items-center gap-2 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
         <button
           type="button"
