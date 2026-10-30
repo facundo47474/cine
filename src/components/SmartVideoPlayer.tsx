@@ -1,10 +1,23 @@
 "use client";
 
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, {
+  useEffect,
+  useRef,
+  useState,
+  useCallback,
+  useMemo,
+} from "react";
 import Hls from "hls.js";
-import { AlertTriangle, Maximize2, Minimize2 } from "lucide-react";
+import {
+  AlertTriangle,
+  Cast,
+  Maximize2,
+  Minimize2,
+  Tv,
+} from "lucide-react";
 import { SignedMirrorStreamDto } from "@/application/dto/PlaybackStreamDto";
 import { MirrorFormat } from "@/domain/enums/MirrorFormat";
+import { PresentationConnection } from "@/types/cast";
 
 interface SmartVideoPlayerProps {
   movieId: string;
@@ -12,11 +25,11 @@ interface SmartVideoPlayerProps {
   durationMins: number;
   streams: SignedMirrorStreamDto[];
   initialProgressSeconds: number;
+  preferredLanguage?: "Latino" | "Inglés (Sub)";
 }
 
 interface FullscreenContainerElement extends HTMLDivElement {
   webkitRequestFullscreen?: () => Promise<void> | void;
-  msRequestFullscreen?: () => Promise<void> | void;
 }
 
 interface FullscreenDocument extends Document {
@@ -24,29 +37,338 @@ interface FullscreenDocument extends Document {
   webkitExitFullscreen?: () => Promise<void> | void;
 }
 
+const GOOGLE_CAST_SDK_URL =
+  "https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1";
+
 export default function SmartVideoPlayer({
   movieId,
   movieTitle,
   durationMins,
   streams,
   initialProgressSeconds,
+  preferredLanguage = "Latino",
 }: SmartVideoPlayerProps) {
-  const playerContainerRef = useRef<FullscreenContainerElement | null>(null);
+  const containerRef = useRef<FullscreenContainerElement | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const lastSavedSecRef = useRef<number>(initialProgressSeconds);
+  const presentationConnectionRef = useRef<PresentationConnection | null>(null);
 
+  const orderedStreams = useMemo(() => {
+    const sorted = [...streams].sort((a, b) => a.priority - b.priority);
+    const matching = sorted.filter((s) => s.language === preferredLanguage);
+    const fallback = sorted.filter((s) => s.language !== preferredLanguage);
+    return [...matching, ...fallback];
+  }, [streams, preferredLanguage]);
+
+  const [activeIndex, setActiveIndex] = useState<number>(0);
   const [allMirrorsDown, setAllMirrorsDown] = useState<boolean>(
-    streams.length === 0
+    orderedStreams.length === 0
   );
+  const [shieldActive, setShieldActive] = useState<boolean>(true);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
-  const [isCssFullscreen, setIsCssFullscreen] = useState<boolean>(false);
+  const [isCasting, setIsCasting] = useState<boolean>(false);
+  const [castDeviceName, setCastDeviceName] = useState<string | null>(null);
 
   useEffect(() => {
-    setAllMirrorsDown(streams.length === 0);
-  }, [streams]);
+    setActiveIndex(0);
+    setAllMirrorsDown(orderedStreams.length === 0);
+    setShieldActive(true);
+  }, [orderedStreams, preferredLanguage]);
 
-  // Única opción activa (Opción 1 - Streamwish)
-  const currentStream: SignedMirrorStreamDto | undefined = streams[0];
+  const currentStream: SignedMirrorStreamDto | undefined =
+    orderedStreams[activeIndex];
+
+  /**
+   * Carga e inicialización automática del SDK Oficial de Google Cast.
+   */
+  useEffect(() => {
+    const initializeCastContext = () => {
+      try {
+        const castFramework = window.cast?.framework;
+        const chromeCast = window.chrome?.cast;
+        if (!castFramework || !chromeCast) return;
+
+        castFramework.CastContext.getInstance().setOptions({
+          receiverApplicationId:
+            chromeCast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
+          autoJoinPolicy: chromeCast.AutoJoinPolicy.ORIGIN_SCOPED,
+        });
+      } catch {
+        // Silencioso en navegadores que no implementan Google Cast
+      }
+    };
+
+    window.__onGCastApiAvailable = (isAvailable: boolean) => {
+      if (isAvailable) {
+        initializeCastContext();
+      }
+    };
+
+    if (window.cast?.framework && window.chrome?.cast) {
+      initializeCastContext();
+      return;
+    }
+
+    const existingScript = document.querySelector(
+      `script[src="${GOOGLE_CAST_SDK_URL}"]`
+    );
+    if (!existingScript) {
+      const script = document.createElement("script");
+      script.src = GOOGLE_CAST_SDK_URL;
+      script.async = true;
+      document.head.appendChild(script);
+    }
+  }, []);
+
+  /**
+   * Bloqueo de window.open y recuperación automática de foco cuando un anuncio
+   * dentro del iframe intenta desviar al usuario hacia una ventana emergente.
+   */
+  useEffect(() => {
+    const originalWindowOpen = window.open;
+    window.open = () => null;
+
+    const handleWindowBlur = () => {
+      if (document.activeElement === iframeRef.current) {
+        setTimeout(() => {
+          window.focus();
+        }, 50);
+      }
+    };
+
+    window.addEventListener("blur", handleWindowBlur);
+
+    return () => {
+      window.open = originalWindowOpen;
+      window.removeEventListener("blur", handleWindowBlur);
+    };
+  }, []);
+
+  /**
+   * Sincronización con el estado de Pantalla Completa nativa del contenedor.
+   */
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const doc = document as FullscreenDocument;
+      setIsFullscreen(
+        Boolean(doc.fullscreenElement || doc.webkitFullscreenElement)
+      );
+    };
+
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    document.addEventListener(
+      "webkitfullscreenchange",
+      handleFullscreenChange as EventListener
+    );
+
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+      document.removeEventListener(
+        "webkitfullscreenchange",
+        handleFullscreenChange as EventListener
+      );
+    };
+  }, []);
+
+  const handleToggleFullscreen = useCallback(async () => {
+    const container = containerRef.current;
+    const doc = document as FullscreenDocument;
+
+    if (!container) return;
+
+    try {
+      if (doc.fullscreenElement || doc.webkitFullscreenElement) {
+        if (doc.exitFullscreen) {
+          await doc.exitFullscreen();
+        } else if (doc.webkitExitFullscreen) {
+          await doc.webkitExitFullscreen();
+        }
+      } else if (container.requestFullscreen) {
+        await container.requestFullscreen();
+      } else if (container.webkitRequestFullscreen) {
+        await container.webkitRequestFullscreen();
+      }
+    } catch {
+      // Silencioso si el navegador restringe el cambio de fullscreen
+    }
+  }, []);
+
+  /**
+   * Flujo de Transmisión Nativa de 1 Clic (Google Cast SDK + W3C PresentationRequest + AirPlay + RemotePlayback).
+   */
+  const handleCastClick = useCallback(async () => {
+    // Caso A: Desconexión inmediata si ya está transmitiendo a la TV
+    if (isCasting) {
+      try {
+        window.cast?.framework?.CastContext.getInstance().endCurrentSession(true);
+      } catch {
+        // Silencioso
+      }
+      try {
+        presentationConnectionRef.current?.terminate();
+      } catch {
+        // Silencioso
+      }
+      presentationConnectionRef.current = null;
+      setIsCasting(false);
+      setCastDeviceName(null);
+      return;
+    }
+
+    if (!currentStream) return;
+
+    const videoEl = videoRef.current;
+
+    // Caso B: Apple AirPlay nativo en Safari / iOS / macOS
+    if (videoEl && typeof videoEl.webkitShowPlaybackTargetPicker === "function") {
+      try {
+        videoEl.webkitShowPlaybackTargetPicker();
+        return;
+      } catch {
+        // Continúa con la cascada si falla AirPlay
+      }
+    }
+
+    // Caso C: Stream Directo MP4/HLS con Google Cast SDK
+    if (
+      currentStream.format !== MirrorFormat.EMBED &&
+      window.cast?.framework &&
+      window.chrome?.cast
+    ) {
+      try {
+        const castContext = window.cast.framework.CastContext.getInstance();
+        await castContext.requestSession();
+        const session = castContext.getCurrentSession();
+
+        if (session) {
+          const absoluteStreamUrl = new URL(
+            currentStream.streamUrl,
+            window.location.origin
+          ).toString();
+          const contentType =
+            currentStream.format === MirrorFormat.HLS
+              ? "application/x-mpegurl"
+              : "video/mp4";
+
+          const mediaInfo = new window.chrome.cast.media.MediaInfo(
+            absoluteStreamUrl,
+            contentType
+          );
+          const metadata = new window.chrome.cast.media.GenericMediaMetadata();
+          metadata.title = movieTitle;
+          mediaInfo.metadata = metadata;
+
+          const loadRequest = new window.chrome.cast.media.LoadRequest(
+            mediaInfo
+          );
+          loadRequest.autoplay = true;
+          loadRequest.currentTime = lastSavedSecRef.current || 0;
+
+          await session.loadMedia(loadRequest);
+          videoEl?.pause();
+          setCastDeviceName(
+            session.getCastDevice()?.friendlyName || "tu Smart TV"
+          );
+          setIsCasting(true);
+          return;
+        }
+      } catch {
+        // Si el usuario cancela o el receptor requiere PresentationRequest, continuamos
+      }
+    }
+
+    // Caso D: Stream EMBED o Universal vía W3C PresentationRequest Nativo
+    const tvUrl = new URL(currentStream.streamUrl, window.location.origin);
+    tvUrl.searchParams.set("tv", "1");
+
+    if (typeof window.PresentationRequest === "function") {
+      try {
+        const presentationRequest = new window.PresentationRequest([
+          tvUrl.toString(),
+        ]);
+        const connection = await presentationRequest.start();
+
+        presentationConnectionRef.current = connection;
+        setCastDeviceName("tu Smart TV");
+        setIsCasting(true);
+
+        const handleDisconnect = () => {
+          presentationConnectionRef.current = null;
+          setIsCasting(false);
+          setCastDeviceName(null);
+        };
+
+        connection.addEventListener("close", handleDisconnect);
+        connection.addEventListener("terminate", handleDisconnect);
+        return;
+      } catch {
+        // Si el navegador no completó PresentationRequest, intentamos CastContext o RemotePlayback
+      }
+    }
+
+    if (window.cast?.framework) {
+      try {
+        const castContext = window.cast.framework.CastContext.getInstance();
+        await castContext.requestSession();
+        const session = castContext.getCurrentSession();
+        if (session) {
+          setCastDeviceName(
+            session.getCastDevice()?.friendlyName || "tu Smart TV"
+          );
+          setIsCasting(true);
+          return;
+        }
+      } catch {
+        // Silencioso si el usuario cierra el selector nativo
+      }
+    }
+
+    // Caso E: Remote Playback API nativa en <video>
+    if (videoEl?.remote?.prompt) {
+      try {
+        await videoEl.remote.prompt();
+      } catch {
+        // Silencioso
+      }
+    }
+  }, [isCasting, currentStream, movieTitle]);
+
+  /**
+   * Escucha el evento personalizado disparado desde la barra de acciones de la película.
+   */
+  useEffect(() => {
+    const handleExternalCastTrigger = () => {
+      void handleCastClick();
+    };
+
+    window.addEventListener("piloto:trigger-cast", handleExternalCastTrigger);
+    return () => {
+      window.removeEventListener(
+        "piloto:trigger-cast",
+        handleExternalCastTrigger
+      );
+    };
+  }, [handleCastClick]);
+
+  /**
+   * Absorbe la primera interacción publicitaria y libera los controles del reproductor,
+   * rearmando el escudo únicamente tras 4 minutos sin interacción.
+   */
+  const handleShieldAbsorb = useCallback(() => {
+    setShieldActive(false);
+    window.focus();
+  }, []);
+
+  useEffect(() => {
+    if (shieldActive) return;
+
+    const rearmTimer = setTimeout(() => {
+      setShieldActive(true);
+    }, 240_000);
+
+    return () => clearTimeout(rearmTimer);
+  }, [shieldActive]);
 
   const saveWatchProgress = useCallback(
     async (currentSeconds: number, totalDurationSeconds: number) => {
@@ -71,6 +393,9 @@ export default function SmartVideoPlayer({
     [movieId, durationMins]
   );
 
+  /**
+   * Registro periódico de progreso cada 15 segundos para reproductores EMBED.
+   */
   useEffect(() => {
     if (!currentStream || currentStream.format !== MirrorFormat.EMBED) return;
 
@@ -88,113 +413,30 @@ export default function SmartVideoPlayer({
     return () => clearInterval(interval);
   }, [currentStream, durationMins, saveWatchProgress]);
 
-  // Sincronizar estado con eventos de Fullscreen nativo (Android / Desktop / iPadOS)
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      const doc = document as FullscreenDocument;
-      const active = Boolean(
-        doc.fullscreenElement || doc.webkitFullscreenElement
-      );
-      setIsFullscreen(active);
-      if (!active) {
-        try {
-          if (screen.orientation && "unlock" in screen.orientation) {
-            screen.orientation.unlock();
-          }
-        } catch {
-          // Ignorar en navegadores que no soportan orientation unlock
-        }
-      }
-    };
-
-    document.addEventListener("fullscreenchange", handleFullscreenChange);
-    document.addEventListener(
-      "webkitfullscreenchange",
-      handleFullscreenChange as EventListener
-    );
-
-    return () => {
-      document.removeEventListener("fullscreenchange", handleFullscreenChange);
-      document.removeEventListener(
-        "webkitfullscreenchange",
-        handleFullscreenChange as EventListener
-      );
-    };
-  }, []);
-
-  // Bloquear el scroll del body cuando se activa el modo pantalla completa en iOS (CSS fallback)
-  useEffect(() => {
-    if (isCssFullscreen) {
-      document.body.style.overflow = "hidden";
-      document.body.style.touchAction = "none";
-    } else {
-      document.body.style.overflow = "";
-      document.body.style.touchAction = "";
-    }
-    return () => {
-      document.body.style.overflow = "";
-      document.body.style.touchAction = "";
-    };
-  }, [isCssFullscreen]);
-
-  const toggleFullscreen = useCallback(async () => {
-    const container = playerContainerRef.current;
-    const doc = document as FullscreenDocument;
-
-    // Salir si ya está en pantalla completa (nativa o CSS iOS)
-    if (isFullscreen || isCssFullscreen) {
-      if (doc.fullscreenElement && doc.exitFullscreen) {
-        await doc.exitFullscreen().catch(() => {});
-      } else if (doc.webkitFullscreenElement && doc.webkitExitFullscreen) {
-        await doc.webkitExitFullscreen();
-      }
-      setIsCssFullscreen(false);
-      setIsFullscreen(false);
-      return;
-    }
-
-    if (!container) return;
-
-    try {
-      if (container.requestFullscreen) {
-        await container.requestFullscreen();
-        try {
-          const orientation = screen.orientation as unknown as {
-            lock?: (mode: string) => Promise<void>;
-          };
-          if (orientation?.lock) {
-            await orientation.lock("landscape").catch(() => {});
-          }
-        } catch {
-          // Ignorar si el dispositivo no permite bloqueo de orientación
-        }
-        return;
-      }
-
-      if (container.webkitRequestFullscreen) {
-        await container.webkitRequestFullscreen();
-        return;
-      }
-
-      // Fallback para iOS Safari (iPhone) donde requestFullscreen en contenedores de iframe no está disponible
-      setIsCssFullscreen(true);
-    } catch {
-      setIsCssFullscreen(true);
-    }
-  }, [isFullscreen, isCssFullscreen]);
-
   const handleStreamError = useCallback(
     (failedStream: SignedMirrorStreamDto) => {
       fetch(`/api/mirrors/${failedStream.mirrorId}/report`, {
         method: "POST",
       }).catch(() => {});
-      setAllMirrorsDown(true);
+
+      const nextIndex = activeIndex + 1;
+      if (nextIndex < orderedStreams.length) {
+        setActiveIndex(nextIndex);
+      } else {
+        setAllMirrorsDown(true);
+      }
     },
-    []
+    [activeIndex, orderedStreams.length]
   );
 
   useEffect(() => {
-    if (!currentStream || currentStream.format === MirrorFormat.EMBED) return;
+    if (
+      isCasting ||
+      !currentStream ||
+      currentStream.format === MirrorFormat.EMBED
+    ) {
+      return;
+    }
 
     const videoElement = videoRef.current;
     if (!videoElement) return;
@@ -236,74 +478,123 @@ export default function SmartVideoPlayer({
         hlsInstance.destroy();
       }
     };
-  }, [currentStream, initialProgressSeconds, handleStreamError]);
+  }, [isCasting, currentStream, initialProgressSeconds, handleStreamError]);
 
   if (allMirrorsDown || !currentStream) {
     return (
-      <div className="w-full aspect-video rounded-xl sm:rounded-2xl bg-zinc-900 border border-white/10 flex flex-col items-center justify-center p-6 sm:p-8 text-center space-y-3">
-        <AlertTriangle className="w-9 h-9 sm:w-10 sm:h-10 text-netflix-red" />
-        <h3 className="text-sm sm:text-base font-bold text-white">
+      <div className="w-full aspect-video rounded-2xl bg-zinc-900 border border-white/10 flex flex-col items-center justify-center p-8 text-center space-y-3">
+        <AlertTriangle className="w-10 h-10 text-netflix-red" />
+        <h3 className="text-base font-bold text-white">
           Este título no se encuentra disponible en este momento
         </h3>
         <p className="text-xs text-zinc-400 max-w-md">
-          Intenta nuevamente en unos minutos o explora otra película de nuestro catálogo.
+          Intenta nuevamente en unos minutos o explora otra película de nuestro
+          catálogo.
         </p>
       </div>
     );
   }
 
-  const activeFull = isFullscreen || isCssFullscreen;
-
   return (
-    <div className="w-full">
-      <div
-        ref={playerContainerRef}
-        className={
-          activeFull
-            ? "fixed inset-0 z-[9999] w-screen h-[100dvh] bg-black flex items-center justify-center"
-            : "relative w-full aspect-video rounded-xl sm:rounded-2xl overflow-hidden bg-black border border-white/10 shadow-2xl"
-        }
-      >
-        {currentStream.format === MirrorFormat.EMBED ? (
+    <div
+      ref={containerRef}
+      onMouseEnter={() => {
+        if (shieldActive) setShieldActive(false);
+      }}
+      className="group relative w-full aspect-video rounded-2xl overflow-hidden bg-black border border-white/10 shadow-2xl"
+    >
+      {isCasting ? (
+        <div className="w-full h-full bg-zinc-950 flex flex-col items-center justify-center p-6 text-center space-y-4 select-none">
+          <div className="w-16 h-16 rounded-full bg-netflix-red/15 border border-netflix-red/40 flex items-center justify-center animate-pulse">
+            <Tv className="w-8 h-8 text-netflix-red" />
+          </div>
+          <div className="space-y-1.5 max-w-md">
+            <h3 className="text-lg sm:text-xl font-black text-white tracking-tight">
+              {`Reproduciendo en ${castDeviceName || "tu Smart TV"}`}
+            </h3>
+            <p className="text-xs sm:text-sm text-zinc-400">
+              La película se está transmitiendo directamente a la pantalla
+              grande.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleCastClick}
+            className="mt-2 inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-netflix-red hover:bg-red-700 text-white text-xs sm:text-sm font-bold transition shadow-lg"
+          >
+            <Cast className="w-4 h-4" />
+            <span>Desconectar de la TV</span>
+          </button>
+        </div>
+      ) : currentStream.format === MirrorFormat.EMBED ? (
+        <>
           <iframe
+            ref={iframeRef}
             key={currentStream.mirrorId}
             src={currentStream.streamUrl}
             title={movieTitle}
             className="w-full h-full border-0"
-            allow="autoplay *; fullscreen *; picture-in-picture *; encrypted-media *; accelerometer *; gyroscope *"
+            allow="autoplay *; fullscreen *; picture-in-picture *; encrypted-media *"
             allowFullScreen
-            // @ts-expect-error Atributos legacy requeridos por WebKit en iOS/Android WebView
-            webkitallowfullscreen="true"
-            mozallowfullscreen="true"
-            playsInline
             onError={() => handleStreamError(currentStream)}
           />
-        ) : (
-          <video
-            key={currentStream.mirrorId}
-            ref={videoRef}
-            controls
-            playsInline
-            webkit-playsinline="true"
-            className="w-full h-full bg-black"
-            onTimeUpdate={(e) => {
-              const el = e.currentTarget;
-              saveWatchProgress(el.currentTime, el.duration);
-            }}
-            onError={() => handleStreamError(currentStream)}
-          />
-        )}
 
-        {/* Botón auxiliar de pantalla completa para iOS Safari y Android */}
+          {shieldActive && (
+            <div
+              onClick={handleShieldAbsorb}
+              onTouchStart={handleShieldAbsorb}
+              className="absolute inset-x-0 top-0 h-10 z-10 bg-transparent pointer-events-auto"
+              aria-hidden="true"
+            />
+          )}
+        </>
+      ) : (
+        <video
+          key={currentStream.mirrorId}
+          ref={videoRef}
+          controls
+          playsInline
+          x-webkit-airplay="allow"
+          className="w-full h-full bg-black"
+          onTimeUpdate={(e) => {
+            const el = e.currentTarget;
+            saveWatchProgress(el.currentTime, el.duration);
+          }}
+          onError={() => handleStreamError(currentStream)}
+        />
+      )}
+
+      {/* Controles flotantes superiores: Transmitir a TV (1-Clic Nativo) y Pantalla Completa */}
+      <div className="absolute top-3 right-3 z-20 flex items-center gap-2 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
         <button
           type="button"
-          onClick={toggleFullscreen}
-          aria-label={
-            activeFull ? "Salir de pantalla completa" : "Pantalla completa"
-          }
-          className="absolute top-3 right-3 z-30 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-black/75 hover:bg-netflix-red text-white text-xs font-semibold backdrop-blur-md border border-white/20 shadow-lg transition active:scale-95"
+          onClick={handleCastClick}
+          title={isCasting ? "Desconectar de la TV" : "Transmitir a TV"}
+          aria-label={isCasting ? "Desconectar de la TV" : "Transmitir a TV"}
+          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-white text-xs font-semibold border border-white/15 backdrop-blur-md shadow-lg transition ${
+            isCasting
+              ? "bg-netflix-red hover:bg-red-700"
+              : "bg-black/75 hover:bg-netflix-red"
+          }`}
         >
-          {activeFull ? (
+          <Cast className="w-3.5 h-3.5" />
+          <span className="hidden sm:inline">
+            {isCasting ? "Conectado a TV" : "Transmitir a TV"}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={handleToggleFullscreen}
+          title={
+            isFullscreen ? "Salir de pantalla completa" : "Pantalla completa"
+          }
+          aria-label={
+            isFullscreen ? "Salir de pantalla completa" : "Pantalla completa"
+          }
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-black/75 hover:bg-netflix-red text-white text-xs font-semibold border border-white/15 backdrop-blur-md shadow-lg transition"
+        >
+          {isFullscreen ? (
             <>
               <Minimize2 className="w-3.5 h-3.5" />
               <span>Salir</span>
@@ -311,9 +602,7 @@ export default function SmartVideoPlayer({
           ) : (
             <>
               <Maximize2 className="w-3.5 h-3.5" />
-              <span className="hidden xs:inline sm:inline">
-                Pantalla completa
-              </span>
+              <span>Pantalla completa</span>
             </>
           )}
         </button>

@@ -1,6 +1,7 @@
 import { NextAuthOptions } from "next-auth";
 import GoogleProvider from "next-auth/providers/google";
 import { prisma } from "../database/prismaClient";
+import { welcomeEmailService } from "../notifications/WelcomeEmailService";
 
 export const authOptions: NextAuthOptions = {
   providers: [
@@ -24,23 +25,55 @@ export const authOptions: NextAuthOptions = {
     async signIn({ user, account }) {
       if (!user.email) return false;
 
+      const normalizedEmail = user.email.trim().toLowerCase();
+      const rawAllowedEmails = process.env.ALLOWED_EMAILS?.trim();
+
+      if (rawAllowedEmails) {
+        const allowedList = rawAllowedEmails
+          .split(",")
+          .map((email) => email.trim().toLowerCase())
+          .filter(Boolean);
+
+        if (allowedList.length > 0 && !allowedList.includes(normalizedEmail)) {
+          console.warn(
+            `[NextAuth signIn] Acceso denegado para correo fuera de ALLOWED_EMAILS: ${normalizedEmail}`
+          );
+          return false;
+        }
+      }
+
       try {
-        await prisma.user.upsert({
+        const existingUser = await prisma.user.findUnique({
           where: { email: user.email },
-          update: {
-            name: user.name ?? undefined,
-            avatarUrl: user.image ?? undefined,
-            googleId: account?.providerAccountId ?? undefined,
-            lastLoginAt: new Date(),
-          },
-          create: {
-            email: user.email,
-            name: user.name ?? "Usuario",
-            avatarUrl: user.image ?? null,
-            googleId: account?.providerAccountId ?? null,
-            lastLoginAt: new Date(),
-          },
         });
+
+        if (!existingUser) {
+          await prisma.user.create({
+            data: {
+              email: user.email,
+              name: user.name ?? "Usuario",
+              avatarUrl: user.image ?? null,
+              googleId: account?.providerAccountId ?? null,
+              lastLoginAt: new Date(),
+            },
+          });
+
+          void welcomeEmailService.sendWelcomeEmail({
+            toEmail: user.email,
+            userName: user.name,
+          });
+        } else {
+          await prisma.user.update({
+            where: { email: user.email },
+            data: {
+              name: user.name ?? undefined,
+              avatarUrl: user.image ?? undefined,
+              googleId: account?.providerAccountId ?? undefined,
+              lastLoginAt: new Date(),
+            },
+          });
+        }
+
         return true;
       } catch (error) {
         console.error("[NextAuth signIn] Error registrando usuario:", error);
@@ -68,4 +101,3 @@ export const authOptions: NextAuthOptions = {
     },
   },
 };
-

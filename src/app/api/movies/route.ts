@@ -1,10 +1,36 @@
 import { NextRequest, NextResponse } from "next/server";
 import { catalogService } from "@/infrastructure/container";
+import {
+  apiRateLimiter,
+  getClientIp,
+} from "@/infrastructure/security/RateLimiter";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
   try {
+    const clientIp = getClientIp(request);
+    const rateLimit = apiRateLimiter.checkLimit(
+      `movies:${clientIp}`,
+      90,
+      60_000
+    );
+
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "Demasiadas peticiones al catálogo. Por favor aguarda unos segundos.",
+        },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(rateLimit.retryAfterSeconds),
+          },
+        }
+      );
+    }
+
     const { searchParams } = new URL(request.url);
     const mode = searchParams.get("mode");
 

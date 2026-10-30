@@ -2,14 +2,40 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { catalogService, watchHistoryService } from "@/infrastructure/container";
 import { authOptions } from "@/infrastructure/auth/authOptions";
+import {
+  apiRateLimiter,
+  getClientIp,
+} from "@/infrastructure/security/RateLimiter";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
+    const clientIp = getClientIp(request);
+    const rateLimit = apiRateLimiter.checkLimit(
+      `play:${clientIp}`,
+      90,
+      60_000
+    );
+
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "Demasiadas peticiones. Intenta nuevamente en unos segundos.",
+        },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(rateLimit.retryAfterSeconds),
+          },
+        }
+      );
+    }
+
     const session = await getServerSession(authOptions);
     const userId = (session?.user as { id?: string } | undefined)?.id;
 

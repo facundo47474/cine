@@ -217,24 +217,30 @@ export class CatalogService {
   }
 
   /**
-   * Verifica si una película guardada en la BD tiene más de 1 servidor, enlaces antiguos
-   * o el contenedor intermedio de embed69 sin extraer hacia Streamwish directo.
+   * Determina si una película requiere auto-curación de mirrors:
+   * - No tiene mirrors reproducibles
+   * - No cuenta con la opción multilingüe "Inglés (Sub)"
+   * - Utiliza mirrors antiguos sin priorización de Streamwish o dominios deprecados
    */
   private needsAutomaticMirrorUpgrade(movie: Movie): boolean {
     if (!movie.tmdbId) return false;
-    const playable = movie.getPlayableMirrors();
-    if (playable.length !== 1) return true;
 
-    const singleMirror = playable[0];
-    if (singleMirror.serverName !== "Streamwish") return true;
-    if (singleMirror.rawUrl.includes("embed69.org")) return true;
-    if (
-      /(vidsrc|vidlink|multiembed|2embed|autoembed|embed\.su|youtube\.com)/i.test(
-        singleMirror.rawUrl
-      )
-    ) {
-      return true;
-    }
+    const playable = movie.getPlayableMirrors();
+    if (playable.length <= 1) return true;
+
+    const hasEnglishSub = playable.some((m) => m.language === "Inglés (Sub)");
+    if (!hasEnglishSub) return true;
+
+    const hasLegacyOrDeprecatedMirror = playable.some(
+      (m) =>
+        m.rawUrl.includes("vidlink.pro") ||
+        m.rawUrl.includes("autoembed.cc") ||
+        m.rawUrl.includes("vidsrc.cc") ||
+        (m.rawUrl.includes("embed69.org") &&
+          !m.rawUrl.includes("prefer=streamwish"))
+    );
+
+    if (hasLegacyOrDeprecatedMirror) return true;
 
     return false;
   }
@@ -277,7 +283,7 @@ export class CatalogService {
           rating: metadata.rating,
           qualityBadge: "HD",
           genres: metadata.genres,
-          mirrors: defaultMirrors.slice(0, 1),
+          mirrors: defaultMirrors,
         });
       }
     } else {
@@ -302,15 +308,14 @@ export class CatalogService {
           rating: movie.rating,
           qualityBadge: movie.qualityBadge,
           genres: movie.genres,
-          mirrors: freshMirrors.slice(0, 1),
+          mirrors: freshMirrors,
         });
       }
     }
 
     if (!movie) return null;
 
-    // Entregar exclusivamente la Opción 1
-    const playableMirrors = movie.getPlayableMirrors().slice(0, 1);
+    const playableMirrors = movie.getPlayableMirrors();
     const ttlHours = Number(process.env.STREAM_TOKEN_TTL_HOURS || "4");
     const expiresAt = new Date(
       Date.now() + ttlHours * 3600 * 1000

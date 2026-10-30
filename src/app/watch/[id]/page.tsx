@@ -3,7 +3,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { ArrowLeft, Clock, Film, Star } from "lucide-react";
+import { ArrowLeft, Cast, Clock, Film, Languages, Star } from "lucide-react";
 import SmartVideoPlayer from "@/components/SmartVideoPlayer";
 import { MoviePlaybackDto } from "@/application/dto/PlaybackStreamDto";
 
@@ -15,6 +15,9 @@ export default function WatchMoviePage() {
   const [savedProgress, setSavedProgress] = useState<number>(0);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [selectedLanguage, setSelectedLanguage] = useState<
+    "Latino" | "Inglés (Sub)"
+  >("Latino");
 
   const loadPlayback = useCallback(async () => {
     setLoading(true);
@@ -40,6 +43,24 @@ export default function WatchMoviePage() {
       loadPlayback();
     }
   }, [movieId, loadPlayback]);
+
+  const hasLatino =
+    movie?.streams.some((s) => s.language === "Latino") ?? false;
+  const hasEnglish =
+    movie?.streams.some((s) => s.language === "Inglés (Sub)") ?? false;
+
+  useEffect(() => {
+    if (!movie) return;
+    if (!hasLatino && hasEnglish) {
+      setSelectedLanguage("Inglés (Sub)");
+    } else if (hasLatino) {
+      setSelectedLanguage("Latino");
+    }
+  }, [movie, hasLatino, hasEnglish]);
+
+  const handleNativeCastTrigger = useCallback(() => {
+    window.dispatchEvent(new CustomEvent("piloto:trigger-cast"));
+  }, []);
 
   return (
     <div className="min-h-screen bg-[#141414] text-white pb-12 sm:pb-16">
@@ -86,6 +107,7 @@ export default function WatchMoviePage() {
               initialProgressSeconds={savedProgress}
               movieId={movie.id}
               movieTitle={movie.title}
+              preferredLanguage={selectedLanguage}
               streams={movie.streams}
             />
 
@@ -100,19 +122,66 @@ export default function WatchMoviePage() {
               </div>
 
               <div className="md:col-span-3 space-y-3 sm:space-y-4">
-                <div className="flex flex-wrap items-center gap-2.5 sm:gap-3 text-xs font-semibold">
-                  <span className="px-2.5 py-0.5 rounded bg-netflix-red text-white">
-                    {movie.qualityBadge}
-                  </span>
-                  <span className="flex items-center gap-1 text-amber-400">
-                    <Star className="w-4 h-4 fill-amber-400" />
-                    {movie.rating.toFixed(1)}
-                  </span>
-                  <span className="text-zinc-300">{movie.releaseYear}</span>
-                  <span className="flex items-center gap-1 text-zinc-300">
-                    <Clock className="w-3.5 h-3.5" />
-                    {movie.durationMins} min
-                  </span>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-2.5 sm:gap-3 text-xs font-semibold">
+                    <span className="px-2.5 py-0.5 rounded bg-netflix-red text-white">
+                      {movie.qualityBadge}
+                    </span>
+                    <span className="flex items-center gap-1 text-amber-400">
+                      <Star className="w-4 h-4 fill-amber-400" />
+                      {movie.rating.toFixed(1)}
+                    </span>
+                    <span className="text-zinc-300">{movie.releaseYear}</span>
+                    <span className="flex items-center gap-1 text-zinc-300">
+                      <Clock className="w-3.5 h-3.5" />
+                      {movie.durationMins} min
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    {(hasLatino || hasEnglish) && (
+                      <div className="inline-flex items-center gap-1.5 bg-zinc-900 border border-white/10 rounded-full p-1">
+                        <span className="pl-2.5 pr-1 text-zinc-400 flex items-center">
+                          <Languages className="w-3.5 h-3.5 text-netflix-red" />
+                        </span>
+                        {hasLatino && (
+                          <button
+                            type="button"
+                            onClick={() => setSelectedLanguage("Latino")}
+                            className={`px-3 py-1 rounded-full text-xs transition ${
+                              selectedLanguage === "Latino"
+                                ? "bg-netflix-red text-white font-bold shadow"
+                                : "text-zinc-400 hover:text-white"
+                            }`}
+                          >
+                            Audio Latino
+                          </button>
+                        )}
+                        {hasEnglish && (
+                          <button
+                            type="button"
+                            onClick={() => setSelectedLanguage("Inglés (Sub)")}
+                            className={`px-3 py-1 rounded-full text-xs transition ${
+                              selectedLanguage === "Inglés (Sub)"
+                                ? "bg-netflix-red text-white font-bold shadow"
+                                : "text-zinc-400 hover:text-white"
+                            }`}
+                          >
+                            Inglés (Sub)
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={handleNativeCastTrigger}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-zinc-900 hover:bg-netflix-red border border-white/10 text-xs font-semibold text-zinc-200 hover:text-white transition"
+                    >
+                      <Cast className="w-3.5 h-3.5 text-netflix-red group-hover:text-white" />
+                      <span>Transmitir a TV</span>
+                    </button>
+                  </div>
                 </div>
 
                 <h1 className="text-xl sm:text-3xl font-black text-white leading-tight">
