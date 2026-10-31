@@ -41,7 +41,7 @@ function LoginCard() {
   const isRegister = mode === "register";
 
   return (
-    <div className="relative z-10 w-full max-w-[390px] bg-black/80 backdrop-blur-md rounded-xl p-8 sm:p-10 border border-white/10 shadow-2xl space-y-6">
+    <div className="relative z-10 w-full max-w-[390px] bg-black/75 backdrop-blur-sm rounded-lg p-8 sm:p-10 shadow-2xl shadow-black/60 space-y-6">
       <div className="space-y-1.5">
         <h1 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">
           {isRegister ? "Crear cuenta" : "Iniciar sesión"}
@@ -142,32 +142,40 @@ function LoginCard() {
   );
 }
 
+// Mosaico de 54 pósters (cada póster se repite 3 veces). Saltar de a 7
+// (coprimo con 18) evita que el mismo póster quede pegado a sí mismo y
+// alcanza para cubrir pantallas altas aunque el collage esté rotado.
+const COLLAGE_TILES = Array.from(
+  { length: 54 },
+  (_, i) => TRENDING_POSTERS[(i * 7) % TRENDING_POSTERS.length]
+);
+
 export default function LoginPage() {
   return (
     <div className="relative min-h-screen w-full bg-black flex flex-col justify-between overflow-hidden select-none">
-      {/* Collage de pósters reales en tendencia estilo Netflix */}
+      {/* Collage de pósters en tendencia estilo Netflix: imágenes nítidas y bien visibles */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3 sm:gap-4 -rotate-6 scale-125 opacity-45 transform-gpu">
-          {TRENDING_POSTERS.map((posterUrl, idx) => (
+        <div className="absolute left-1/2 top-1/2 w-[140%] -translate-x-1/2 -translate-y-1/2 -rotate-[8deg] grid grid-cols-5 sm:grid-cols-7 lg:grid-cols-9 gap-2 sm:gap-3 transform-gpu">
+          {COLLAGE_TILES.map((posterUrl, idx) => (
             <div
               key={idx}
-              className="aspect-[2/3] rounded-lg overflow-hidden bg-zinc-900 shadow-lg"
+              className="aspect-[2/3] rounded-md overflow-hidden bg-zinc-900"
             >
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={posterUrl}
                 alt=""
                 loading="eager"
+                decoding="async"
                 className="w-full h-full object-cover"
               />
             </div>
           ))}
         </div>
 
-        {/* Viñeta oscura estilo Netflix para resaltar el cuadro de login */}
-        <div className="absolute inset-0 bg-black/55" />
-        <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-black/80" />
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,transparent_10%,rgba(0,0,0,0.85)_100%)]" />
+        {/* Capa oscura suave: los pósters se siguen viendo y el formulario se lee bien */}
+        <div className="absolute inset-0 bg-black/40" />
+        <div className="absolute inset-0 bg-gradient-to-b from-black/70 via-transparent to-black/70" />
       </div>
 
       {/* Header superior con el logo tipo Netflix */}
@@ -186,7 +194,7 @@ export default function LoginPage() {
       <main className="relative z-10 flex-1 flex items-center justify-center px-4 py-8">
         <Suspense
           fallback={
-            <div className="w-full max-w-[390px] bg-black/80 backdrop-blur-md rounded-xl p-10 border border-white/10 flex items-center justify-center">
+            <div className="w-full max-w-[390px] bg-black/75 backdrop-blur-sm rounded-lg p-10 flex items-center justify-center">
               <Loader2 className="w-6 h-6 animate-spin text-netflix-red" />
             </div>
           }
