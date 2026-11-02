@@ -57,12 +57,21 @@ export default function MovieCard({
         </div>
 
         {typeof progressPercentage === "number" && progressPercentage > 0 && (
-          <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-zinc-700">
-            <div
-              className="h-full bg-netflix-red transition-all"
-              style={{ width: `${Math.min(100, progressPercentage)}%` }}
-            />
-          </div>
+          <>
+            <div className="absolute bottom-2.5 left-2 z-10">
+              <span className="px-1.5 py-0.5 rounded bg-black/80 border border-white/15 text-[10px] font-bold text-zinc-200 backdrop-blur-sm">
+                {Math.min(100, progressPercentage)}%
+              </span>
+            </div>
+            <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-zinc-700/95">
+              <div
+                className="h-full bg-netflix-red transition-all duration-300"
+                style={{
+                  width: `${Math.max(6, Math.min(100, progressPercentage))}%`,
+                }}
+              />
+            </div>
+          </>
         )}
       </div>
 

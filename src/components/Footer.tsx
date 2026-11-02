@@ -20,8 +20,7 @@ export default function Footer() {
               </span>
             </Link>
             <p className="text-xs text-zinc-400 max-w-sm leading-relaxed">
-              Plataforma privada de streaming bajo demanda con catálogo híbrido,
-              audio dual y sincronización de progreso en la nube.
+              Plataforma de streaming en desarrollo. Puede contener errores ante cualquier inconveninete comunicarse con el soporte.
             </p>
           </div>
 
@@ -37,7 +36,7 @@ export default function Footer() {
               Privacidad de Cuenta
             </a>
             <a
-              href="mailto:soporte@piloto.streaming"
+              href="mailto:facundotomas018@gmail.com"
               className="hover:text-white transition"
             >
               Soporte Técnico

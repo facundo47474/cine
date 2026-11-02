@@ -41,12 +41,24 @@ export default function HomePage() {
     selectedProviderId !== undefined ||
     selectedGenreId !== undefined;
 
+  const refreshContinueWatching = useCallback(async () => {
+    try {
+      const historyRes = await fetch("/api/history", { cache: "no-store" });
+      const historyData = await historyRes.json();
+      if (historyData.ok) {
+        setContinueWatching(historyData.items);
+      }
+    } catch {
+      // Silencioso
+    }
+  }, []);
+
   const fetchHomeAndHistory = useCallback(async () => {
     setLoading(true);
     try {
       const [homeRes, historyRes] = await Promise.all([
-        fetch("/api/movies?mode=home"),
-        fetch("/api/history"),
+        fetch("/api/movies?mode=home", { cache: "no-store" }),
+        fetch("/api/history", { cache: "no-store" }),
       ]);
 
       const homeData = await homeRes.json();
@@ -105,6 +117,22 @@ export default function HomePage() {
   useEffect(() => {
     fetchHomeAndHistory();
   }, [fetchHomeAndHistory]);
+
+  useEffect(() => {
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === "visible") {
+        void refreshContinueWatching();
+      }
+    };
+
+    window.addEventListener("focus", handleVisibilityOrFocus);
+    document.addEventListener("visibilitychange", handleVisibilityOrFocus);
+
+    return () => {
+      window.removeEventListener("focus", handleVisibilityOrFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityOrFocus);
+    };
+  }, [refreshContinueWatching]);
 
   useEffect(() => {
     if (!isExploring) return;

@@ -60,6 +60,20 @@ function appendAutoplayParam(rawUrl: string): string {
   }
 }
 
+function appendResumeTimeParam(rawUrl: string, startSeconds: number): string {
+  if (!startSeconds || startSeconds <= 5) return rawUrl;
+  try {
+    const parsed = new URL(rawUrl);
+    const sec = Math.floor(startSeconds);
+    if (!parsed.hash) {
+      parsed.hash = `t=${sec}`;
+    }
+    return parsed.toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
 function getServerPriorityWeight(servername?: string): number {
   const normalized = (servername || "").toLowerCase();
   if (normalized.includes("streamwish")) return 1;
@@ -329,6 +343,99 @@ async function resolveFallbackFromPlayLatin(
   }
 }
 
+interface StreamwishDirectHlsInfo {
+  hlsUrl: string;
+  posterUrl: string;
+}
+
+/**
+ * Desempaqueta bloques obfuscados con Dean Edwards Packer (`eval(function(p,a,c,k,e,d)...)`)
+ * de forma segura en memoria sin utilizar `eval`.
+ */
+function unpackDeanEdwardsBlock(html: string): string | null {
+  const packerRegex =
+    /eval\(function\(p,a,c,k,e,d\)\{[\s\S]*?\}\('([\s\S]*?)',\s*(\d+),\s*(\d+),\s*'([\s\S]*?)'\.split\('\|'\)\)\)/;
+  const match = html.match(packerRegex);
+  if (!match) return null;
+
+  let payload = match[1].replace(/\\'/g, "'");
+  const radix = Number(match[2]);
+  const count = Number(match[3]);
+  const symtab = match[4].split("|");
+
+  if (!radix || !count || symtab.length === 0) return null;
+
+  for (let i = count - 1; i >= 0; i--) {
+    if (symtab[i]) {
+      payload = payload.replace(
+        new RegExp("\\b" + i.toString(radix) + "\\b", "g"),
+        symtab[i]
+      );
+    }
+  }
+  return payload;
+}
+
+/**
+ * Si el enlace pertenece a Streamwish (`hglink.to`, `audinifer.com`, `vibuxer.com`, `hanerix.com`),
+ * extrae el stream HLS `.m3u8` directo (`hls2`) para permitir:
+ * - Captura 100% automática del segundo exacto (`currentTime` y `seeked`) donde quedó el usuario.
+ * - Reanudación automática en el segundo guardado (`startPosition`).
+ * - Cero anuncios ni popups.
+ */
+async function extractStreamwishDirectHls(
+  embedUrl: string
+): Promise<StreamwishDirectHlsInfo | null> {
+  try {
+    const codeMatch = embedUrl.match(/\/e\/([a-zA-Z0-9_-]+)/);
+    if (!codeMatch) return null;
+
+    const isStreamwishHost =
+      /hglink\.to|audinifer\.com|vibuxer\.com|hanerix\.com|streamwish|strwish|wishembed|awish|dwish|mwish|swdyu/i.test(
+        embedUrl
+      );
+    if (!isStreamwishHost) return null;
+
+    const fileCode = codeMatch[1];
+    const mirrorOrigins = ["https://audinifer.com", "https://vibuxer.com"];
+
+    for (const origin of mirrorOrigins) {
+      try {
+        const res = await fetch(`${origin}/e/${fileCode}`, {
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            Referer: "https://hglink.to/",
+          },
+          signal: AbortSignal.timeout(4000),
+        });
+
+        if (!res.ok) continue;
+
+        const html = await res.text();
+        const unpacked = unpackDeanEdwardsBlock(html);
+        if (!unpacked) continue;
+
+        const hls2Match = unpacked.match(/"hls2"\s*:\s*"([^"]+)"/);
+        const posterMatch = unpacked.match(/image\s*:\s*"([^"]+)"/);
+
+        if (hls2Match && hls2Match[1].startsWith("http")) {
+          return {
+            hlsUrl: hls2Match[1],
+            posterUrl: posterMatch?.[1] || "",
+          };
+        }
+      } catch {
+        // Intentar siguiente mirror de Streamwish
+      }
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Endpoint Túnel de Reproducción (/api/stream/[token]).
  * - Valida sesión activa (o token firmado AES-256-GCM en modo receptor Smart TV `tv=1`),
@@ -435,6 +542,7 @@ export async function GET(
     }
 
     let finalEmbedUrl = payload.rawUrl;
+    let isSecondaryServer = false;
 
     if (payload.rawUrl.includes("embed69.org/f/")) {
       // 1. SIEMPRE intentamos iniciar primero extrayendo y desencriptando el servidor Streamwish directo
@@ -453,6 +561,7 @@ export async function GET(
 
         if (fallbackDirectUrl) {
           finalEmbedUrl = fallbackDirectUrl;
+          isSecondaryServer = true;
         } else {
           // 3. Si tampoco hay fuente secundaria para ese IMDb ID, jamás renderizamos el iframe caído de Embed69
           // (evitando la pantalla negra) y notificamos al reproductor padre para saltar al siguiente mirror en <50ms.
@@ -481,17 +590,31 @@ export async function GET(
       }
     }
 
+    const resumeSeconds = Math.max(
+      0,
+      Math.floor(Number(request.nextUrl.searchParams.get("t") || "0") || 0)
+    );
+    const urlWithResume = appendResumeTimeParam(finalEmbedUrl, resumeSeconds);
     const targetIframeUrl = isTvMode
-      ? appendAutoplayParam(finalEmbedUrl)
-      : finalEmbedUrl;
+      ? appendAutoplayParam(urlWithResume)
+      : urlWithResume;
     const escapedRawUrl = escapeHtmlAttribute(targetIframeUrl);
+
+    const streamwishHls = !isSecondaryServer
+      ? await extractStreamwishDirectHls(finalEmbedUrl)
+      : null;
 
     const html = `<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <meta name="referrer" content="origin" />
+  <meta name="referrer" content="${streamwishHls ? "no-referrer" : "origin"}" />
+  ${
+    streamwishHls
+      ? '<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>'
+      : ""
+  }
   <style>
     html, body {
       background: #000;
@@ -502,7 +625,7 @@ export async function GET(
       overflow: hidden;
       ${isTvMode ? "cursor: none;" : ""}
     }
-    iframe {
+    iframe, video {
       width: 100vw;
       height: 100vh;
       border: 0;
@@ -528,8 +651,27 @@ export async function GET(
           try { window.focus(); } catch (e) {}
         }, 50);
       });
-      ${isTvMode
-        ? `
+      window.addEventListener("message", function(event) {
+        try {
+          if (event.source && event.source !== window && event.source !== window.parent) {
+            window.parent.postMessage(event.data, "*");
+          }
+        } catch (e) {}
+      });
+      ${
+        isSecondaryServer
+          ? `
+      try {
+        window.parent.postMessage(
+          { type: "PILOTO_SECONDARY_SERVER_ACTIVE", mirrorId: ${JSON.stringify(payload.mirrorId)} },
+          "*"
+        );
+      } catch (e) {}`
+          : ""
+      }
+      ${
+        isTvMode
+          ? `
       window.addEventListener("DOMContentLoaded", function() {
         try {
           window.focus();
@@ -538,12 +680,88 @@ export async function GET(
           }
         } catch (e) {}
       });`
-        : ""
+          : ""
       }
     })();
   </script>
 </head>
 <body>
+  ${
+    streamwishHls
+      ? `
+  <div id="playerRoot" style="width:100vw;height:100vh;background:#000;">
+    <video
+      id="pilotoVideo"
+      controls
+      playsinline
+      x-webkit-airplay="allow"
+      poster="${escapeHtmlAttribute(streamwishHls.posterUrl)}"
+    ></video>
+  </div>
+  <script>
+    (function() {
+      var video = document.getElementById("pilotoVideo");
+      var root = document.getElementById("playerRoot");
+      var hlsUrl = ${JSON.stringify(streamwishHls.hlsUrl)};
+      var fallbackIframeUrl = ${JSON.stringify(targetIframeUrl)};
+      var startSec = ${resumeSeconds};
+      var switchedToIframe = false;
+
+      function switchToEmbedIframe() {
+        if (switchedToIframe || !root) return;
+        switchedToIframe = true;
+        root.innerHTML = '<iframe src="' + fallbackIframeUrl.replace(/"/g, "&quot;") + '" allow="autoplay *; fullscreen *; picture-in-picture *; encrypted-media *" allowfullscreen webkitallowfullscreen="true" mozallowfullscreen="true" referrerpolicy="origin"></iframe>';
+      }
+
+      function reportTime() {
+        if (!video || switchedToIframe) return;
+        var ct = Math.floor(video.currentTime || 0);
+        var dur = Math.floor(video.duration || 0);
+        if (ct > 0) {
+          try {
+            window.parent.postMessage(
+              {
+                type: "PILOTO_TIME_UPDATE",
+                currentTime: ct,
+                duration: dur > 60 ? dur : undefined
+              },
+              "*"
+            );
+          } catch (e) {}
+        }
+      }
+
+      video.addEventListener("timeupdate", reportTime);
+      video.addEventListener("seeked", reportTime);
+      video.addEventListener("pause", reportTime);
+
+      if (window.Hls && window.Hls.isSupported()) {
+        var hls = new window.Hls({
+          enableWorker: true,
+          startPosition: startSec > 5 ? startSec : -1
+        });
+        hls.loadSource(hlsUrl);
+        hls.attachMedia(video);
+        hls.on(window.Hls.Events.ERROR, function(_ev, data) {
+          if (data && data.fatal) {
+            hls.destroy();
+            switchToEmbedIframe();
+          }
+        });
+      } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        video.src = hlsUrl;
+        video.addEventListener("loadedmetadata", function() {
+          if (startSec > 5) {
+            video.currentTime = startSec;
+          }
+        });
+        video.addEventListener("error", switchToEmbedIframe);
+      } else {
+        switchToEmbedIframe();
+      }
+    })();
+  </script>`
+      : `
   <iframe
     src="${escapedRawUrl}"
     allow="autoplay *; fullscreen *; picture-in-picture *; encrypted-media *"
@@ -551,7 +769,8 @@ export async function GET(
     webkitallowfullscreen="true"
     mozallowfullscreen="true"
     referrerpolicy="origin"
-  ></iframe>
+  ></iframe>`
+  }
 </body>
 </html>`;
 
@@ -560,11 +779,11 @@ export async function GET(
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store, no-cache, must-revalidate",
-        "Referrer-Policy": "same-origin",
+        "Referrer-Policy": streamwishHls ? "no-referrer" : "same-origin",
         "Permissions-Policy":
           "fullscreen=*, autoplay=*, picture-in-picture=*",
         "Content-Security-Policy":
-          "default-src 'self' 'unsafe-inline' data: blob:; frame-src * data: blob:; frame-ancestors 'self'; form-action 'none';",
+          "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; frame-src * data: blob:; frame-ancestors 'self'; form-action 'none';",
       },
     });
   } catch (error) {

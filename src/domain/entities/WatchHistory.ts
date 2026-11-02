@@ -20,11 +20,12 @@ export class WatchHistory {
   get updatedAt(): Date { return this.props.updatedAt; }
 
   public getProgressPercentage(): number {
-    if (this.props.durationSeconds <= 0) return 0;
-    return Math.min(
-      100,
-      Math.round((this.props.progressSeconds / this.props.durationSeconds) * 100)
-    );
+    if (this.props.durationSeconds <= 0 || this.props.progressSeconds <= 0) {
+      return 0;
+    }
+    const rawPercent =
+      (this.props.progressSeconds / this.props.durationSeconds) * 100;
+    return Math.max(1, Math.min(100, Math.round(rawPercent)));
   }
 
   public toObject(): WatchHistoryProps {
