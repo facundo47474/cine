@@ -429,6 +429,32 @@ export default function SmartVideoPlayer({
     [activeIndex, orderedStreams.length]
   );
 
+  /**
+   * Escucha señales de failover instantáneo (`PILOTO_STREAM_ERROR`) emitidas por el túnel
+   * `/api/stream/[token]` cuando un servidor EMBED primario no responde, saltando automáticamente
+   * al siguiente mirror sin dejar jamás la pantalla en negro.
+   */
+  useEffect(() => {
+    if (!currentStream) return;
+
+    const handleTunnelMessage = (event: MessageEvent) => {
+      const payload = event.data as
+        | { type?: string; mirrorId?: string }
+        | undefined;
+      if (
+        payload?.type === "PILOTO_STREAM_ERROR" &&
+        (!payload.mirrorId || payload.mirrorId === currentStream.mirrorId)
+      ) {
+        handleStreamError(currentStream);
+      }
+    };
+
+    window.addEventListener("message", handleTunnelMessage);
+    return () => {
+      window.removeEventListener("message", handleTunnelMessage);
+    };
+  }, [currentStream, handleStreamError]);
+
   useEffect(() => {
     if (
       isCasting ||

@@ -231,13 +231,17 @@ export class CatalogService {
     const hasEnglishSub = playable.some((m) => m.language === "Inglés (Sub)");
     if (!hasEnglishSub) return true;
 
+    const hasStreamwishPrimary = playable.some((m) =>
+      m.serverName.toLowerCase().includes("streamwish")
+    );
+    if (!hasStreamwishPrimary) return true;
+
     const hasLegacyOrDeprecatedMirror = playable.some(
       (m) =>
         m.rawUrl.includes("vidlink.pro") ||
         m.rawUrl.includes("autoembed.cc") ||
         m.rawUrl.includes("vidsrc.cc") ||
-        (m.rawUrl.includes("embed69.org") &&
-          !m.rawUrl.includes("prefer=streamwish"))
+        m.rawUrl.includes("embed69.org")
     );
 
     if (hasLegacyOrDeprecatedMirror) return true;

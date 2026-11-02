@@ -27,6 +27,16 @@ interface Embed69LanguageBlock {
   sortedEmbeds?: Embed69ServerEntry[];
 }
 
+interface PlayLatinSourceEntry {
+  url?: string;
+  server?: string;
+  version?: string;
+}
+
+interface PlayLatinResolveResponse {
+  sources?: PlayLatinSourceEntry[];
+}
+
 function escapeHtmlAttribute(value: string): string {
   return value
     .replace(/&/g, "&amp;")
@@ -224,6 +234,102 @@ async function resolveDirectStreamwishUrlFromEmbed69(
 }
 
 /**
+ * Si Streamwish a través de Embed69 falla (por caída de base de datos 500/502 en Embed69),
+ * intenta resolver al vuelo un servidor secundario directo (Streamwish/Dropload/Filemoon)
+ * para el mismo IMDb ID e idioma antes de disparar failover en el cliente.
+ */
+async function resolveFallbackFromPlayLatin(
+  rawUrl: string
+): Promise<string | null> {
+  try {
+    const imdbMatch = rawUrl.match(/(tt\d+)/i);
+    if (!imdbMatch) return null;
+
+    const imdbId = imdbMatch[1];
+    const parsedUrl = new URL(rawUrl);
+    const requestedLang = (
+      parsedUrl.searchParams.get("lang") || "LAT"
+    ).toUpperCase();
+
+    const pageUrl = `https://playlatinsrc.co/custom/movie/${imdbId}`;
+    const pageRes = await fetch(pageUrl, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+      },
+      signal: AbortSignal.timeout(3500),
+    });
+
+    if (!pageRes.ok) return null;
+
+    const html = await pageRes.text();
+    const tokenMatch = html.match(/data-resolve-token="([^"]+)"/);
+    if (!tokenMatch) return null;
+
+    const resolveRes = await fetch("https://playlatinsrc.co/api/resolve", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Referer: pageUrl,
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+      },
+      body: JSON.stringify({
+        type: "movie",
+        id: imdbId,
+        season: "1",
+        episode: "1",
+        mode: "custom",
+        token: tokenMatch[1],
+      }),
+      signal: AbortSignal.timeout(3500),
+    });
+
+    if (!resolveRes.ok) return null;
+
+    const data = (await resolveRes.json()) as PlayLatinResolveResponse;
+    const sources = Array.isArray(data.sources) ? data.sources : [];
+    if (sources.length === 0) return null;
+
+    const targetVersion =
+      requestedLang === "SUB" || requestedLang === "VOSE"
+        ? "subtitulado"
+        : "latino";
+
+    const candidates = sources.filter(
+      (s) =>
+        Boolean(s.url && s.url.startsWith("http")) &&
+        ((s.version || "").toLowerCase() === targetVersion ||
+          (targetVersion === "latino" &&
+            (s.version || "").toLowerCase() === "castellano"))
+    );
+
+    const pool =
+      candidates.length > 0
+        ? candidates
+        : sources.filter((s) => Boolean(s.url && s.url.startsWith("http")));
+
+    if (pool.length === 0) return null;
+
+    pool.sort((a, b) => {
+      const score = (srv?: string) => {
+        const name = (srv || "").toLowerCase();
+        if (name.includes("streamwish")) return 1;
+        if (name.includes("dropload")) return 2;
+        if (name.includes("filemoon")) return 3;
+        if (name.includes("doodstream")) return 4;
+        return 5;
+      };
+      return score(a.server) - score(b.server);
+    });
+
+    return pool[0].url || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Endpoint Túnel de Reproducción (/api/stream/[token]).
  * - Valida sesión activa (o token firmado AES-256-GCM en modo receptor Smart TV `tv=1`),
  *   Rate Limiting por IP y protección Anti-Hotlinking compatible con proxies de Vercel.
@@ -331,18 +437,46 @@ export async function GET(
     let finalEmbedUrl = payload.rawUrl;
 
     if (payload.rawUrl.includes("embed69.org/f/")) {
+      // 1. SIEMPRE intentamos iniciar primero extrayendo y desencriptando el servidor Streamwish directo
       const directStreamwishUrl = await resolveDirectStreamwishUrlFromEmbed69(
         payload.rawUrl
       );
+
       if (directStreamwishUrl) {
         finalEmbedUrl = directStreamwishUrl;
       } else {
-        // Si no pudo extraer el enlace directo, limpiamos los query params internos para que el iframe cargue normal
-        try {
-          const parsed = new URL(payload.rawUrl);
-          finalEmbedUrl = `${parsed.origin}${parsed.pathname}`;
-        } catch {
-          finalEmbedUrl = payload.rawUrl;
+        // 2. Recién si Streamwish (vía Embed69) falla o está caído (ej. HTTP 500 Too many connections / 502),
+        // analizamos e intentamos resolver un servidor secundario directo al vuelo (Dropload / Streamwish mirror)
+        const fallbackDirectUrl = await resolveFallbackFromPlayLatin(
+          payload.rawUrl
+        );
+
+        if (fallbackDirectUrl) {
+          finalEmbedUrl = fallbackDirectUrl;
+        } else {
+          // 3. Si tampoco hay fuente secundaria para ese IMDb ID, jamás renderizamos el iframe caído de Embed69
+          // (evitando la pantalla negra) y notificamos al reproductor padre para saltar al siguiente mirror en <50ms.
+          const failHtml = `<!DOCTYPE html>
+<html lang="es">
+<head><meta charset="utf-8" /><style>html,body{background:#000;margin:0;}</style></head>
+<body>
+<script>
+  try {
+    window.parent.postMessage(
+      { type: "PILOTO_STREAM_ERROR", mirrorId: ${JSON.stringify(payload.mirrorId)} },
+      "*"
+    );
+  } catch (e) {}
+</script>
+</body>
+</html>`;
+          return new NextResponse(failHtml, {
+            status: 200,
+            headers: {
+              "Content-Type": "text/html; charset=utf-8",
+              "Cache-Control": "no-store, no-cache, must-revalidate",
+            },
+          });
         }
       }
     }
@@ -394,9 +528,8 @@ export async function GET(
           try { window.focus(); } catch (e) {}
         }, 50);
       });
-      ${
-        isTvMode
-          ? `
+      ${isTvMode
+        ? `
       window.addEventListener("DOMContentLoaded", function() {
         try {
           window.focus();
@@ -405,7 +538,7 @@ export async function GET(
           }
         } catch (e) {}
       });`
-          : ""
+        : ""
       }
     })();
   </script>
