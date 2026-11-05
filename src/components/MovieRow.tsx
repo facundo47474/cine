@@ -66,6 +66,7 @@ export default function MovieRow({ title, subtitle, movies }: MovieRowProps) {
               qualityBadge={movie.qualityBadge}
               rating={movie.rating}
               isLocalVip={movie.isLocalVip}
+              mediaType={movie.mediaType}
             />
           ))}
         </div>

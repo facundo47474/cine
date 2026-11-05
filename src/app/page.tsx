@@ -30,6 +30,9 @@ export default function HomePage() {
   const [selectedGenreId, setSelectedGenreId] = useState<number | undefined>(
     undefined
   );
+  const [selectedMediaType, setSelectedMediaType] = useState<
+    "movie" | "tv" | undefined
+  >(undefined);
   const [exploreItems, setExploreItems] = useState<CatalogCardDto[]>([]);
   const [page, setPage] = useState<number>(1);
   const [totalPages, setTotalPages] = useState<number>(1);
@@ -39,7 +42,8 @@ export default function HomePage() {
   const isExploring =
     Boolean(searchQuery.trim()) ||
     selectedProviderId !== undefined ||
-    selectedGenreId !== undefined;
+    selectedGenreId !== undefined ||
+    selectedMediaType !== undefined;
 
   const refreshContinueWatching = useCallback(async () => {
     try {
@@ -92,6 +96,8 @@ export default function HomePage() {
           params.set("providerId", String(selectedProviderId));
         if (selectedGenreId !== undefined)
           params.set("genreId", String(selectedGenreId));
+        if (selectedMediaType !== undefined)
+          params.set("mediaType", selectedMediaType);
         params.set("page", String(targetPage));
 
         const res = await fetch(`/api/movies?${params.toString()}`);
@@ -111,10 +117,17 @@ export default function HomePage() {
         setLoadingMore(false);
       }
     },
-    [searchQuery, selectedProviderId, selectedGenreId]
+    [searchQuery, selectedProviderId, selectedGenreId, selectedMediaType]
   );
 
   useEffect(() => {
+    if (typeof window !== "undefined") {
+      const sp = new URLSearchParams(window.location.search);
+      const t = sp.get("type");
+      if (t === "movie" || t === "tv") {
+        setSelectedMediaType(t);
+      }
+    }
     fetchHomeAndHistory();
   }, [fetchHomeAndHistory]);
 
@@ -145,6 +158,7 @@ export default function HomePage() {
     searchQuery,
     selectedProviderId,
     selectedGenreId,
+    selectedMediaType,
     fetchExploreCatalog,
   ]);
 
@@ -152,6 +166,7 @@ export default function HomePage() {
     setSearchQuery("");
     setSelectedProviderId(undefined);
     setSelectedGenreId(undefined);
+    setSelectedMediaType(undefined);
     setPage(1);
   };
 
@@ -161,11 +176,30 @@ export default function HomePage() {
   const activeGenreName = GENRE_PILLS.find(
     (g) => g.id === selectedGenreId
   )?.name;
+  const activeTypeLabel =
+    selectedMediaType === "tv"
+      ? "Series"
+      : selectedMediaType === "movie"
+      ? "Películas"
+      : "Catálogo";
 
   return (
     <div className="min-h-screen bg-[#141414] flex flex-col justify-between">
       <div>
-        <Navbar onSearchChange={setSearchQuery} searchQuery={searchQuery} />
+        <Navbar
+          onSearchChange={setSearchQuery}
+          searchQuery={searchQuery}
+          selectedMediaType={selectedMediaType}
+          onSelectMediaType={(type) => {
+            setSelectedMediaType(type);
+            setPage(1);
+            if (type === undefined) {
+              setSelectedProviderId(undefined);
+              setSelectedGenreId(undefined);
+              setSearchQuery("");
+            }
+          }}
+        />
 
         {!isExploring && homeFeed?.featured && (
           <HeroBanner movie={homeFeed.featured} />
@@ -202,8 +236,8 @@ export default function HomePage() {
                 <h2 className="text-xl sm:text-2xl font-black text-white flex items-center gap-2">
                   <Sparkles className="w-5 h-5 text-netflix-red" />
                   {searchQuery
-                    ? `Resultados para "${searchQuery}"`
-                    : `${activeProviderName || "Catálogo"} • ${
+                    ? `Resultados en ${activeTypeLabel} para "${searchQuery}"`
+                    : `${activeTypeLabel} • ${activeProviderName || "Todo el Catálogo"} • ${
                         activeGenreName || "Todos los géneros"
                       }`}
                 </h2>
@@ -221,7 +255,7 @@ export default function HomePage() {
               ) : exploreItems.length === 0 ? (
                 <div className="py-16 text-center space-y-3 bg-zinc-900/40 rounded-2xl border border-white/5">
                   <p className="text-zinc-300 font-semibold">
-                    No encontramos películas con ese criterio.
+                    No encontramos títulos con ese criterio.
                   </p>
                   <button
                     onClick={handleResetFilters}
@@ -243,6 +277,7 @@ export default function HomePage() {
                         rating={movie.rating}
                         releaseYear={movie.releaseYear}
                         title={movie.title}
+                        mediaType={movie.mediaType}
                       />
                     ))}
                   </div>
@@ -257,10 +292,10 @@ export default function HomePage() {
                         {loadingMore ? (
                           <>
                             <Loader2 className="w-4 h-4 animate-spin" />
-                            Cargando más películas...
+                            Cargando más títulos...
                           </>
                         ) : (
-                          <span>Ver más películas</span>
+                          <span>Ver más títulos</span>
                         )}
                       </button>
                     </div>
@@ -282,12 +317,17 @@ export default function HomePage() {
                       {continueWatching.map((item) => (
                         <MovieCard
                           id={item.movieId}
-                          key={item.movieId}
+                          key={item.episodeId ? `${item.movieId}-${item.episodeId}` : item.movieId}
                           posterUrl={item.posterUrl}
                           progressPercentage={item.progressPercentage}
                           qualityBadge={item.qualityBadge}
                           releaseYear={item.releaseYear}
                           title={item.title}
+                          mediaType={item.mediaType}
+                          episodeId={item.episodeId}
+                          seasonNumber={item.seasonNumber}
+                          episodeNumber={item.episodeNumber}
+                          episodeTitle={item.episodeTitle}
                         />
                       ))}
                     </div>
@@ -310,6 +350,14 @@ export default function HomePage() {
                     movies={homeFeed.trending}
                     title="Tendencias de la Semana"
                   />
+
+                  {homeFeed.series && homeFeed.series.length > 0 && (
+                    <MovieRow
+                      movies={homeFeed.series}
+                      title="Series de TV Populares"
+                      subtitle="Temporadas completas para maratonear"
+                    />
+                  )}
 
                   <MovieRow
                     movies={homeFeed.nowPlaying}

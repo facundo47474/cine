@@ -2,6 +2,7 @@ import { prisma } from "./database/prismaClient";
 import { PrismaMovieRepository } from "./database/PrismaMovieRepository";
 import { PrismaMirrorRepository } from "./database/PrismaMirrorRepository";
 import { PrismaWatchHistoryRepository } from "./database/PrismaWatchHistoryRepository";
+import { PrismaSeriesRepository } from "./database/PrismaSeriesRepository";
 import { HttpHeadLinkProber } from "./http/HttpHeadLinkProber";
 import { TmdbApiGateway } from "./http/TmdbApiGateway";
 import { MemoryCacheService } from "./cache/MemoryCacheService";
@@ -11,6 +12,7 @@ import { HealthCheckerService } from "@/application/services/HealthCheckerServic
 import { CatalogService } from "@/application/services/CatalogService";
 import { TmdbImportService } from "@/application/services/TmdbImportService";
 import { WatchHistoryService } from "@/application/services/WatchHistoryService";
+import { SeriesService } from "@/application/services/SeriesService";
 
 /**
  * Composition Root (Contenedor de Inyección de Dependencias v2.0).
@@ -20,6 +22,7 @@ import { WatchHistoryService } from "@/application/services/WatchHistoryService"
 const movieRepository = new PrismaMovieRepository(prisma);
 const mirrorRepository = new PrismaMirrorRepository(prisma);
 const watchHistoryRepository = new PrismaWatchHistoryRepository(prisma);
+const seriesRepository = new PrismaSeriesRepository(prisma);
 
 const cacheService = new MemoryCacheService(500);
 const mirrorResolver = new AutoEmbedMirrorResolver();
@@ -49,10 +52,19 @@ export const watchHistoryService = new WatchHistoryService(
   watchHistoryRepository
 );
 
+export const seriesService = new SeriesService(
+  seriesRepository,
+  watchHistoryRepository,
+  tmdbGateway,
+  tokenCryptoService
+);
+
 export {
   tokenCryptoService,
   movieRepository,
   mirrorRepository,
+  watchHistoryRepository,
+  seriesRepository,
   tmdbGateway,
   mirrorResolver,
   cacheService,

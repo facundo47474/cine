@@ -3,7 +3,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { ArrowLeft, Clock, Film, Languages, Star } from "lucide-react";
+import { ArrowLeft, Cast, Clock, Film, Languages, Star } from "lucide-react";
 import SmartVideoPlayer from "@/components/SmartVideoPlayer";
 import { MoviePlaybackDto } from "@/application/dto/PlaybackStreamDto";
 
@@ -59,6 +59,10 @@ export default function WatchMoviePage() {
       setSelectedLanguage("Latino");
     }
   }, [movie, hasLatino, hasEnglish]);
+
+  const handleNativeCastTrigger = useCallback(() => {
+    window.dispatchEvent(new CustomEvent("piloto:trigger-cast"));
+  }, []);
 
   return (
     <div className="min-h-screen bg-[#141414] text-white pb-12 sm:pb-16">
@@ -170,6 +174,15 @@ export default function WatchMoviePage() {
                         )}
                       </div>
                     )}
+
+                    <button
+                      type="button"
+                      onClick={handleNativeCastTrigger}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-zinc-900 hover:bg-netflix-red border border-white/10 text-xs font-semibold text-zinc-200 hover:text-white transition"
+                    >
+                      <Cast className="w-3.5 h-3.5 text-netflix-red group-hover:text-white" />
+                      <span>Transmitir a TV</span>
+                    </button>
                   </div>
                 </div>
 

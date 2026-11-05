@@ -1,10 +1,12 @@
 import {
   IWatchHistoryRepository,
   SaveProgressInput,
+  SaveEpisodeProgressInput,
 } from "@/domain/interfaces/IWatchHistoryRepository";
 
 export interface ContinueWatchingItemDto {
   movieId: string;
+  mediaType: "MOVIE" | "SERIES";
   title: string;
   posterUrl: string;
   backdropUrl: string | null;
@@ -14,6 +16,10 @@ export interface ContinueWatchingItemDto {
   durationSeconds: number;
   progressPercentage: number;
   updatedAt: string;
+  episodeId?: string;
+  seasonNumber?: number;
+  episodeNumber?: number;
+  episodeTitle?: string;
 }
 
 export class WatchHistoryService {
@@ -28,8 +34,9 @@ export class WatchHistoryService {
 
     return records
       .filter((item) => item.movie.isAvailable && !item.history.completed)
-      .map(({ history, movie }) => ({
+      .map(({ history, movie, episodeInfo }) => ({
         movieId: movie.id,
+        mediaType: movie.mediaType,
         title: movie.title,
         posterUrl: movie.posterUrl,
         backdropUrl: movie.backdropUrl,
@@ -39,6 +46,10 @@ export class WatchHistoryService {
         durationSeconds: history.durationSeconds,
         progressPercentage: history.getProgressPercentage(),
         updatedAt: history.updatedAt.toISOString(),
+        episodeId: episodeInfo?.episodeId,
+        seasonNumber: episodeInfo?.seasonNumber,
+        episodeNumber: episodeInfo?.episodeNumber,
+        episodeTitle: episodeInfo?.title,
       }));
   }
 
@@ -54,10 +65,33 @@ export class WatchHistoryService {
     return history ? history.progressSeconds : 0;
   }
 
+  public async getEpisodeProgress(
+    userId: string,
+    episodeId: string
+  ): Promise<number> {
+    if (!userId || !episodeId) return 0;
+    const history = await this.historyRepository.findEpisodeProgress(
+      userId,
+      episodeId
+    );
+    return history ? history.progressSeconds : 0;
+  }
+
   public async recordProgress(input: SaveProgressInput) {
     const saved = await this.historyRepository.saveProgress(input);
     return {
       movieId: saved.movieId,
+      progressSeconds: saved.progressSeconds,
+      durationSeconds: saved.durationSeconds,
+      progressPercentage: saved.getProgressPercentage(),
+      completed: saved.completed,
+    };
+  }
+
+  public async recordEpisodeProgress(input: SaveEpisodeProgressInput) {
+    const saved = await this.historyRepository.saveEpisodeProgress(input);
+    return {
+      episodeId: saved.episodeId,
       progressSeconds: saved.progressSeconds,
       durationSeconds: saved.durationSeconds,
       progressPercentage: saved.getProgressPercentage(),

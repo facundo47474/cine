@@ -14,6 +14,11 @@ interface MovieCardProps {
   progressPercentage?: number;
   isLocalVip?: boolean;
   fullWidth?: boolean;
+  mediaType?: "MOVIE" | "SERIES" | "movie" | "tv";
+  episodeId?: string;
+  seasonNumber?: number;
+  episodeNumber?: number;
+  episodeTitle?: string;
 }
 
 export default function MovieCard({
@@ -25,10 +30,22 @@ export default function MovieCard({
   rating,
   progressPercentage,
   fullWidth = false,
+  mediaType = "MOVIE",
+  episodeId,
+  seasonNumber,
+  episodeNumber,
+  episodeTitle,
 }: MovieCardProps) {
+  const isSeries = mediaType === "SERIES" || mediaType === "tv";
+  const href = isSeries
+    ? episodeId
+      ? `/watch/episode/${episodeId}`
+      : `/series/${id}`
+    : `/watch/${id}`;
+
   return (
     <Link
-      href={`/watch/${id}`}
+      href={href}
       className={`group relative rounded-xl overflow-hidden bg-zinc-900 border border-white/10 hover:border-netflix-red/80 transition-all duration-300 sm:hover:scale-[1.04] hover:z-20 shadow-lg ${
         fullWidth ? "w-full" : "flex-shrink-0 w-36 sm:w-52"
       }`}
@@ -43,6 +60,16 @@ export default function MovieCard({
         />
 
         <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent opacity-80 group-hover:opacity-100 transition-opacity" />
+
+        {isSeries && (
+          <div className="absolute top-2 left-2 z-10">
+            <span className="px-1.5 sm:px-2 py-0.5 rounded text-[10px] font-extrabold uppercase tracking-wider bg-black/80 text-amber-400 border border-amber-400/30 shadow-md backdrop-blur-md">
+              {seasonNumber && episodeNumber
+                ? `SERIE • T${seasonNumber}:E${episodeNumber}`
+                : "SERIE"}
+            </span>
+          </div>
+        )}
 
         <div className="absolute top-2 right-2">
           <span className="px-1.5 sm:px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-netflix-red text-white shadow">
@@ -80,7 +107,11 @@ export default function MovieCard({
           {title}
         </h3>
         <div className="flex items-center justify-between text-[11px] sm:text-xs text-zinc-400">
-          <span>{releaseYear}</span>
+          <span className="truncate">
+            {isSeries && seasonNumber && episodeNumber
+              ? `T${seasonNumber}:E${episodeNumber}${episodeTitle ? ` • ${episodeTitle}` : ""}`
+              : releaseYear}
+          </span>
           {typeof rating === "number" && (
             <span className="flex items-center gap-1 text-amber-400 font-medium">
               <Star className="w-3 h-3 fill-amber-400" />

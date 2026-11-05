@@ -7,6 +7,11 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum MediaType {
+  MOVIE
+  SERIES
+}
+
 enum MirrorFormat {
   MP4
   HLS
@@ -35,6 +40,7 @@ model User {
 model Movie {
   id            String         @id @default(uuid())
   tmdbId        Int?           @unique
+  mediaType     MediaType      @default(MOVIE)
   title         String
   originalTitle String?
   synopsis      String         @db.Text
@@ -51,9 +57,72 @@ model Movie {
 
   mirrors       MirrorLink[]
   watchHistory  WatchHistory[]
+  seasons       Season[]
 
   @@index([isAvailable])
   @@index([title])
+  @@index([mediaType])
+}
+
+model Season {
+  id           String    @id @default(uuid())
+  seriesId     String
+  seasonNumber Int
+  title        String
+  overview     String?   @db.Text
+  posterUrl    String?
+  releaseDate  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  series       Movie     @relation(fields: [seriesId], references: [id], onDelete: Cascade)
+  episodes     Episode[]
+
+  @@unique([seriesId, seasonNumber])
+  @@index([seriesId])
+}
+
+model Episode {
+  id            String          @id @default(uuid())
+  seasonId      String
+  episodeNumber Int
+  title         String
+  overview      String?         @db.Text
+  duration      Int             @default(45)
+  videoUrl      String          @default("") @db.Text
+  thumbnailUrl  String?
+  introStart    Int?
+  introEnd      Int?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  season        Season          @relation(fields: [seasonId], references: [id], onDelete: Cascade)
+  watchHistory  WatchHistory[]
+  mirrors       EpisodeMirror[]
+
+  @@unique([seasonId, episodeNumber])
+  @@index([seasonId])
+}
+
+model EpisodeMirror {
+  id                  String       @id @default(uuid())
+  episodeId           String
+  serverName          String
+  language            String       @default("Latino")
+  rawUrl              String       @db.Text
+  format              MirrorFormat @default(MP4)
+  quality             String       @default("1080p")
+  priority            Int          @default(1)
+  status              MirrorStatus @default(ACTIVE)
+  consecutiveFailures Int          @default(0)
+  lastCheckedAt       DateTime?
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  episode             Episode      @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+
+  @@index([episodeId, status, priority])
+  @@index([status])
 }
 
 model MirrorLink {
@@ -80,15 +149,20 @@ model MirrorLink {
 model WatchHistory {
   id              String   @id @default(uuid())
   userId          String
-  movieId         String
+  movieId         String?
+  episodeId       String?
   progressSeconds Int      @default(0)
   durationSeconds Int      @default(7200)
   completed       Boolean  @default(false)
   updatedAt       DateTime @updatedAt
 
   user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  movie           Movie    @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  movie           Movie?   @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  episode         Episode? @relation(fields: [episodeId], references: [id], onDelete: Cascade)
 
   @@unique([userId, movieId])
+  @@unique([userId, episodeId])
   @@index([userId, updatedAt])
+  @@index([movieId])
+  @@index([episodeId])
 }

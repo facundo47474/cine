@@ -1,6 +1,7 @@
 export interface CatalogCardDto {
-  id: string; // UUID de PostgreSQL o "tmdb-{tmdbId}"
+  id: string; // UUID de PostgreSQL o "tmdb-{tmdbId}" o "series-{id}"
   tmdbId: number | null;
+  mediaType?: "MOVIE" | "SERIES";
   title: string;
   originalTitle: string | null;
   synopsis: string;
@@ -25,6 +26,7 @@ export interface HomeFeedDto {
   disney: CatalogCardDto[];
   max: CatalogCardDto[];
   prime: CatalogCardDto[];
+  series?: CatalogCardDto[];
 }
 
 export interface ExploreCatalogParams {
@@ -32,6 +34,7 @@ export interface ExploreCatalogParams {
   genreId?: number;
   providerId?: number;
   page?: number;
+  mediaType?: "movie" | "tv";
 }
 
 export interface ExploreCatalogResponseDto {

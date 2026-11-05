@@ -1,7 +1,8 @@
 export interface WatchHistoryProps {
   id: string;
   userId: string;
-  movieId: string;
+  movieId?: string | null;
+  episodeId?: string | null;
   progressSeconds: number;
   durationSeconds: number;
   completed: boolean;
@@ -13,7 +14,8 @@ export class WatchHistory {
 
   get id(): string { return this.props.id; }
   get userId(): string { return this.props.userId; }
-  get movieId(): string { return this.props.movieId; }
+  get movieId(): string | null { return this.props.movieId ?? null; }
+  get episodeId(): string | null { return this.props.episodeId ?? null; }
   get progressSeconds(): number { return this.props.progressSeconds; }
   get durationSeconds(): number { return this.props.durationSeconds; }
   get completed(): boolean { return this.props.completed; }

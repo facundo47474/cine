@@ -12,6 +12,7 @@ export interface CreateMirrorInput {
 
 export interface UpsertMovieInput {
   tmdbId?: number | null;
+  mediaType?: "MOVIE" | "SERIES";
   title: string;
   originalTitle?: string | null;
   synopsis: string;

@@ -33,6 +33,7 @@ export class PrismaMovieRepository implements IMovieRepository {
     return new Movie({
       id: row.id,
       tmdbId: row.tmdbId,
+      mediaType: row.mediaType,
       title: row.title,
       originalTitle: row.originalTitle,
       synopsis: row.synopsis,
@@ -136,6 +137,7 @@ export class PrismaMovieRepository implements IMovieRepository {
             rating: data.rating,
             qualityBadge: data.qualityBadge || existing.qualityBadge,
             genres: data.genres || existing.genres,
+            mediaType: (data.mediaType as any) || existing.mediaType,
             isAvailable: true,
             mirrors: {
               deleteMany: {},
@@ -153,6 +155,7 @@ export class PrismaMovieRepository implements IMovieRepository {
     const created = await this.db.movie.create({
       data: {
         tmdbId: data.tmdbId ?? null,
+        mediaType: (data.mediaType as any) || "MOVIE",
         title: data.title,
         originalTitle: data.originalTitle ?? null,
         synopsis: data.synopsis,

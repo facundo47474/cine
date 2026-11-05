@@ -23,6 +23,7 @@ export class CatalogService {
     return {
       id: movie.id,
       tmdbId: movie.tmdbId,
+      mediaType: movie.mediaType,
       title: movie.title,
       originalTitle: movie.originalTitle,
       synopsis: movie.synopsis,
@@ -39,9 +40,10 @@ export class CatalogService {
 
   private mapTmdbItemToCard(
     item: TmdbCatalogItem,
-    localByTmdbId: Map<number, Movie>
+    localByTmdbId: Map<string, Movie>
   ): CatalogCardDto {
-    const existingLocal = localByTmdbId.get(item.tmdbId);
+    const expectedType = item.mediaType === "tv" ? "SERIES" : "MOVIE";
+    const existingLocal = localByTmdbId.get(`${expectedType}:${item.tmdbId}`);
     if (existingLocal) {
       return this.mapMovieEntityToCard(existingLocal);
     }
@@ -49,6 +51,7 @@ export class CatalogService {
     return {
       id: `tmdb-${item.tmdbId}`,
       tmdbId: item.tmdbId,
+      mediaType: expectedType,
       title: item.title,
       originalTitle: item.originalTitle,
       synopsis: item.synopsis,
@@ -76,10 +79,11 @@ export class CatalogService {
 
   public async getHomeFeed(): Promise<HomeFeedDto> {
     const localMovies = await this.movieRepository.findAvailableCatalog();
-    const localByTmdbId = new Map<number, Movie>();
+
+    const localByTmdbId = new Map<string, Movie>();
     for (const m of localMovies) {
       if (m.tmdbId !== null) {
-        localByTmdbId.set(m.tmdbId, m);
+        localByTmdbId.set(`${m.mediaType}:${m.tmdbId}`, m);
       }
     }
 
@@ -93,6 +97,7 @@ export class CatalogService {
       disneyRes,
       maxRes,
       primeRes,
+      trendingTvRes,
     ] = await Promise.allSettled([
       this.tmdbGateway.getTrendingMovies(1),
       this.tmdbGateway.getNowPlayingMovies(1),
@@ -117,6 +122,7 @@ export class CatalogService {
         watchRegion: "AR",
         page: 1,
       }),
+      this.tmdbGateway.getTrendingTv(1),
     ]);
 
     const extractCards = (
@@ -135,6 +141,7 @@ export class CatalogService {
     const disney = extractCards(disneyRes);
     const max = extractCards(maxRes);
     const prime = extractCards(primeRes);
+    const series = extractCards(trendingTvRes);
 
     const featured =
       trending.find((m) => Boolean(m.backdropUrl)) ||
@@ -154,6 +161,7 @@ export class CatalogService {
       disney,
       max,
       prime,
+      series,
     };
   }
 
@@ -162,26 +170,78 @@ export class CatalogService {
   ): Promise<ExploreCatalogResponseDto> {
     const page = Math.max(1, params.page || 1);
     const cleanQuery = params.query?.trim();
+    const targetMediaType = params.mediaType; // "movie" | "tv" | undefined
 
-    const localMovies = await this.movieRepository.findAvailableCatalog(
+    const allLocalMedia = await this.movieRepository.findAvailableCatalog(
       cleanQuery
     );
-    const localByTmdbId = new Map<number, Movie>();
-    for (const m of localMovies) {
+    const localMovies = allLocalMedia.filter((m) => {
+      if (targetMediaType === "movie") return m.mediaType === "MOVIE";
+      if (targetMediaType === "tv") return m.mediaType === "SERIES";
+      return true;
+    });
+
+    const localByTmdbId = new Map<string, Movie>();
+    for (const m of allLocalMedia) {
       if (m.tmdbId !== null) {
-        localByTmdbId.set(m.tmdbId, m);
+        localByTmdbId.set(`${m.mediaType}:${m.tmdbId}`, m);
       }
     }
 
-    const tmdbPageResult = cleanQuery
-      ? await this.tmdbGateway.searchMovies(cleanQuery, page)
-      : await this.tmdbGateway.discoverMovies({
-          page,
-          genreId: params.genreId,
-          watchProviderId: params.providerId,
-          watchRegion: "AR",
-          sortBy: "popularity.desc",
-        });
+    if (cleanQuery) {
+      const [movieSearch, tvSearch] = await Promise.allSettled([
+        targetMediaType === "tv"
+          ? Promise.resolve({ page: 1, totalPages: 1, totalResults: 0, items: [] })
+          : this.tmdbGateway.searchMovies(cleanQuery, page),
+        targetMediaType === "movie"
+          ? Promise.resolve({ page: 1, totalPages: 1, totalResults: 0, items: [] })
+          : this.tmdbGateway.searchTv(cleanQuery, page),
+      ]);
+
+      const movieItems =
+        movieSearch.status === "fulfilled" ? movieSearch.value.items : [];
+      const tvItems =
+        tvSearch.status === "fulfilled" ? tvSearch.value.items : [];
+      const combined = [...movieItems, ...tvItems];
+
+      const cards = combined.map((item) =>
+        this.mapTmdbItemToCard(item, localByTmdbId)
+      );
+
+      const seenKeys = new Set<string>(
+        cards
+          .filter((c) => c.tmdbId !== null)
+          .map((c) => `${c.mediaType}:${c.tmdbId}`)
+      );
+
+      const localCards = localMovies
+        .filter(
+          (c) =>
+            c.tmdbId === null || !seenKeys.has(`${c.mediaType}:${c.tmdbId}`)
+        )
+        .map((m) => this.mapMovieEntityToCard(m));
+
+      return {
+        tmdbConnected: this.tmdbGateway.isConfigured(),
+        page: 1,
+        totalPages: 1,
+        totalResults: localCards.length + cards.length,
+        items: [...localCards, ...cards],
+      };
+    }
+
+    const discoverFilters = {
+      page,
+      genreId: params.genreId,
+      watchProviderId: params.providerId,
+      watchRegion: "AR",
+      sortBy: "popularity.desc" as const,
+    };
+
+    const tmdbPageResult =
+      targetMediaType === "tv"
+        ? await this.tmdbGateway.discoverTv(discoverFilters)
+        : await this.tmdbGateway.discoverMovies(discoverFilters);
 
     const tmdbCards = tmdbPageResult.items.map((item) =>
       this.mapTmdbItemToCard(item, localByTmdbId)
@@ -192,16 +252,16 @@ export class CatalogService {
     if (page === 1 && !params.providerId && !params.genreId) {
       const localCards = localMovies.map((m) => this.mapMovieEntityToCard(m));
       const seenIds = new Set<string>(localCards.map((c) => c.id));
-      const seenTmdbIds = new Set<number>(
+      const seenKeys = new Set<string>(
         localCards
-          .map((c) => c.tmdbId)
-          .filter((id): id is number => id !== null)
+          .filter((c) => c.tmdbId !== null)
+          .map((c) => `${c.mediaType}:${c.tmdbId}`)
       );
 
       const dedupedTmdb = tmdbCards.filter(
         (c) =>
           !seenIds.has(c.id) &&
-          (c.tmdbId === null || !seenTmdbIds.has(c.tmdbId))
+          (c.tmdbId === null || !seenKeys.has(`${c.mediaType}:${c.tmdbId}`))
       );
       combinedItems = [...localCards, ...dedupedTmdb];
     }
@@ -210,18 +270,11 @@ export class CatalogService {
       tmdbConnected: this.tmdbGateway.isConfigured(),
       page: tmdbPageResult.page,
       totalPages: tmdbPageResult.totalPages,
-      totalResults:
-        tmdbPageResult.totalResults + (page === 1 ? localMovies.length : 0),
+      totalResults: tmdbPageResult.totalResults,
       items: combinedItems,
     };
   }
 
-  /**
-   * Determina si una película requiere auto-curación de mirrors:
-   * - No tiene mirrors reproducibles
-   * - No cuenta con la opción multilingüe "Inglés (Sub)"
-   * - Utiliza mirrors antiguos sin priorización de Streamwish o dominios deprecados
-   */
   private needsAutomaticMirrorUpgrade(movie: Movie): boolean {
     if (!movie.tmdbId) return false;
 
@@ -231,10 +284,16 @@ export class CatalogService {
     const hasEnglishSub = playable.some((m) => m.language === "Inglés (Sub)");
     if (!hasEnglishSub) return true;
 
-    const hasStreamwishPrimary = playable.some((m) =>
-      m.serverName.toLowerCase().includes("streamwish")
+    const hasStreamwishLat = playable.some(
+      (m) => m.serverName === "Streamwish-Lat"
     );
-    if (!hasStreamwishPrimary) return true;
+    if (!hasStreamwishLat) return true;
+
+    const hasDegradedStreamwish = movie.mirrors.some(
+      (m) =>
+        m.serverName.toLowerCase().includes("streamwish") && !m.isPlayable()
+    );
+    if (hasDegradedStreamwish) return true;
 
     const hasLegacyOrDeprecatedMirror = playable.some(
       (m) =>

@@ -374,25 +374,18 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
       }
     }
 
-    const backupLat: CreateMirrorInput = {
-      serverName: "Backup-Lat",
-      language: "Latino",
-      rawUrl: `https://multiembed.mov/?video_id=${tmdbId}&tmdb=1`,
-      format: MirrorFormat.EMBED,
-      quality: "1080p",
-      priority: 3,
-    };
+    if (candidates.length === 0) {
+      const backupEn: CreateMirrorInput = {
+        serverName: "Backup-En",
+        language: "Inglés (Sub)",
+        rawUrl: `https://vidsrc.me/embed/movie?tmdb=${tmdbId}&ds_lang=es`,
+        format: MirrorFormat.EMBED,
+        quality: "1080p",
+        priority: 6,
+      };
 
-    const backupEn: CreateMirrorInput = {
-      serverName: "Backup-En",
-      language: "Inglés (Sub)",
-      rawUrl: `https://vidsrc.me/embed/movie?tmdb=${tmdbId}&ds_lang=es`,
-      format: MirrorFormat.EMBED,
-      quality: "1080p",
-      priority: 6,
-    };
-
-    candidates.push(backupLat, backupEn);
+      candidates.push(backupEn);
+    }
 
     return candidates.sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
   }

@@ -3,6 +3,7 @@ import { MirrorLink } from "./MirrorLink";
 export interface MovieProps {
   id: string;
   tmdbId: number | null;
+  mediaType?: "MOVIE" | "SERIES";
   title: string;
   originalTitle: string | null;
   synopsis: string;
@@ -18,7 +19,7 @@ export interface MovieProps {
 }
 
 /**
- * Entidad de Dominio Movie.
+ * Entidad de Dominio Movie / Media.
  * Controla la disponibilidad lógica (Soft Delete) según el estado de sus Mirrors.
  */
 export class Movie {
@@ -26,6 +27,7 @@ export class Movie {
 
   get id(): string { return this.props.id; }
   get tmdbId(): number | null { return this.props.tmdbId; }
+  get mediaType(): "MOVIE" | "SERIES" { return this.props.mediaType ?? "MOVIE"; }
   get title(): string { return this.props.title; }
   get originalTitle(): string | null { return this.props.originalTitle; }
   get synopsis(): string { return this.props.synopsis; }

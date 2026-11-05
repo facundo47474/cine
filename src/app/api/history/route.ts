@@ -41,13 +41,23 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { movieId, progressSeconds, durationSeconds } = body;
+    const { movieId, episodeId, progressSeconds, durationSeconds } = body;
 
-    if (!movieId || typeof progressSeconds !== "number") {
+    if ((!movieId && !episodeId) || typeof progressSeconds !== "number") {
       return NextResponse.json(
-        { ok: false, error: "Datos de progreso incompletos." },
+        { ok: false, error: "Datos de progreso incompletos (se requiere movieId o episodeId)." },
         { status: 400 }
       );
+    }
+
+    if (episodeId) {
+      const saved = await watchHistoryService.recordEpisodeProgress({
+        userId,
+        episodeId,
+        progressSeconds: Math.floor(progressSeconds),
+        durationSeconds: Math.floor(durationSeconds || 2700),
+      });
+      return NextResponse.json({ ok: true, progress: saved });
     }
 
     const saved = await watchHistoryService.recordProgress({

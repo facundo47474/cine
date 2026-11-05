@@ -30,6 +30,7 @@ interface Embed69LanguageBlock {
 interface PlayLatinSourceEntry {
   url?: string;
   server?: string;
+  name?: string;
   version?: string;
 }
 
@@ -160,23 +161,45 @@ async function resolveDirectStreamwishUrlFromEmbed69(
     const requestedLang = (
       parsedUrl.searchParams.get("lang") || "LAT"
     ).toUpperCase();
-    const cleanFetchUrl = `${parsedUrl.origin}${parsedUrl.pathname}`;
+    const baseCleanUrl = `${parsedUrl.origin}${parsedUrl.pathname}`;
 
-    const res = await fetch(cleanFetchUrl, {
-      method: "GET",
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      },
-      signal: AbortSignal.timeout(4500),
-    });
+    const candidateUrls = [baseCleanUrl];
+    const epMatch = baseCleanUrl.match(/^(https?:\/\/[^/]+\/f\/tt\d+-\d+x)(\d+)$/i);
+    if (epMatch) {
+      const prefix = epMatch[1];
+      const epDigits = epMatch[2];
+      const unpadded = String(Number(epDigits));
+      const padded = unpadded.padStart(2, "0");
+      const altUrl =
+        epDigits === padded ? `${prefix}${unpadded}` : `${prefix}${padded}`;
+      if (altUrl !== baseCleanUrl) {
+        candidateUrls.push(altUrl);
+      }
+    }
 
-    if (!res.ok) return null;
+    let html = "";
+    for (const fetchUrl of candidateUrls) {
+      const res = await fetch(fetchUrl, {
+        method: "GET",
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+          Accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+        signal: AbortSignal.timeout(4500),
+      });
 
-    const html = await res.text();
-    if (!html.includes("dataLink") || html.includes("No folders found")) {
+      if (!res.ok) continue;
+
+      const text = await res.text();
+      if (text.includes("dataLink") && !text.includes("No folders found")) {
+        html = text;
+        break;
+      }
+    }
+
+    if (!html) {
       return null;
     }
 
@@ -205,19 +228,22 @@ async function resolveDirectStreamwishUrlFromEmbed69(
       return null;
     }
 
-    // Ordenamos para elegir primero el idioma solicitado por el usuario (LAT o SUB)
+    // Ordenamos para elegir primero el idioma solicitado por el usuario (LAT -> ESP -> SUB)
     dataLink.sort((a, b) => {
-      const langA = (a.video_language || "").toUpperCase();
-      const langB = (b.video_language || "").toUpperCase();
-      const aMatches =
-        langA === requestedLang ||
-        (requestedLang === "SUB" && (langA === "SUB" || langA === "VOSE"));
-      const bMatches =
-        langB === requestedLang ||
-        (requestedLang === "SUB" && (langB === "SUB" || langB === "VOSE"));
-      if (aMatches && !bMatches) return -1;
-      if (!aMatches && bMatches) return 1;
-      return 0;
+      const getLangRank = (langRaw?: string) => {
+        const lang = (langRaw || "").toUpperCase();
+        if (requestedLang === "SUB") {
+          if (lang === "SUB" || lang === "VOSE") return 1;
+          if (lang === "LAT" || lang === "LATINO") return 2;
+          if (lang === "ESP" || lang === "CASTELLANO") return 3;
+          return 4;
+        }
+        if (lang === "LAT" || lang === "LATINO") return 1;
+        if (lang === "ESP" || lang === "CASTELLANO") return 2;
+        if (lang === "SUB" || lang === "VOSE") return 3;
+        return 4;
+      };
+      return getLangRank(a.video_language) - getLangRank(b.video_language);
     });
 
     for (const block of dataLink) {
@@ -256,16 +282,23 @@ async function resolveFallbackFromPlayLatin(
   rawUrl: string
 ): Promise<string | null> {
   try {
-    const imdbMatch = rawUrl.match(/(tt\d+)/i);
-    if (!imdbMatch) return null;
+    const tvMatch = rawUrl.match(/(tt\d+)-(\d+)x(\d+)/i);
+    const movieMatch = rawUrl.match(/(tt\d+)/i);
+    if (!tvMatch && !movieMatch) return null;
 
-    const imdbId = imdbMatch[1];
+    const isTv = Boolean(tvMatch);
+    const imdbId = tvMatch ? tvMatch[1] : movieMatch![1];
+    const seasonStr = tvMatch ? String(Number(tvMatch[2])) : "1";
+    const episodeStr = tvMatch ? String(Number(tvMatch[3])) : "1";
+
     const parsedUrl = new URL(rawUrl);
     const requestedLang = (
       parsedUrl.searchParams.get("lang") || "LAT"
     ).toUpperCase();
 
-    const pageUrl = `https://playlatinsrc.co/custom/movie/${imdbId}`;
+    const pageUrl = isTv
+      ? `https://playlatinsrc.co/custom/serial/${imdbId}/${seasonStr}/${episodeStr}`
+      : `https://playlatinsrc.co/custom/movie/${imdbId}`;
     const pageRes = await fetch(pageUrl, {
       headers: {
         "User-Agent":
@@ -289,10 +322,10 @@ async function resolveFallbackFromPlayLatin(
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
       },
       body: JSON.stringify({
-        type: "movie",
+        type: isTv ? "tv" : "movie",
         id: imdbId,
-        season: "1",
-        episode: "1",
+        season: seasonStr,
+        episode: episodeStr,
         mode: "custom",
         token: tokenMatch[1],
       }),
@@ -334,7 +367,7 @@ async function resolveFallbackFromPlayLatin(
         if (name.includes("doodstream")) return 4;
         return 5;
       };
-      return score(a.server) - score(b.server);
+      return score(a.server || a.name) - score(b.server || b.name);
     });
 
     return pool[0].url || null;
@@ -345,7 +378,9 @@ async function resolveFallbackFromPlayLatin(
 
 interface StreamwishDirectHlsInfo {
   hlsUrl: string;
+  inlineM3u8?: string;
   posterUrl: string;
+  durationSeconds?: number;
 }
 
 /**
@@ -358,22 +393,23 @@ function unpackDeanEdwardsBlock(html: string): string | null {
   const match = html.match(packerRegex);
   if (!match) return null;
 
-  let payload = match[1].replace(/\\'/g, "'");
+  const payload = match[1].replace(/\\'/g, "'");
   const radix = Number(match[2]);
   const count = Number(match[3]);
   const symtab = match[4].split("|");
 
   if (!radix || !count || symtab.length === 0) return null;
 
-  for (let i = count - 1; i >= 0; i--) {
+  const lookup = new Map<string, string>();
+  for (let i = 0; i < count; i++) {
     if (symtab[i]) {
-      payload = payload.replace(
-        new RegExp("\\b" + i.toString(radix) + "\\b", "g"),
-        symtab[i]
-      );
+      lookup.set(i.toString(radix), symtab[i]);
     }
   }
-  return payload;
+
+  return payload.replace(/\b[0-9a-zA-Z]+\b/g, (word) => {
+    return lookup.get(word) ?? word;
+  });
 }
 
 /**
@@ -416,13 +452,88 @@ async function extractStreamwishDirectHls(
         const unpacked = unpackDeanEdwardsBlock(html);
         if (!unpacked) continue;
 
+        const hls4Match = unpacked.match(/"hls4"\s*:\s*"([^"]+)"/);
         const hls2Match = unpacked.match(/"hls2"\s*:\s*"([^"]+)"/);
         const posterMatch = unpacked.match(/image\s*:\s*"([^"]+)"/);
+        const durationMatch = unpacked.match(/duration\s*:\s*"([0-9.]+)"/);
+        const durationSeconds = durationMatch
+          ? Math.floor(Number(durationMatch[1]) || 0)
+          : undefined;
+        const posterUrl = posterMatch?.[1] || "";
+
+        // 1. Priorizar hls4 (el stream primario activo de Streamwish) pre-resolviendo el .m3u8 en el servidor
+        // para carga instantánea (0ms de latencia de manifiesto), duración exacta inmediata y cero bloqueos CORS.
+        if (hls4Match && hls4Match[1]) {
+          try {
+            const masterUrl = hls4Match[1].startsWith("http")
+              ? hls4Match[1]
+              : `${origin}${hls4Match[1]}`;
+
+            const masterRes = await fetch(masterUrl, {
+              headers: {
+                "User-Agent":
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                Referer: `${origin}/e/${fileCode}`,
+              },
+              signal: AbortSignal.timeout(3500),
+            });
+
+            if (masterRes.ok) {
+              const masterText = await masterRes.text();
+              const variantLines = masterText
+                .split("\n")
+                .map((l) => l.trim())
+                .filter((l) => Boolean(l) && !l.startsWith("#"));
+
+              if (variantLines.length > 0) {
+                const chosenVariant = variantLines[variantLines.length - 1];
+                const variantUrl = new URL(chosenVariant, masterUrl).toString();
+
+                const variantRes = await fetch(variantUrl, {
+                  headers: {
+                    "User-Agent":
+                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                    Referer: `${origin}/e/${fileCode}`,
+                  },
+                  signal: AbortSignal.timeout(3500),
+                });
+
+                if (variantRes.ok) {
+                  const rawVariantM3u8 = await variantRes.text();
+                  if (rawVariantM3u8.includes("#EXTM3U")) {
+                    const normalizedM3u8 = rawVariantM3u8
+                      .split("\n")
+                      .map((line) => {
+                        const trimmed = line.trim();
+                        if (!trimmed || trimmed.startsWith("#")) return trimmed;
+                        try {
+                          return new URL(trimmed, variantUrl).toString();
+                        } catch {
+                          return trimmed;
+                        }
+                      })
+                      .join("\n");
+
+                    return {
+                      hlsUrl: variantUrl,
+                      inlineM3u8: normalizedM3u8,
+                      posterUrl,
+                      durationSeconds,
+                    };
+                  }
+                }
+              }
+            }
+          } catch {
+            // Si falla la extracción de hls4, continuamos al respaldo hls2
+          }
+        }
 
         if (hls2Match && hls2Match[1].startsWith("http")) {
           return {
             hlsUrl: hls2Match[1],
-            posterUrl: posterMatch?.[1] || "",
+            posterUrl,
+            durationSeconds,
           };
         }
       } catch {
@@ -600,9 +711,7 @@ export async function GET(
       : urlWithResume;
     const escapedRawUrl = escapeHtmlAttribute(targetIframeUrl);
 
-    const streamwishHls = !isSecondaryServer
-      ? await extractStreamwishDirectHls(finalEmbedUrl)
-      : null;
+    const streamwishHls = await extractStreamwishDirectHls(finalEmbedUrl);
 
     const html = `<!DOCTYPE html>
 <html lang="es">
@@ -703,9 +812,19 @@ export async function GET(
       var video = document.getElementById("pilotoVideo");
       var root = document.getElementById("playerRoot");
       var hlsUrl = ${JSON.stringify(streamwishHls.hlsUrl)};
+      var inlineM3u8 = ${JSON.stringify(streamwishHls.inlineM3u8 || "")};
+      var knownDurationSec = ${JSON.stringify(streamwishHls.durationSeconds || 0)};
       var fallbackIframeUrl = ${JSON.stringify(targetIframeUrl)};
       var startSec = ${resumeSeconds};
       var switchedToIframe = false;
+
+      var activeHlsSource = hlsUrl;
+      if (inlineM3u8) {
+        try {
+          var m3u8Blob = new Blob([inlineM3u8], { type: "application/vnd.apple.mpegurl" });
+          activeHlsSource = URL.createObjectURL(m3u8Blob);
+        } catch (e) {}
+      }
 
       function switchToEmbedIframe() {
         if (switchedToIframe || !root) return;
@@ -716,8 +835,8 @@ export async function GET(
       function reportTime() {
         if (!video || switchedToIframe) return;
         var ct = Math.floor(video.currentTime || 0);
-        var dur = Math.floor(video.duration || 0);
-        if (ct > 0) {
+        var dur = Math.floor(video.duration || knownDurationSec || 0);
+        if (ct > 0 || dur > 60) {
           try {
             window.parent.postMessage(
               {
@@ -731,16 +850,55 @@ export async function GET(
         }
       }
 
+      if (knownDurationSec > 60) {
+        try {
+          window.parent.postMessage(
+            {
+              type: "PILOTO_TIME_UPDATE",
+              currentTime: startSec > 0 ? startSec : 0,
+              duration: knownDurationSec
+            },
+            "*"
+          );
+        } catch (e) {}
+      }
+
+      video.addEventListener("loadedmetadata", reportTime);
       video.addEventListener("timeupdate", reportTime);
       video.addEventListener("seeked", reportTime);
       video.addEventListener("pause", reportTime);
+
+      window.addEventListener("message", function(event) {
+        try {
+          if (
+            event.data &&
+            event.data.type === "PILOTO_SEEK" &&
+            typeof event.data.time === "number" &&
+            video &&
+            !switchedToIframe
+          ) {
+            video.currentTime = event.data.time;
+          } else if (
+            event.data &&
+            event.data.type === "PILOTO_TRIGGER_REMOTE_PLAYBACK" &&
+            video &&
+            !switchedToIframe
+          ) {
+            if (typeof video.webkitShowPlaybackTargetPicker === "function") {
+              video.webkitShowPlaybackTargetPicker();
+            } else if (video.remote && typeof video.remote.prompt === "function") {
+              video.remote.prompt().catch(function() {});
+            }
+          }
+        } catch (e) {}
+      });
 
       if (window.Hls && window.Hls.isSupported()) {
         var hls = new window.Hls({
           enableWorker: true,
           startPosition: startSec > 5 ? startSec : -1
         });
-        hls.loadSource(hlsUrl);
+        hls.loadSource(activeHlsSource);
         hls.attachMedia(video);
         hls.on(window.Hls.Events.ERROR, function(_ev, data) {
           if (data && data.fatal) {
@@ -749,7 +907,7 @@ export async function GET(
           }
         });
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        video.src = hlsUrl;
+        video.src = activeHlsSource;
         video.addEventListener("loadedmetadata", function() {
           if (startSec > 5) {
             video.currentTime = startSec;
@@ -779,7 +937,7 @@ export async function GET(
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store, no-cache, must-revalidate",
-        "Referrer-Policy": streamwishHls ? "no-referrer" : "same-origin",
+        "Referrer-Policy": streamwishHls ? "no-referrer" : "strict-origin-when-cross-origin",
         "Permissions-Policy":
           "fullscreen=*, autoplay=*, picture-in-picture=*",
         "Content-Security-Policy":

@@ -46,16 +46,22 @@ export async function GET(request: NextRequest) {
     const genreIdParam = searchParams.get("genreId");
     const providerIdParam = searchParams.get("providerId");
     const pageParam = searchParams.get("page");
+    const mediaTypeParam = searchParams.get("mediaType");
 
     const genreId = genreIdParam ? Number(genreIdParam) : undefined;
     const providerId = providerIdParam ? Number(providerIdParam) : undefined;
     const page = pageParam ? Math.max(1, Number(pageParam)) : 1;
+    const mediaType =
+      mediaTypeParam === "movie" || mediaTypeParam === "tv"
+        ? mediaTypeParam
+        : undefined;
 
     const result = await catalogService.exploreCatalog({
       query,
       genreId: genreId && !isNaN(genreId) ? genreId : undefined,
       providerId: providerId && !isNaN(providerId) ? providerId : undefined,
       page,
+      mediaType,
     });
 
     return NextResponse.json({
