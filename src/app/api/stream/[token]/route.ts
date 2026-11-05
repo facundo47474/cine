@@ -799,11 +799,10 @@ export async function GET(
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="referrer" content="${streamwishHls ? "no-referrer" : "origin"}" />
-  ${
-    streamwishHls
-      ? '<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>'
-      : ""
-  }
+  ${streamwishHls
+        ? '<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>'
+        : ""
+      }
   <style>
     html, body {
       background: #000;
@@ -847,20 +846,18 @@ export async function GET(
           }
         } catch (e) {}
       });
-      ${
-        isSecondaryServer
-          ? `
+      ${isSecondaryServer
+        ? `
       try {
         window.parent.postMessage(
           { type: "PILOTO_SECONDARY_SERVER_ACTIVE", mirrorId: ${JSON.stringify(payload.mirrorId)} },
           "*"
         );
       } catch (e) {}`
-          : ""
+        : ""
       }
-      ${
-        isTvMode
-          ? `
+      ${isTvMode
+        ? `
       window.addEventListener("DOMContentLoaded", function() {
         try {
           window.focus();
@@ -869,15 +866,14 @@ export async function GET(
           }
         } catch (e) {}
       });`
-          : ""
+        : ""
       }
     })();
   </script>
 </head>
 <body>
-  ${
-    streamwishHls
-      ? `
+  ${streamwishHls
+        ? `
   <div id="playerRoot" style="width:100vw;height:100vh;background:#000;">
     <video
       id="pilotoVideo"
@@ -999,7 +995,7 @@ export async function GET(
       }
     })();
   </script>`
-      : `
+        : `
   <iframe
     src="${escapedRawUrl}"
     allow="autoplay *; fullscreen *; picture-in-picture *; encrypted-media *"
@@ -1008,7 +1004,7 @@ export async function GET(
     mozallowfullscreen="true"
     referrerpolicy="origin"
   ></iframe>`
-  }
+      }
 </body>
 </html>`;
 
