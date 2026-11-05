@@ -190,7 +190,14 @@ export default function Navbar({
               </div>
               <button
                 type="button"
-                onClick={() => signOut({ callbackUrl: "/" })}
+                onClick={() => {
+                  try {
+                    sessionStorage.removeItem("piloto_welcome_dismissed");
+                  } catch {
+                    // Silencioso
+                  }
+                  void signOut({ callbackUrl: "/" });
+                }}
                 className="p-1.5 sm:p-2 rounded-full text-zinc-400 hover:text-white hover:bg-white/10 transition"
                 title="Cerrar sesión"
               >

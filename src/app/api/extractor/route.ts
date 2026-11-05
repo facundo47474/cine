@@ -347,10 +347,10 @@ function extractStreamFromText(
   };
 
   // 1. Claves JSON prioritarias de JWPlayer / VideoJS (Streamwish, Filemoon, Dropload, Supervideo, Vidhide)
-  // Se prioriza hls2 antes que hls4 ya que hls2 entrega segmentos MPEG-TS puros (0x47 en byte 0)
+  // Se prioriza hls4 (CDN global rápido, normalizado en /api/stream-proxy) y luego hls2 como respaldo
   const jsonKeyRegexes = [
-    /"hls2"\s*:\s*"([^"]+)"/i,
     /"hls4"\s*:\s*"([^"]+)"/i,
+    /"hls2"\s*:\s*"([^"]+)"/i,
     /"hls3"\s*:\s*"([^"]+)"/i,
     /file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i,
     /sources\s*:\s*\[\s*\{[^}]*?file\s*:\s*["']([^"']+)["']/i,

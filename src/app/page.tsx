@@ -1,7 +1,8 @@
 "use client";
 
 import React, { useEffect, useState, useCallback } from "react";
-import { Sparkles, Loader2 } from "lucide-react";
+import { useSession } from "next-auth/react";
+import { Sparkles, Loader2, X, Mail } from "lucide-react";
 import Navbar from "@/components/Navbar";
 import HeroBanner from "@/components/HeroBanner";
 import MovieRow from "@/components/MovieRow";
@@ -18,6 +19,8 @@ import {
 import { ContinueWatchingItemDto } from "@/application/services/WatchHistoryService";
 
 export default function HomePage() {
+  const { data: session, status: sessionStatus } = useSession();
+  const [showWelcomeBanner, setShowWelcomeBanner] = useState<boolean>(false);
   const [homeFeed, setHomeFeed] = useState<HomeFeedDto | null>(null);
   const [continueWatching, setContinueWatching] = useState<
     ContinueWatchingItemDto[]
@@ -127,9 +130,47 @@ export default function HomePage() {
       if (t === "movie" || t === "tv") {
         setSelectedMediaType(t);
       }
+      if (sp.get("welcome") === "1") {
+        try {
+          sessionStorage.removeItem("piloto_welcome_dismissed");
+        } catch {
+          // Silencioso
+        }
+        sp.delete("welcome");
+        const cleanSearch = sp.toString();
+        const nextUrl = `${window.location.pathname}${
+          cleanSearch ? `?${cleanSearch}` : ""
+        }${window.location.hash}`;
+        window.history.replaceState({}, "", nextUrl);
+      }
     }
     fetchHomeAndHistory();
   }, [fetchHomeAndHistory]);
+
+  useEffect(() => {
+    if (sessionStatus !== "authenticated" || !session?.user) {
+      setShowWelcomeBanner(false);
+      return;
+    }
+
+    try {
+      const dismissed = sessionStorage.getItem("piloto_welcome_dismissed");
+      if (dismissed !== "true") {
+        setShowWelcomeBanner(true);
+      }
+    } catch {
+      setShowWelcomeBanner(true);
+    }
+  }, [sessionStatus, session]);
+
+  const handleDismissWelcomeBanner = useCallback(() => {
+    setShowWelcomeBanner(false);
+    try {
+      sessionStorage.setItem("piloto_welcome_dismissed", "true");
+    } catch {
+      // Silencioso
+    }
+  }, []);
 
   useEffect(() => {
     const handleVisibilityOrFocus = () => {
@@ -200,6 +241,57 @@ export default function HomePage() {
             }
           }}
         />
+
+        {showWelcomeBanner && session?.user && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="fixed top-16 sm:top-20 right-3 sm:right-8 z-50 w-[calc(100vw-1.5rem)] max-w-md rounded-2xl bg-zinc-950/95 border border-netflix-red/40 p-4 sm:p-5 shadow-2xl shadow-black/80 backdrop-blur-xl animate-fade-in"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-8 h-8 rounded-xl bg-netflix-red/20 border border-netflix-red/40 flex items-center justify-center flex-shrink-0">
+                  <Sparkles className="w-4 h-4 text-netflix-red" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-netflix-red text-white">
+                      Users Priority • Beta
+                    </span>
+                  </div>
+                  <p className="text-xs font-bold text-zinc-200 truncate mt-1 flex items-center gap-1.5">
+                    <Mail className="w-3.5 h-3.5 text-netflix-red flex-shrink-0" />
+                    <span className="truncate">
+                      {session.user.email || session.user.name}
+                    </span>
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleDismissWelcomeBanner}
+                title="Cerrar mensaje de bienvenida"
+                aria-label="Cerrar mensaje de bienvenida"
+                className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-white/10 transition flex-shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="mt-3 text-xs sm:text-sm text-zinc-300 leading-relaxed">
+              Bienvenido{" "}
+              <span className="font-bold text-white">
+                {session.user.email || session.user.name || "usuario"}
+              </span>
+              , gracias por usar nuestra plataforma. Esta es una versión beta
+              lanzada para <span className="font-semibold text-white">users priority</span>;
+              se está trabajando en mejoras que podrán disfrutarlas a corto
+              plazo como la eliminación total de anuncios, el cual ya es mínimo.
+              ¡Gracias!
+            </p>
+          </div>
+        )}
 
         {!isExploring && homeFeed?.featured && (
           <HeroBanner movie={homeFeed.featured} />

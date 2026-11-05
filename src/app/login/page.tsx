@@ -35,7 +35,12 @@ function LoginCard() {
 
   const handleGoogleAuth = async () => {
     setLoading(true);
-    await signIn("google", { callbackUrl: "/" });
+    try {
+      sessionStorage.removeItem("piloto_welcome_dismissed");
+    } catch {
+      // Silencioso
+    }
+    await signIn("google", { callbackUrl: "/?welcome=1" });
   };
 
   const isRegister = mode === "register";

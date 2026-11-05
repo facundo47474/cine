@@ -160,13 +160,17 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // Si el segmento viene camuflado como imagen (ej. image/png en Streamwish hls4 sobre tiktokcdn),
-    // eliminamos la cabecera PNG falsa inicial hasta el primer byte de sincronización MPEG-TS (0x47 alineado a 188 bytes)
-    if (contentType.startsWith("image/")) {
+    // Si es un segmento HLS (no un archivo .mp4 completo), verificamos si trae cabecera camuflada
+    // (ej. PNG/JPEG/HTML falso antes del byte de sincronización MPEG-TS 0x47 alineado a 188 bytes)
+    const isDirectMp4 =
+      /\.mp4(\?|$)/i.test(parsedStreamUrl.pathname) ||
+      contentType.includes("video/mp4");
+
+    if (!isDirectMp4) {
       const rawBuffer = Buffer.from(await upstreamRes.arrayBuffer());
       let tsStartOffset = 0;
       if (rawBuffer.length > 376 && rawBuffer[0] !== 0x47) {
-        for (let i = 0; i < Math.min(rawBuffer.length - 376, 512); i++) {
+        for (let i = 0; i < Math.min(rawBuffer.length - 376, 1024); i++) {
           if (
             rawBuffer[i] === 0x47 &&
             rawBuffer[i + 188] === 0x47 &&
