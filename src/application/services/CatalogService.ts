@@ -1,4 +1,7 @@
-import { IMovieRepository } from "@/domain/interfaces/IMovieRepository";
+import {
+  CreateMirrorInput,
+  IMovieRepository,
+} from "@/domain/interfaces/IMovieRepository";
 import { ITokenCryptoService } from "@/domain/interfaces/ITokenCryptoService";
 import { ITmdbGateway, TmdbCatalogItem } from "@/domain/interfaces/ITmdbGateway";
 import { IMirrorResolver } from "@/domain/interfaces/IMirrorResolver";
@@ -276,18 +279,29 @@ export class CatalogService {
   }
 
   private needsAutomaticMirrorUpgrade(movie: Movie): boolean {
-    if (!movie.tmdbId) return false;
+    if (!movie.tmdbId || movie.mediaType === "SERIES") return false;
 
     const playable = movie.getPlayableMirrors();
-    if (playable.length <= 1) return true;
+    if (playable.length === 0) return true;
 
-    const hasEnglishSub = playable.some((m) => m.language === "Inglés (Sub)");
-    if (!hasEnglishSub) return true;
-
-    const hasStreamwishLat = playable.some(
-      (m) => m.serverName === "Streamwish-Lat"
+    const hasLegacyAggregator = playable.some(
+      (m) =>
+        m.rawUrl.includes("vidlink.pro") ||
+        m.rawUrl.includes("autoembed.cc") ||
+        m.rawUrl.includes("vidsrc.cc") ||
+        m.rawUrl.includes("multiembed.mov")
     );
-    if (!hasStreamwishLat) return true;
+    if (hasLegacyAggregator) return true;
+
+    // Si ya tiene al menos un enlace directo resuelto en Español Latino (hglink.to o dr0pstream.com),
+    // no lo sobreescribimos en producción.
+    const hasResolvedDirectLatino = playable.some(
+      (m) =>
+        m.language === "Latino" &&
+        !m.rawUrl.includes("embed69.org") &&
+        !m.rawUrl.includes("vidsrc.me")
+    );
+    if (hasResolvedDirectLatino) return false;
 
     const hasDegradedStreamwish = movie.mirrors.some(
       (m) =>
@@ -295,17 +309,38 @@ export class CatalogService {
     );
     if (hasDegradedStreamwish) return true;
 
-    const hasLegacyOrDeprecatedMirror = playable.some(
-      (m) =>
-        m.rawUrl.includes("vidlink.pro") ||
-        m.rawUrl.includes("autoembed.cc") ||
-        m.rawUrl.includes("vidsrc.cc") ||
-        m.rawUrl.includes("embed69.org")
-    );
+    return true;
+  }
 
-    if (hasLegacyOrDeprecatedMirror) return true;
+  private mergePreservingDirectMirrors(
+    existingMovie: Movie | null,
+    freshMirrors: CreateMirrorInput[]
+  ): CreateMirrorInput[] {
+    if (!existingMovie) return freshMirrors;
 
-    return false;
+    const existingDirectByServer = new Map<string, string>();
+    for (const m of existingMovie.mirrors) {
+      if (
+        !m.rawUrl.includes("embed69.org") &&
+        !m.rawUrl.includes("vidsrc.me") &&
+        !m.rawUrl.includes("multiembed.mov")
+      ) {
+        existingDirectByServer.set(m.serverName, m.rawUrl);
+      }
+    }
+
+    return freshMirrors.map((fm) => {
+      if (fm.rawUrl.includes("embed69.org")) {
+        const prevDirect = existingDirectByServer.get(fm.serverName);
+        if (prevDirect) {
+          return {
+            ...fm,
+            rawUrl: prevDirect,
+          };
+        }
+      }
+      return fm;
+    });
   }
 
   public async getMoviePlaybackData(
@@ -327,12 +362,16 @@ export class CatalogService {
 
       if (!movie || this.needsAutomaticMirrorUpgrade(movie)) {
         const metadata = await this.tmdbGateway.fetchMovieMetadata(tmdbId);
-        const defaultMirrors =
+        const rawMirrors =
           await this.mirrorResolver.resolveDefaultMirrorsForTmdb(
             tmdbId,
             metadata.title,
             metadata.releaseYear
           );
+        const defaultMirrors = this.mergePreservingDirectMirrors(
+          movie,
+          rawMirrors
+        );
 
         movie = await this.movieRepository.upsertMovieWithMirrors({
           tmdbId: metadata.tmdbId,
@@ -353,12 +392,17 @@ export class CatalogService {
       movie = await this.movieRepository.findByIdWithMirrors(idOrTmdbSlug);
 
       if (movie && movie.tmdbId && this.needsAutomaticMirrorUpgrade(movie)) {
-        const freshMirrors =
+        const rawMirrors =
           await this.mirrorResolver.resolveDefaultMirrorsForTmdb(
             movie.tmdbId,
             movie.title,
             movie.releaseYear
           );
+        const freshMirrors = this.mergePreservingDirectMirrors(
+          movie,
+          rawMirrors
+        );
+
         movie = await this.movieRepository.upsertMovieWithMirrors({
           tmdbId: movie.tmdbId,
           title: movie.title,

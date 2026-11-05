@@ -4,7 +4,15 @@ import AuthSessionProvider from "@/components/AuthSessionProvider";
 
 export const metadata: Metadata = {
   title: "PILOTO | Streaming",
-  description: "Plataforma privada de películas y estrenos.",
+  description: "Plataforma privada de películas, series y estrenos.",
+  icons: {
+    icon: [
+      { url: "/favicon.ico", sizes: "any" },
+      { url: "/icon", type: "image/png", sizes: "32x32" },
+    ],
+    shortcut: ["/favicon.ico"],
+    apple: [{ url: "/icon", sizes: "180x180", type: "image/png" }],
+  },
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",

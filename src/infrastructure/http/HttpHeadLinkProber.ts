@@ -17,7 +17,7 @@ export class HttpHeadLinkProber implements ILinkProber {
 
   public async probeUrl(
     url: string,
-    _format: MirrorFormat
+    format: MirrorFormat
   ): Promise<LinkProbeResult> {
     const startTime = Date.now();
 
@@ -32,7 +32,6 @@ export class HttpHeadLinkProber implements ILinkProber {
         signal: AbortSignal.timeout(this.timeoutMs),
       });
 
-      // Algunos servidores de video rechazan HEAD con 405 o 403; probamos pidiendo solo el primer byte
       if (response.status === 405 || response.status === 501) {
         response = await fetch(url, {
           method: "GET",
@@ -47,7 +46,12 @@ export class HttpHeadLinkProber implements ILinkProber {
 
       const elapsed = Date.now() - startTime;
       const status = response.status;
-      const isAlive = status >= 200 && status < 400;
+      // En plataformas serverless (Vercel AWS IPs), Cloudflare suele devolver 403 a peticiones HEAD/GET
+      // sobre servidores EMBED válidos (embed69, hglink, dr0pstream, vidsrc). No degradar por 403 en EMBED.
+      const isCloudflareEmbedChallenge =
+        format === MirrorFormat.EMBED && (status === 403 || status === 429);
+      const isAlive =
+        (status >= 200 && status < 400) || isCloudflareEmbedChallenge;
       const isPermanentGone = status === 404 || status === 410;
 
       return {

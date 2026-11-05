@@ -38,6 +38,12 @@ interface PlayLatinResolveResponse {
   sources?: PlayLatinSourceEntry[];
 }
 
+interface Embed69ResolutionResult {
+  url: string | null;
+  status: "RESOLVED" | "NOT_FOUND" | "BLOCKED_OR_ERROR";
+  cleanEmbedUrl: string;
+}
+
 function escapeHtmlAttribute(value: string): string {
   return value
     .replace(/&/g, "&amp;")
@@ -149,22 +155,25 @@ function decryptEmbed69Link(
 
 /**
  * Extrae y desencripta directamente en el servidor el enlace de Streamwish
- * desde Embed69 para evitar cargar la interfaz intermedia de Embed69,
- * eliminando de raíz el mensaje "Este servidor tiene ventanas emergentes y anuncios."
- * y evitando cualquier bloqueo de pantalla negra.
+ * desde Embed69, distinguiendo si un título no existe ("NOT_FOUND") vs si Cloudflare
+ * bloqueó la IP del datacenter de Vercel ("BLOCKED_OR_ERROR").
  */
 async function resolveDirectStreamwishUrlFromEmbed69(
   rawUrl: string
-): Promise<string | null> {
+): Promise<Embed69ResolutionResult> {
+  let cleanEmbedUrl = rawUrl;
   try {
     const parsedUrl = new URL(rawUrl);
     const requestedLang = (
       parsedUrl.searchParams.get("lang") || "LAT"
     ).toUpperCase();
     const baseCleanUrl = `${parsedUrl.origin}${parsedUrl.pathname}`;
+    cleanEmbedUrl = baseCleanUrl;
 
     const candidateUrls = [baseCleanUrl];
-    const epMatch = baseCleanUrl.match(/^(https?:\/\/[^/]+\/f\/tt\d+-\d+x)(\d+)$/i);
+    const epMatch = baseCleanUrl.match(
+      /^(https?:\/\/[^/]+\/f\/tt\d+-\d+x)(\d+)$/i
+    );
     if (epMatch) {
       const prefix = epMatch[1];
       const epDigits = epMatch[2];
@@ -177,38 +186,93 @@ async function resolveDirectStreamwishUrlFromEmbed69(
       }
     }
 
-    let html = "";
-    for (const fetchUrl of candidateUrls) {
-      const res = await fetch(fetchUrl, {
-        method: "GET",
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-          Accept:
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        },
-        signal: AbortSignal.timeout(4500),
-      });
+    const fetchCandidate = async (
+      fetchUrl: string
+    ): Promise<{
+      html: string | null;
+      notFound: boolean;
+      blockedOrError: boolean;
+      resolvedUrl: string;
+    }> => {
+      try {
+        const res = await fetch(fetchUrl, {
+          method: "GET",
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            Accept:
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          },
+          signal: AbortSignal.timeout(2500),
+        });
 
-      if (!res.ok) continue;
+        if (res.status === 404) {
+          return {
+            html: null,
+            notFound: true,
+            blockedOrError: false,
+            resolvedUrl: fetchUrl,
+          };
+        }
 
-      const text = await res.text();
-      if (text.includes("dataLink") && !text.includes("No folders found")) {
-        html = text;
-        break;
+        if (!res.ok) {
+          return {
+            html: null,
+            notFound: false,
+            blockedOrError: true,
+            resolvedUrl: fetchUrl,
+          };
+        }
+
+        const text = await res.text();
+        if (text.includes("No folders found") || !text.includes("dataLink")) {
+          return {
+            html: null,
+            notFound: true,
+            blockedOrError: false,
+            resolvedUrl: fetchUrl,
+          };
+        }
+
+        return {
+          html: text,
+          notFound: false,
+          blockedOrError: false,
+          resolvedUrl: fetchUrl,
+        };
+      } catch {
+        return {
+          html: null,
+          notFound: false,
+          blockedOrError: true,
+          resolvedUrl: fetchUrl,
+        };
       }
+    };
+
+    const results = await Promise.all(
+      candidateUrls.map((u) => fetchCandidate(u))
+    );
+    const validHit = results.find((r) => Boolean(r.html));
+
+    if (!validHit || !validHit.html) {
+      const anyBlocked = results.some((r) => r.blockedOrError);
+      return {
+        url: null,
+        status: anyBlocked ? "BLOCKED_OR_ERROR" : "NOT_FOUND",
+        cleanEmbedUrl,
+      };
     }
 
-    if (!html) {
-      return null;
-    }
+    cleanEmbedUrl = validHit.resolvedUrl;
+    const html = validHit.html;
 
     const challengeMatch = html.match(/POW_CHALLENGE\s*=\s*'([^']+)'/);
     const difficultyMatch = html.match(/POW_DIFFICULTY\s*=\s*(\d+)/);
     const saltMatch = html.match(/POW_SALT\s*=\s*'([^']+)'/);
 
     if (!challengeMatch || !difficultyMatch || !saltMatch) {
-      return null;
+      return { url: null, status: "BLOCKED_OR_ERROR", cleanEmbedUrl };
     }
 
     const aesKey = solveEmbed69AesKey(
@@ -216,16 +280,20 @@ async function resolveDirectStreamwishUrlFromEmbed69(
       Number(difficultyMatch[1]),
       saltMatch[1]
     );
-    if (!aesKey) return null;
+    if (!aesKey) {
+      return { url: null, status: "BLOCKED_OR_ERROR", cleanEmbedUrl };
+    }
 
     const dataLinkMatch = html.match(
       /let\s+dataLink\s*=\s*(\[\{[\s\S]*?\}\])\s*;\s*let\s+currentLanguageServers/
     );
-    if (!dataLinkMatch) return null;
+    if (!dataLinkMatch) {
+      return { url: null, status: "NOT_FOUND", cleanEmbedUrl };
+    }
 
     const dataLink = JSON.parse(dataLinkMatch[1]) as Embed69LanguageBlock[];
     if (!Array.isArray(dataLink) || dataLink.length === 0) {
-      return null;
+      return { url: null, status: "NOT_FOUND", cleanEmbedUrl };
     }
 
     // Ordenamos para elegir primero el idioma solicitado por el usuario (LAT -> ESP -> SUB)
@@ -247,11 +315,13 @@ async function resolveDirectStreamwishUrlFromEmbed69(
     });
 
     for (const block of dataLink) {
-      if (!Array.isArray(block.sortedEmbeds) || block.sortedEmbeds.length === 0) {
+      if (
+        !Array.isArray(block.sortedEmbeds) ||
+        block.sortedEmbeds.length === 0
+      ) {
         continue;
       }
 
-      // Priorizamos siempre Streamwish sobre cualquier otro servidor (descartando voe/vidhide como primera opción)
       const orderedEmbeds = [...block.sortedEmbeds].sort(
         (a, b) =>
           getServerPriorityWeight(a.servername) -
@@ -262,21 +332,25 @@ async function resolveDirectStreamwishUrlFromEmbed69(
         if (!candidate.link) continue;
         const decryptedUrl = decryptEmbed69Link(candidate.link, aesKey);
         if (decryptedUrl && decryptedUrl.startsWith("http")) {
-          return decryptedUrl;
+          return {
+            url: decryptedUrl,
+            status: "RESOLVED",
+            cleanEmbedUrl,
+          };
         }
       }
     }
 
-    return null;
+    return { url: null, status: "NOT_FOUND", cleanEmbedUrl };
   } catch {
-    return null;
+    return { url: null, status: "BLOCKED_OR_ERROR", cleanEmbedUrl };
   }
 }
 
 /**
- * Si Streamwish a través de Embed69 falla (por caída de base de datos 500/502 en Embed69),
+ * Si Streamwish a través de Embed69 falla o está bloqueado por IP en Vercel,
  * intenta resolver al vuelo un servidor secundario directo (Streamwish/Dropload/Filemoon)
- * para el mismo IMDb ID e idioma antes de disparar failover en el cliente.
+ * para el mismo IMDb ID e idioma.
  */
 async function resolveFallbackFromPlayLatin(
   rawUrl: string
@@ -304,7 +378,7 @@ async function resolveFallbackFromPlayLatin(
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
       },
-      signal: AbortSignal.timeout(3500),
+      signal: AbortSignal.timeout(2500),
     });
 
     if (!pageRes.ok) return null;
@@ -329,7 +403,7 @@ async function resolveFallbackFromPlayLatin(
         mode: "custom",
         token: tokenMatch[1],
       }),
-      signal: AbortSignal.timeout(3500),
+      signal: AbortSignal.timeout(2500),
     });
 
     if (!resolveRes.ok) return null;
@@ -348,7 +422,8 @@ async function resolveFallbackFromPlayLatin(
         Boolean(s.url && s.url.startsWith("http")) &&
         ((s.version || "").toLowerCase() === targetVersion ||
           (targetVersion === "latino" &&
-            (s.version || "").toLowerCase() === "castellano"))
+            ((s.version || "").toLowerCase() === "castellano" ||
+              (isTv && !s.version))))
     );
 
     const pool =
@@ -414,10 +489,7 @@ function unpackDeanEdwardsBlock(html: string): string | null {
 
 /**
  * Si el enlace pertenece a Streamwish (`hglink.to`, `audinifer.com`, `vibuxer.com`, `hanerix.com`),
- * extrae el stream HLS `.m3u8` directo (`hls2`) para permitir:
- * - Captura 100% automática del segundo exacto (`currentTime` y `seeked`) donde quedó el usuario.
- * - Reanudación automática en el segundo guardado (`startPosition`).
- * - Cero anuncios ni popups.
+ * extrae el stream HLS `.m3u8` directo (`hls4` / `hls2`).
  */
 async function extractStreamwishDirectHls(
   embedUrl: string
@@ -435,7 +507,9 @@ async function extractStreamwishDirectHls(
     const fileCode = codeMatch[1];
     const mirrorOrigins = ["https://audinifer.com", "https://vibuxer.com"];
 
-    for (const origin of mirrorOrigins) {
+    const probeOrigin = async (
+      origin: string
+    ): Promise<{ origin: string; unpacked: string } | null> => {
       try {
         const res = await fetch(`${origin}/e/${fileCode}`, {
           headers: {
@@ -443,102 +517,108 @@ async function extractStreamwishDirectHls(
               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
             Referer: "https://hglink.to/",
           },
-          signal: AbortSignal.timeout(4000),
+          signal: AbortSignal.timeout(2500),
         });
-
-        if (!res.ok) continue;
-
+        if (!res.ok) return null;
         const html = await res.text();
         const unpacked = unpackDeanEdwardsBlock(html);
-        if (!unpacked) continue;
+        if (!unpacked) return null;
+        return { origin, unpacked };
+      } catch {
+        return null;
+      }
+    };
 
-        const hls4Match = unpacked.match(/"hls4"\s*:\s*"([^"]+)"/);
-        const hls2Match = unpacked.match(/"hls2"\s*:\s*"([^"]+)"/);
-        const posterMatch = unpacked.match(/image\s*:\s*"([^"]+)"/);
-        const durationMatch = unpacked.match(/duration\s*:\s*"([0-9.]+)"/);
-        const durationSeconds = durationMatch
-          ? Math.floor(Number(durationMatch[1]) || 0)
-          : undefined;
-        const posterUrl = posterMatch?.[1] || "";
+    const originResults = await Promise.all(
+      mirrorOrigins.map((o) => probeOrigin(o))
+    );
+    const hit = originResults.find(
+      (r): r is { origin: string; unpacked: string } => Boolean(r)
+    );
+    if (!hit) return null;
 
-        // 1. Priorizar hls4 (el stream primario activo de Streamwish) pre-resolviendo el .m3u8 en el servidor
-        // para carga instantánea (0ms de latencia de manifiesto), duración exacta inmediata y cero bloqueos CORS.
-        if (hls4Match && hls4Match[1]) {
-          try {
-            const masterUrl = hls4Match[1].startsWith("http")
-              ? hls4Match[1]
-              : `${origin}${hls4Match[1]}`;
+    const { origin, unpacked } = hit;
+    const hls4Match = unpacked.match(/"hls4"\s*:\s*"([^"]+)"/);
+    const hls2Match = unpacked.match(/"hls2"\s*:\s*"([^"]+)"/);
+    const posterMatch = unpacked.match(/image\s*:\s*"([^"]+)"/);
+    const durationMatch = unpacked.match(/duration\s*:\s*"([0-9.]+)"/);
+    const durationSeconds = durationMatch
+      ? Math.floor(Number(durationMatch[1]) || 0)
+      : undefined;
+    const posterUrl = posterMatch?.[1] || "";
 
-            const masterRes = await fetch(masterUrl, {
+    if (hls4Match && hls4Match[1]) {
+      try {
+        const masterUrl = hls4Match[1].startsWith("http")
+          ? hls4Match[1]
+          : `${origin}${hls4Match[1]}`;
+
+        const masterRes = await fetch(masterUrl, {
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            Referer: `${origin}/e/${fileCode}`,
+          },
+          signal: AbortSignal.timeout(2500),
+        });
+
+        if (masterRes.ok) {
+          const masterText = await masterRes.text();
+          const variantLines = masterText
+            .split("\n")
+            .map((l) => l.trim())
+            .filter((l) => Boolean(l) && !l.startsWith("#"));
+
+          if (variantLines.length > 0) {
+            const chosenVariant = variantLines[variantLines.length - 1];
+            const variantUrl = new URL(chosenVariant, masterUrl).toString();
+
+            const variantRes = await fetch(variantUrl, {
               headers: {
                 "User-Agent":
                   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
                 Referer: `${origin}/e/${fileCode}`,
               },
-              signal: AbortSignal.timeout(3500),
+              signal: AbortSignal.timeout(2500),
             });
 
-            if (masterRes.ok) {
-              const masterText = await masterRes.text();
-              const variantLines = masterText
-                .split("\n")
-                .map((l) => l.trim())
-                .filter((l) => Boolean(l) && !l.startsWith("#"));
+            if (variantRes.ok) {
+              const rawVariantM3u8 = await variantRes.text();
+              if (rawVariantM3u8.includes("#EXTM3U")) {
+                const normalizedM3u8 = rawVariantM3u8
+                  .split("\n")
+                  .map((line) => {
+                    const trimmed = line.trim();
+                    if (!trimmed || trimmed.startsWith("#")) return trimmed;
+                    try {
+                      return new URL(trimmed, variantUrl).toString();
+                    } catch {
+                      return trimmed;
+                    }
+                  })
+                  .join("\n");
 
-              if (variantLines.length > 0) {
-                const chosenVariant = variantLines[variantLines.length - 1];
-                const variantUrl = new URL(chosenVariant, masterUrl).toString();
-
-                const variantRes = await fetch(variantUrl, {
-                  headers: {
-                    "User-Agent":
-                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-                    Referer: `${origin}/e/${fileCode}`,
-                  },
-                  signal: AbortSignal.timeout(3500),
-                });
-
-                if (variantRes.ok) {
-                  const rawVariantM3u8 = await variantRes.text();
-                  if (rawVariantM3u8.includes("#EXTM3U")) {
-                    const normalizedM3u8 = rawVariantM3u8
-                      .split("\n")
-                      .map((line) => {
-                        const trimmed = line.trim();
-                        if (!trimmed || trimmed.startsWith("#")) return trimmed;
-                        try {
-                          return new URL(trimmed, variantUrl).toString();
-                        } catch {
-                          return trimmed;
-                        }
-                      })
-                      .join("\n");
-
-                    return {
-                      hlsUrl: variantUrl,
-                      inlineM3u8: normalizedM3u8,
-                      posterUrl,
-                      durationSeconds,
-                    };
-                  }
-                }
+                return {
+                  hlsUrl: variantUrl,
+                  inlineM3u8: normalizedM3u8,
+                  posterUrl,
+                  durationSeconds,
+                };
               }
             }
-          } catch {
-            // Si falla la extracción de hls4, continuamos al respaldo hls2
           }
         }
-
-        if (hls2Match && hls2Match[1].startsWith("http")) {
-          return {
-            hlsUrl: hls2Match[1],
-            posterUrl,
-            durationSeconds,
-          };
-        }
       } catch {
-        // Intentar siguiente mirror de Streamwish
+        // Si falla la extracción de hls4, continuamos al respaldo hls2
       }
+    }
+
+    if (hls2Match && hls2Match[1].startsWith("http")) {
+      return {
+        hlsUrl: hls2Match[1],
+        posterUrl,
+        durationSeconds,
+      };
     }
 
     return null;
@@ -549,10 +629,6 @@ async function extractStreamwishDirectHls(
 
 /**
  * Endpoint Túnel de Reproducción (/api/stream/[token]).
- * - Valida sesión activa (o token firmado AES-256-GCM en modo receptor Smart TV `tv=1`),
- *   Rate Limiting por IP y protección Anti-Hotlinking compatible con proxies de Vercel.
- * - Si el mirror proviene de Embed69, extrae y desencripta directamente el enlace de Streamwish
- *   en el servidor para cargar el reproductor limpio al instante sin avisos ni pantallas intermedias.
  */
 export async function GET(
   request: NextRequest,
@@ -656,16 +732,16 @@ export async function GET(
     let isSecondaryServer = false;
 
     if (payload.rawUrl.includes("embed69.org/f/")) {
-      // 1. SIEMPRE intentamos iniciar primero extrayendo y desencriptando el servidor Streamwish directo
-      const directStreamwishUrl = await resolveDirectStreamwishUrlFromEmbed69(
+      // 1. Intentamos iniciar extrayendo y desencriptando el servidor Streamwish directo
+      const embed69Result = await resolveDirectStreamwishUrlFromEmbed69(
         payload.rawUrl
       );
 
-      if (directStreamwishUrl) {
-        finalEmbedUrl = directStreamwishUrl;
+      if (embed69Result.url) {
+        finalEmbedUrl = embed69Result.url;
       } else {
-        // 2. Recién si Streamwish (vía Embed69) falla o está caído (ej. HTTP 500 Too many connections / 502),
-        // analizamos e intentamos resolver un servidor secundario directo al vuelo (Dropload / Streamwish mirror)
+        // 2. Si Streamwish (vía Embed69) falla o está bloqueado por IP en Vercel,
+        // intentamos resolver un servidor secundario directo al vuelo (Dropload / PlayLatinSrc)
         const fallbackDirectUrl = await resolveFallbackFromPlayLatin(
           payload.rawUrl
         );
@@ -673,9 +749,9 @@ export async function GET(
         if (fallbackDirectUrl) {
           finalEmbedUrl = fallbackDirectUrl;
           isSecondaryServer = true;
-        } else {
-          // 3. Si tampoco hay fuente secundaria para ese IMDb ID, jamás renderizamos el iframe caído de Embed69
-          // (evitando la pantalla negra) y notificamos al reproductor padre para saltar al siguiente mirror en <50ms.
+        } else if (embed69Result.status === "NOT_FOUND") {
+          // 3A. Si Embed69 respondió explícitamente que el archivo no existe ("No folders found" / 404),
+          // notificamos al reproductor padre para saltar inmediatamente al siguiente mirror disponible.
           const failHtml = `<!DOCTYPE html>
 <html lang="es">
 <head><meta charset="utf-8" /><style>html,body{background:#000;margin:0;}</style></head>
@@ -697,6 +773,10 @@ export async function GET(
               "Cache-Control": "no-store, no-cache, must-revalidate",
             },
           });
+        } else {
+          // 3B. Si la extracción server-side fue bloqueada por Cloudflare en la IP AWS de Vercel (403/timeout),
+          // renderizamos la URL limpia en el navegador del usuario (IP residencial) donde sí reproduce en Español Latino.
+          finalEmbedUrl = embed69Result.cleanEmbedUrl;
         }
       }
     }

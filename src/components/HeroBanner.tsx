@@ -11,6 +11,8 @@ interface HeroBannerProps {
 
 export default function HeroBanner({ movie }: HeroBannerProps) {
   const bgImage = movie.backdropUrl || movie.posterUrl;
+  const isSeries = movie.mediaType === "SERIES";
+  const watchHref = isSeries ? `/series/${movie.id}` : `/watch/${movie.id}`;
 
   return (
     <section className="relative w-full h-[64vh] sm:h-[74vh] min-h-[420px] sm:min-h-[500px] flex items-end pb-12 sm:pb-16 overflow-hidden">
@@ -64,7 +66,7 @@ export default function HeroBanner({ movie }: HeroBannerProps) {
           <div className="pt-1 sm:pt-2 flex flex-wrap items-center gap-3">
             <Link
               className="inline-flex items-center justify-center gap-2 w-full sm:w-auto px-7 py-3 rounded-lg bg-netflix-red text-white font-bold text-sm hover:bg-red-700 active:scale-[0.99] transition shadow-lg"
-              href={`/watch/${movie.id}`}
+              href={watchHref}
             >
               <Play className="w-5 h-5 fill-white" />
               Ver ahora

@@ -56,7 +56,8 @@ export const seriesService = new SeriesService(
   seriesRepository,
   watchHistoryRepository,
   tmdbGateway,
-  tokenCryptoService
+  tokenCryptoService,
+  mirrorResolver
 );
 
 export {

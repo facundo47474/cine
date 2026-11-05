@@ -27,6 +27,7 @@ interface Embed69StreamwishExtraction {
 interface PlayLatinSourceEntry {
   url?: string;
   server?: string;
+  name?: string;
   version?: string;
 }
 
@@ -36,8 +37,8 @@ interface PlayLatinResolveResponse {
 
 /**
  * Resolver de Mirrors con extracción directa de Streamwish como servidor primario (#1)
- * y cascada automática de servidores secundarios verificados (PlayLatin / Dropload, MultiEmbed, VidSrc)
- * cuando Streamwish o Embed69 no están disponibles.
+ * y cascada automática de servidores secundarios verificados (PlayLatin / Dropload, VidSrc)
+ * tanto para Películas como para Episodios de Series de TV.
  */
 export class AutoEmbedMirrorResolver implements IMirrorResolver {
   private async fetchImdbId(tmdbId: number): Promise<string | null> {
@@ -55,7 +56,34 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
 
       const res = await fetch(url.toString(), {
         headers,
-        signal: AbortSignal.timeout(4000),
+        signal: AbortSignal.timeout(3500),
+      });
+      if (!res.ok) return null;
+
+      const data = (await res.json()) as TmdbMovieExternalDetails;
+      return data.imdb_id || null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async fetchTvImdbId(tmdbId: number): Promise<string | null> {
+    const apiKey = process.env.TMDB_API_KEY?.trim();
+    const bearer = process.env.TMDB_BEARER_TOKEN?.trim();
+    if (!apiKey && !bearer) return null;
+
+    try {
+      const url = new URL(
+        `https://api.themoviedb.org/3/tv/${tmdbId}/external_ids`
+      );
+      if (apiKey && !bearer) url.searchParams.set("api_key", apiKey);
+
+      const headers: Record<string, string> = { Accept: "application/json" };
+      if (bearer) headers["Authorization"] = `Bearer ${bearer}`;
+
+      const res = await fetch(url.toString(), {
+        headers,
+        signal: AbortSignal.timeout(3500),
       });
       if (!res.ok) return null;
 
@@ -142,27 +170,53 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
    * Intenta extraer directamente los enlaces desencriptados de Streamwish (ej. hglink.to/e/...)
    * desde Embed69 para los idiomas Latino y Subtitulado.
    */
-  private async extractDirectStreamwishFromEmbed69(
-    imdbId: string
+  public async extractDirectStreamwishFromEmbed69(
+    slugOrImdbId: string
   ): Promise<Embed69StreamwishExtraction> {
     try {
-      const res = await fetch(`https://embed69.org/f/${imdbId}`, {
-        method: "GET",
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-          Accept:
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        },
-        signal: AbortSignal.timeout(4000),
-      });
-
-      if (!res.ok) {
-        return { latUrl: null, subUrl: null };
+      const candidateSlugs = [slugOrImdbId];
+      const epMatch = slugOrImdbId.match(/^(tt\d+-\d+x)(\d+)$/i);
+      if (epMatch) {
+        const prefix = epMatch[1];
+        const epDigits = epMatch[2];
+        const unpadded = String(Number(epDigits));
+        const padded = unpadded.padStart(2, "0");
+        const altSlug =
+          epDigits === padded ? `${prefix}${unpadded}` : `${prefix}${padded}`;
+        if (altSlug !== slugOrImdbId) {
+          candidateSlugs.push(altSlug);
+        }
       }
 
-      const html = await res.text();
-      if (!html.includes("dataLink") || html.includes("No folders found")) {
+      const fetchCandidate = async (slug: string): Promise<string | null> => {
+        try {
+          const res = await fetch(`https://embed69.org/f/${slug}`, {
+            method: "GET",
+            headers: {
+              "User-Agent":
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+              Accept:
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+            signal: AbortSignal.timeout(3000),
+          });
+          if (!res.ok) return null;
+          const text = await res.text();
+          if (text.includes("dataLink") && !text.includes("No folders found")) {
+            return text;
+          }
+          return null;
+        } catch {
+          return null;
+        }
+      };
+
+      const htmlResults = await Promise.all(
+        candidateSlugs.map((s) => fetchCandidate(s))
+      );
+      const html = htmlResults.find((h): h is string => Boolean(h));
+
+      if (!html) {
         return { latUrl: null, subUrl: null };
       }
 
@@ -196,6 +250,7 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
       }
 
       let latUrl: string | null = null;
+      let espUrl: string | null = null;
       let subUrl: string | null = null;
 
       for (const block of dataLink) {
@@ -217,8 +272,10 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
           if (!candidate.link) continue;
           const decrypted = this.decryptEmbed69Link(candidate.link, aesKey);
           if (decrypted && decrypted.startsWith("http")) {
-            if (lang === "LAT" && !latUrl) {
+            if ((lang === "LAT" || lang === "LATINO") && !latUrl) {
               latUrl = decrypted;
+            } else if ((lang === "ESP" || lang === "CASTELLANO") && !espUrl) {
+              espUrl = decrypted;
             } else if ((lang === "SUB" || lang === "VOSE") && !subUrl) {
               subUrl = decrypted;
             }
@@ -227,7 +284,7 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
         }
       }
 
-      return { latUrl, subUrl };
+      return { latUrl: latUrl || espUrl, subUrl };
     } catch {
       return { latUrl: null, subUrl: null };
     }
@@ -235,19 +292,27 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
 
   /**
    * Extrae fuentes secundarias directas (ej. Dropload / XVideoSharing / Doodstream)
-   * desde PlayLatinSrc para tenerlas listas como respaldo inmediato si Streamwish falla.
+   * desde PlayLatinSrc para tenerlas listas como respaldo inmediato tanto en películas como en series.
    */
-  private async extractPlayLatinFallbackSources(
-    imdbId: string
+  public async extractPlayLatinFallbackSources(
+    imdbId: string,
+    isTv: boolean = false,
+    seasonNumber: number = 1,
+    episodeNumber: number = 1
   ): Promise<{ latUrl: string | null; subUrl: string | null }> {
     try {
-      const pageUrl = `https://playlatinsrc.co/custom/movie/${imdbId}`;
+      const seasonStr = String(seasonNumber);
+      const episodeStr = String(episodeNumber);
+      const pageUrl = isTv
+        ? `https://playlatinsrc.co/custom/serial/${imdbId}/${seasonStr}/${episodeStr}`
+        : `https://playlatinsrc.co/custom/movie/${imdbId}`;
+
       const pageRes = await fetch(pageUrl, {
         headers: {
           "User-Agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
         },
-        signal: AbortSignal.timeout(3500),
+        signal: AbortSignal.timeout(3000),
       });
 
       if (!pageRes.ok) return { latUrl: null, subUrl: null };
@@ -265,14 +330,14 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
         },
         body: JSON.stringify({
-          type: "movie",
+          type: isTv ? "tv" : "movie",
           id: imdbId,
-          season: "1",
-          episode: "1",
+          season: seasonStr,
+          episode: episodeStr,
           mode: "custom",
           token: tokenMatch[1],
         }),
-        signal: AbortSignal.timeout(3500),
+        signal: AbortSignal.timeout(3000),
       });
 
       if (!resolveRes.ok) return { latUrl: null, subUrl: null };
@@ -280,16 +345,8 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
       const payload = (await resolveRes.json()) as PlayLatinResolveResponse;
       const sources = Array.isArray(payload.sources) ? payload.sources : [];
 
-      const pickBestSource = (targetVersion: string): string | null => {
-        const matching = sources.filter(
-          (s) =>
-            (s.version || "").toLowerCase() === targetVersion &&
-            Boolean(s.url && s.url.startsWith("http"))
-        );
-        if (matching.length === 0) return null;
-
-        // Priorizamos servidores estilo Streamwish/Dropload sobre otros
-        matching.sort((a, b) => {
+      const sortSources = (list: PlayLatinSourceEntry[]) => {
+        return [...list].sort((a, b) => {
           const score = (srv?: string) => {
             const name = (srv || "").toLowerCase();
             if (name.includes("streamwish")) return 1;
@@ -298,10 +355,32 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
             if (name.includes("doodstream")) return 4;
             return 5;
           };
-          return score(a.server) - score(b.server);
+          return score(a.server || a.name) - score(b.server || b.name);
         });
+      };
 
-        return matching[0].url || null;
+      const pickBestSource = (targetVersion: string): string | null => {
+        const matching = sources.filter(
+          (s) =>
+            (s.version || "").toLowerCase() === targetVersion &&
+            Boolean(s.url && s.url.startsWith("http"))
+        );
+
+        if (matching.length > 0) {
+          return sortSources(matching)[0].url || null;
+        }
+
+        // En series de TV, PlayLatinSrc devuelve las fuentes en Español Latino sin propiedad `version`
+        if (isTv && targetVersion === "latino") {
+          const untagged = sources.filter(
+            (s) => !s.version && Boolean(s.url && s.url.startsWith("http"))
+          );
+          if (untagged.length > 0) {
+            return sortSources(untagged)[0].url || null;
+          }
+        }
+
+        return null;
       };
 
       return {
@@ -322,10 +401,14 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
     if (imdbId) {
       const [streamwish, playLatin] = await Promise.all([
         this.extractDirectStreamwishFromEmbed69(imdbId),
-        this.extractPlayLatinFallbackSources(imdbId),
+        this.extractPlayLatinFallbackSources(imdbId, false),
       ]);
 
-      // 1. SIEMPRE iniciar con Streamwish como Prioridad #1 (directo si Embed69 respondió, o vía túnel extractor si Embed69 tuvo hipo temporal)
+      // Si Streamwish directo se resolvió (hglink.to), es prioridad #1.
+      // Si estamos en Vercel y Embed69 bloqueó la IP AWS pero PlayLatin resolvió el link directo,
+      // ponemos el link directo resuelto como prioridad #1 para que cargue al instante sin salto de error.
+      const hasDirectStreamwishLat = Boolean(streamwish.latUrl);
+
       candidates.push({
         serverName: "Streamwish-Lat",
         language: "Latino",
@@ -334,10 +417,9 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
           `https://embed69.org/f/${imdbId}?lang=LAT&prefer=streamwish`,
         format: MirrorFormat.EMBED,
         quality: "1080p",
-        priority: 1,
+        priority: hasDirectStreamwishLat ? 1 : 2,
       });
 
-      // 2. Respaldo secundario inmediato en Latino (Dropload / PlayLatin directo) por si Streamwish falla
       if (playLatin.latUrl) {
         candidates.push({
           serverName: "Dropload-Lat",
@@ -345,11 +427,12 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
           rawUrl: playLatin.latUrl,
           format: MirrorFormat.EMBED,
           quality: "1080p",
-          priority: 2,
+          priority: hasDirectStreamwishLat ? 2 : 1,
         });
       }
 
-      // 3. SIEMPRE iniciar Inglés (Sub) con Streamwish como primera opción de ese idioma
+      const hasDirectStreamwishSub = Boolean(streamwish.subUrl);
+
       candidates.push({
         serverName: "Streamwish-Sub",
         language: "Inglés (Sub)",
@@ -358,10 +441,9 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
           `https://embed69.org/f/${imdbId}?lang=SUB&prefer=streamwish`,
         format: MirrorFormat.EMBED,
         quality: "1080p",
-        priority: 4,
+        priority: hasDirectStreamwishSub ? 3 : 4,
       });
 
-      // 4. Respaldo secundario inmediato en Inglés (Sub)
       if (playLatin.subUrl) {
         candidates.push({
           serverName: "Dropload-Sub",
@@ -369,23 +451,105 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
           rawUrl: playLatin.subUrl,
           format: MirrorFormat.EMBED,
           quality: "1080p",
-          priority: 5,
+          priority: hasDirectStreamwishSub ? 4 : 3,
         });
       }
     }
 
-    if (candidates.length === 0) {
-      const backupEn: CreateMirrorInput = {
-        serverName: "Backup-En",
-        language: "Inglés (Sub)",
-        rawUrl: `https://vidsrc.me/embed/movie?tmdb=${tmdbId}&ds_lang=es`,
+    // Respaldo final de emergencia (con subtítulos en español) para garantizar que jamás falle el reproductor
+    candidates.push({
+      serverName: "Backup-En",
+      language: "Inglés (Sub)",
+      rawUrl: `https://vidsrc.me/embed/movie?tmdb=${tmdbId}&ds_lang=es`,
+      format: MirrorFormat.EMBED,
+      quality: "1080p",
+      priority: 6,
+    });
+
+    return candidates.sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
+  }
+
+  public async resolveDefaultMirrorsForTvEpisode(
+    tmdbId: number,
+    seasonNumber: number,
+    episodeNumber: number,
+    imdbIdHint?: string | null
+  ): Promise<CreateMirrorInput[]> {
+    const imdbId = imdbIdHint || (await this.fetchTvImdbId(tmdbId));
+    const candidates: CreateMirrorInput[] = [];
+
+    if (imdbId) {
+      const paddedEp = String(episodeNumber).padStart(2, "0");
+      const embed69EpisodeSlug = `${imdbId}-${seasonNumber}x${paddedEp}`;
+
+      const [streamwish, playLatin] = await Promise.all([
+        this.extractDirectStreamwishFromEmbed69(embed69EpisodeSlug),
+        this.extractPlayLatinFallbackSources(
+          imdbId,
+          true,
+          seasonNumber,
+          episodeNumber
+        ),
+      ]);
+
+      const hasDirectStreamwishLat = Boolean(streamwish.latUrl);
+
+      candidates.push({
+        serverName: "Streamwish-Lat",
+        language: "Latino",
+        rawUrl:
+          streamwish.latUrl ||
+          `https://embed69.org/f/${embed69EpisodeSlug}?lang=LAT&prefer=streamwish`,
         format: MirrorFormat.EMBED,
         quality: "1080p",
-        priority: 6,
-      };
+        priority: hasDirectStreamwishLat ? 1 : 2,
+      });
 
-      candidates.push(backupEn);
+      if (playLatin.latUrl) {
+        candidates.push({
+          serverName: "Dropload-Lat",
+          language: "Latino",
+          rawUrl: playLatin.latUrl,
+          format: MirrorFormat.EMBED,
+          quality: "1080p",
+          priority: hasDirectStreamwishLat ? 2 : 1,
+        });
+      }
+
+      const hasDirectStreamwishSub = Boolean(streamwish.subUrl);
+
+      candidates.push({
+        serverName: "Streamwish-Sub",
+        language: "Inglés (Sub)",
+        rawUrl:
+          streamwish.subUrl ||
+          `https://embed69.org/f/${embed69EpisodeSlug}?lang=SUB&prefer=streamwish`,
+        format: MirrorFormat.EMBED,
+        quality: "1080p",
+        priority: hasDirectStreamwishSub ? 3 : 4,
+      });
+
+      if (playLatin.subUrl) {
+        candidates.push({
+          serverName: "Dropload-Sub",
+          language: "Inglés (Sub)",
+          rawUrl: playLatin.subUrl,
+          format: MirrorFormat.EMBED,
+          quality: "1080p",
+          priority: hasDirectStreamwishSub ? 4 : 3,
+        });
+      }
     }
+
+    // Respaldo final de emergencia para evitar cartel de contenido no disponible si algún episodio aún no fue doblado
+    candidates.push({
+      serverName: "Backup-Sub",
+      language: "Inglés (Sub)",
+      rawUrl: `https://vidsrc.me/embed/tv?tmdb=${tmdbId}&season=${seasonNumber}&episode=${episodeNumber}&ds_lang=es`,
+      format: MirrorFormat.EMBED,
+      quality: "1080p",
+      priority: 6,
+    });
 
     return candidates.sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
   }

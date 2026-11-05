@@ -10,6 +10,7 @@ import {
   UpsertSeriesInput,
   EpisodeHierarchy,
 } from "@/domain/interfaces/ISeriesRepository";
+import { CreateMirrorInput } from "@/domain/interfaces/IMovieRepository";
 import { Movie } from "@/domain/entities/Movie";
 import { Season } from "@/domain/entities/Season";
 import { Episode } from "@/domain/entities/Episode";
@@ -101,7 +102,6 @@ export class PrismaSeriesRepository implements ISeriesRepository {
       where: { tmdbId, mediaType: "SERIES" },
     });
     if (!row) {
-      // Fallback a tmdbId sin filtrar por mediaType por compatibilidad
       const fallback = await this.db.movie.findUnique({ where: { tmdbId } });
       return fallback ? this.mapMovieToDomain(fallback) : null;
     }
@@ -300,7 +300,6 @@ export class PrismaSeriesRepository implements ISeriesRepository {
       });
     }
 
-    // Procesar temporadas y episodios
     for (const seasonData of data.seasons) {
       const seasonRecord = await this.db.season.upsert({
         where: {
@@ -337,7 +336,7 @@ export class PrismaSeriesRepository implements ISeriesRepository {
             title: ep.title,
             overview: ep.overview ?? null,
             duration: ep.duration ?? 45,
-            videoUrl: ep.videoUrl ?? "",
+            ...(ep.videoUrl ? { videoUrl: ep.videoUrl } : {}),
             thumbnailUrl: ep.thumbnailUrl ?? null,
             introStart: ep.introStart ?? null,
             introEnd: ep.introEnd ?? null,
@@ -363,6 +362,30 @@ export class PrismaSeriesRepository implements ISeriesRepository {
       series: this.mapMovieToDomain(seriesRecord),
       seasons: fullSeasons,
     };
+  }
+
+  public async saveEpisodeMirrors(
+    episodeId: string,
+    mirrors: CreateMirrorInput[]
+  ): Promise<void> {
+    if (!mirrors || mirrors.length === 0) return;
+
+    const mirrorCreateData = mirrors.map((m, idx) => ({
+      episodeId,
+      serverName: m.serverName,
+      language: m.language || "Latino",
+      rawUrl: m.rawUrl,
+      format: m.format,
+      quality: m.quality || "1080p",
+      priority: m.priority ?? idx + 1,
+      status: MirrorStatus.ACTIVE,
+      consecutiveFailures: 0,
+    }));
+
+    await this.db.$transaction([
+      this.db.episodeMirror.deleteMany({ where: { episodeId } }),
+      this.db.episodeMirror.createMany({ data: mirrorCreateData }),
+    ]);
   }
 
   public async findAvailableSeries(

@@ -1,6 +1,7 @@
 import { Movie } from "../entities/Movie";
 import { Season } from "../entities/Season";
 import { Episode } from "../entities/Episode";
+import { CreateMirrorInput } from "./IMovieRepository";
 
 export interface UpsertEpisodeInput {
   episodeNumber: number;
@@ -52,5 +53,6 @@ export interface ISeriesRepository {
   findEpisodeHierarchy(episodeId: string): Promise<EpisodeHierarchy | null>;
   findSeriesDetails(idOrTmdbId: string): Promise<{ series: Movie; seasons: Season[] } | null>;
   upsertSeries(data: UpsertSeriesInput): Promise<{ series: Movie; seasons: Season[] }>;
+  saveEpisodeMirrors(episodeId: string, mirrors: CreateMirrorInput[]): Promise<void>;
   findAvailableSeries(searchQuery?: string, genre?: string): Promise<Movie[]>;
 }

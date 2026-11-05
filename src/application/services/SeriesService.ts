@@ -2,6 +2,7 @@ import { ISeriesRepository } from "@/domain/interfaces/ISeriesRepository";
 import { IWatchHistoryRepository } from "@/domain/interfaces/IWatchHistoryRepository";
 import { ITmdbGateway } from "@/domain/interfaces/ITmdbGateway";
 import { ITokenCryptoService } from "@/domain/interfaces/ITokenCryptoService";
+import { IMirrorResolver } from "@/domain/interfaces/IMirrorResolver";
 import { SignedMirrorStreamDto } from "../dto/PlaybackStreamDto";
 import { MirrorFormat } from "@/domain/enums/MirrorFormat";
 import { MirrorStatus } from "@/domain/enums/MirrorStatus";
@@ -19,7 +20,8 @@ export class SeriesService {
     private readonly seriesRepository: ISeriesRepository,
     private readonly historyRepository: IWatchHistoryRepository,
     private readonly tmdbGateway: ITmdbGateway,
-    private readonly tokenCryptoService: ITokenCryptoService
+    private readonly tokenCryptoService: ITokenCryptoService,
+    private readonly mirrorResolver?: IMirrorResolver
   ) {}
 
   /**
@@ -82,7 +84,6 @@ export class SeriesService {
                   overview: ep.overview,
                   duration: ep.duration,
                   thumbnailUrl: ep.thumbnailUrl,
-                  videoUrl: "",
                 })),
               },
               // Si hay más temporadas en los metadatos, creamos temporadas esqueleto
@@ -242,7 +243,6 @@ export class SeriesService {
                     overview: ep.overview,
                     duration: ep.duration,
                     thumbnailUrl: ep.thumbnailUrl,
-                    videoUrl: "",
                   })),
                 },
               ],
@@ -524,7 +524,7 @@ export class SeriesService {
     // 1. Direct videoUrl si existe
     if (episode.videoUrl && episode.videoUrl.trim() !== "") {
       candidateMirrors.push({
-        serverName: "Principal",
+        serverName: "Streamwish-Lat",
         language: "Latino",
         rawUrl: episode.videoUrl,
         format: episode.videoUrl.includes(".m3u8") ? MirrorFormat.HLS : MirrorFormat.EMBED,
@@ -533,19 +533,58 @@ export class SeriesService {
     }
 
     // 2. Mirrors de BD
-    for (const mirror of episode.getPlayableMirrors()) {
-      candidateMirrors.push({
-        serverName: mirror.serverName,
-        language: mirror.language,
-        rawUrl: mirror.rawUrl,
-        format: mirror.format,
-        quality: mirror.quality,
-      });
-    }
+    const existingPlayable = episode.getPlayableMirrors();
+    const hasDirectResolvedInDb = existingPlayable.some(
+      (m) =>
+        !m.rawUrl.includes("embed69.org") && !m.rawUrl.includes("vidsrc.me")
+    );
 
-    // 3. Resolución directa e interna en Español Latino (vía Embed69 -> Streamwish HLS directo / PlayLatinSrc fallback en el backend)
-    // Sin agregadores manuales que muestren barras de servidores ni audio en inglés.
-    if (tmdbId) {
+    if (hasDirectResolvedInDb) {
+      for (const mirror of existingPlayable) {
+        candidateMirrors.push({
+          serverName: mirror.serverName,
+          language: mirror.language,
+          rawUrl: mirror.rawUrl,
+          format: mirror.format,
+          quality: mirror.quality,
+        });
+      }
+    } else if (tmdbId && this.mirrorResolver) {
+      const imdbId = await this.tmdbGateway.fetchTvImdbId(tmdbId);
+      const resolvedMirrors =
+        await this.mirrorResolver.resolveDefaultMirrorsForTvEpisode(
+          tmdbId,
+          seasonNum,
+          epNum,
+          imdbId
+        );
+
+      const newlyResolvedDirect = resolvedMirrors.some(
+        (m) =>
+          !m.rawUrl.includes("embed69.org") && !m.rawUrl.includes("vidsrc.me")
+      );
+
+      if (newlyResolvedDirect || existingPlayable.length === 0) {
+        try {
+          await this.seriesRepository.saveEpisodeMirrors(
+            episode.id,
+            resolvedMirrors
+          );
+        } catch {
+          // No bloquear reproducción si falla el guardado en caché
+        }
+      }
+
+      for (const m of resolvedMirrors) {
+        candidateMirrors.push({
+          serverName: m.serverName,
+          language: m.language || "Latino",
+          rawUrl: m.rawUrl,
+          format: m.format,
+          quality: m.quality || "1080p",
+        });
+      }
+    } else if (tmdbId) {
       const imdbId = await this.tmdbGateway.fetchTvImdbId(tmdbId);
 
       if (imdbId) {
@@ -568,15 +607,15 @@ export class SeriesService {
             quality: "1080p",
           }
         );
-      } else {
-        candidateMirrors.push({
-          serverName: "Backup-Sub",
-          language: "Inglés (Sub)",
-          rawUrl: `https://vidsrc.me/embed/tv?tmdb=${tmdbId}&season=${seasonNum}&episode=${epNum}&ds_lang=es`,
-          format: MirrorFormat.EMBED,
-          quality: "1080p",
-        });
       }
+
+      candidateMirrors.push({
+        serverName: "Backup-Sub",
+        language: "Inglés (Sub)",
+        rawUrl: `https://vidsrc.me/embed/tv?tmdb=${tmdbId}&season=${seasonNum}&episode=${epNum}&ds_lang=es`,
+        format: MirrorFormat.EMBED,
+        quality: "1080p",
+      });
     }
 
     const ttlHours = Number(process.env.STREAM_TOKEN_TTL_HOURS || "4");
