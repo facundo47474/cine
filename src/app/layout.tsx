@@ -8,10 +8,10 @@ export const metadata: Metadata = {
   icons: {
     icon: [
       { url: "/favicon.ico", sizes: "any" },
-      { url: "/icon", type: "image/png", sizes: "32x32" },
+      { url: "/icon.svg", type: "image/svg+xml" },
     ],
     shortcut: ["/favicon.ico"],
-    apple: [{ url: "/icon", sizes: "180x180", type: "image/png" }],
+    apple: [{ url: "/icon.svg", type: "image/svg+xml" }],
   },
   appleWebApp: {
     capable: true,
