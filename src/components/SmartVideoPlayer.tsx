@@ -23,6 +23,10 @@ import {
 import { SignedMirrorStreamDto } from "@/application/dto/PlaybackStreamDto";
 import { MirrorFormat } from "@/domain/enums/MirrorFormat";
 import { PresentationConnection } from "@/types/cast";
+import SmartPlayer, {
+  SmartAdblockHelperBar,
+  SmartPlayerStatus,
+} from "@/components/video/SmartPlayer";
 
 const GOOGLE_CAST_SDK_URL =
   "https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1";
@@ -240,7 +244,20 @@ export default function SmartVideoPlayer({
   }, [durationMins]);
 
   const orderedStreams = useMemo(() => {
-    const sorted = [...streams].sort((a, b) => a.priority - b.priority);
+    const getServerExtractRank = (serverName: string): number => {
+      const lower = (serverName || "").toLowerCase();
+      if (lower.includes("streamwish")) return 1;
+      if (lower.includes("filemoon") || lower.includes("vidhide")) return 2;
+      if (lower.includes("dropload")) return 3;
+      return 4;
+    };
+
+    const sorted = [...streams].sort((a, b) => {
+      const rankDiff =
+        getServerExtractRank(a.serverName) - getServerExtractRank(b.serverName);
+      if (rankDiff !== 0) return rankDiff;
+      return a.priority - b.priority;
+    });
     const matching = sorted.filter((s) => s.language === preferredLanguage);
     const fallback = sorted.filter((s) => s.language !== preferredLanguage);
     return [...matching, ...fallback];
@@ -256,16 +273,20 @@ export default function SmartVideoPlayer({
   const [castDeviceName, setCastDeviceName] = useState<string | null>(null);
   const [tunnelUsingSecondary, setTunnelUsingSecondary] =
     useState<boolean>(false);
+  const [smartPlayerStatus, setSmartPlayerStatus] =
+    useState<SmartPlayerStatus>("loading");
 
   useEffect(() => {
     setActiveIndex(0);
     setAllMirrorsDown(orderedStreams.length === 0);
     setShieldActive(true);
     setTunnelUsingSecondary(false);
+    setSmartPlayerStatus("loading");
   }, [orderedStreams, preferredLanguage]);
 
   useEffect(() => {
     setTunnelUsingSecondary(false);
+    setSmartPlayerStatus("loading");
   }, [activeIndex]);
 
   const currentStream: SignedMirrorStreamDto | undefined =
@@ -908,16 +929,17 @@ export default function SmartVideoPlayer({
   const isSeriesPlayer = Boolean(seriesTitle || seasonNumber || episodeNumber);
 
   return (
-    <div
-      ref={containerRef}
-      onMouseEnter={() => {
-        if (shieldActive) {
-          setShieldActive(false);
-          setPlaybackStarted(true);
-        }
-      }}
-      className="group relative w-full aspect-video rounded-2xl overflow-hidden bg-black border border-white/10 shadow-2xl"
-    >
+    <div className="w-full space-y-2.5">
+      <div
+        ref={containerRef}
+        onMouseEnter={() => {
+          if (shieldActive) {
+            setShieldActive(false);
+            setPlaybackStarted(true);
+          }
+        }}
+        className="group relative w-full aspect-video rounded-2xl overflow-hidden bg-black border border-white/10 shadow-2xl"
+      >
       {/* 1. Header flotante del Reproductor (Fase 4.1) */}
       <div className="absolute top-0 inset-x-0 p-4 sm:p-6 bg-gradient-to-b from-black/85 via-black/40 to-transparent z-20 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-between">
         <div className="min-w-0 max-w-xl">
@@ -965,27 +987,53 @@ export default function SmartVideoPlayer({
           </button>
         </div>
       ) : currentStream.format === MirrorFormat.EMBED ? (
-        <>
-          <iframe
-            ref={iframeRef}
-            key={currentStream.mirrorId}
-            src={embedSrcWithResume}
-            title={movieTitle}
-            className="w-full h-full border-0"
-            allow="autoplay *; fullscreen *; picture-in-picture *; encrypted-media *"
-            allowFullScreen
-            onError={() => handleStreamError(currentStream)}
-          />
-
-          {shieldActive && (
-            <div
-              onClick={handleShieldAbsorb}
-              onTouchStart={handleShieldAbsorb}
-              className="absolute inset-x-0 top-0 h-10 z-10 bg-transparent pointer-events-auto"
-              aria-hidden="true"
-            />
-          )}
-        </>
+        <SmartPlayer
+          key={currentStream.mirrorId}
+          embedUrl={embedSrcWithResume}
+          backupEmbedUrls={orderedStreams
+            .slice(activeIndex + 1)
+            .map((s) => s.streamUrl)}
+          title={
+            isSeriesPlayer
+              ? `${seriesTitle || "Serie"} - T${seasonNumber || 1}:E${episodeNumber || 1}${episodeTitle ? ` · ${episodeTitle}` : ""}`
+              : movieTitle
+          }
+          initialTimeSeconds={initialResumeSecRef.current}
+          hideInlineHelperBar={true}
+          onStatusChange={setSmartPlayerStatus}
+          videoElementRef={videoRef}
+          iframeElementRef={iframeRef}
+          onPlay={() => {
+            setShieldActive(false);
+            setPlaybackStarted(true);
+          }}
+          onDurationChange={(durSec) => {
+            if (durSec > 60) {
+              totalDurationRef.current = durSec;
+              setDurationState(durSec);
+              onDurationChange?.(durSec);
+            }
+          }}
+          onTimeUpdate={(curSec, durSec) => {
+            hasDirectTelemetryRef.current = true;
+            setPlaybackStarted(true);
+            currentProgressRef.current = curSec;
+            setCurrentTimeState(curSec);
+            if (durSec > 60) {
+              totalDurationRef.current = durSec;
+              setDurationState(durSec);
+              onDurationChange?.(durSec);
+            }
+            const jumped = Math.abs(curSec - lastSavedSecRef.current) >= 10;
+            void saveWatchProgress(curSec, totalDurationRef.current, jumped);
+          }}
+          onEnded={() => {
+            if (nextEpisode) {
+              handleGoToNextEpisode();
+            }
+          }}
+          onFatalError={() => handleStreamError(currentStream)}
+        />
       ) : (
         <video
           key={currentStream.mirrorId}
@@ -1244,6 +1292,16 @@ export default function SmartVideoPlayer({
           </button>
         )}
       </div>
+      </div>
+
+      {/* Barra Contextual No Intrusiva (Smart Adblock Helper) debajo del reproductor */}
+      <SmartAdblockHelperBar
+        active={
+          !isCasting &&
+          currentStream.format === MirrorFormat.EMBED &&
+          smartPlayerStatus === "playing_iframe"
+        }
+      />
     </div>
   );
 }

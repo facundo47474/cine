@@ -1,5 +1,12 @@
 import crypto from "crypto";
+import dns from "dns";
 import { NextRequest, NextResponse } from "next/server";
+
+try {
+  dns.setDefaultResultOrder("ipv4first");
+} catch {
+  // Silencioso
+}
 import { getServerSession } from "next-auth";
 import { tokenCryptoService } from "@/infrastructure/container";
 import {
