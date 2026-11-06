@@ -534,9 +534,10 @@ export class SeriesService {
 
     // 2. Mirrors de BD
     const existingPlayable = episode.getPlayableMirrors();
-    const hasDirectResolvedInDb = existingPlayable.some(
-      (m) =>
-        !m.rawUrl.includes("embed69.org") && !m.rawUrl.includes("vidsrc.me")
+    const hasDirectResolvedInDb = existingPlayable.some((m) =>
+      /hglink\.to|audinifer\.com|vibuxer\.com|streamwish|mxdrop\.to|mixdrop|morencius\.com|vidhide|filemoon/i.test(
+        m.rawUrl
+      )
     );
 
     if (hasDirectResolvedInDb) {

@@ -1,7 +1,14 @@
 import crypto from "crypto";
+import dns from "dns";
 import { IMirrorResolver } from "@/domain/interfaces/IMirrorResolver";
 import { CreateMirrorInput } from "@/domain/interfaces/IMovieRepository";
 import { MirrorFormat } from "@/domain/enums/MirrorFormat";
+
+try {
+  dns.setDefaultResultOrder("ipv4first");
+} catch {
+  // Silencioso en entornos donde no aplique
+}
 
 interface TmdbMovieExternalDetails {
   imdb_id?: string | null;
@@ -97,12 +104,14 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
   private getServerPriorityWeight(servername?: string): number {
     const normalized = (servername || "").toLowerCase();
     if (normalized.includes("streamwish")) return 1;
-    if (normalized.includes("filemoon")) return 2;
-    if (normalized.includes("doodstream")) return 3;
-    if (normalized.includes("rapidvideo")) return 4;
-    if (normalized.includes("vidhide")) return 8;
-    if (normalized.includes("voe")) return 9;
-    return 5;
+    if (normalized.includes("mixdrop")) return 2;
+    if (normalized.includes("vidhide")) return 3;
+    if (normalized.includes("filemoon")) return 4;
+    if (normalized.includes("voe")) return 5;
+    if (normalized.includes("dropload")) return 6;
+    if (normalized.includes("doodstream")) return 7;
+    if (normalized.includes("rapidvideo")) return 8;
+    return 9;
   }
 
   private solveEmbed69AesKey(
@@ -194,11 +203,11 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
             method: "GET",
             headers: {
               "User-Agent":
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
               Accept:
                 "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             },
-            signal: AbortSignal.timeout(3000),
+            signal: AbortSignal.timeout(5000),
           });
           if (!res.ok) return null;
           const text = await res.text();
@@ -310,9 +319,9 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
       const pageRes = await fetch(pageUrl, {
         headers: {
           "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
         },
-        signal: AbortSignal.timeout(3000),
+        signal: AbortSignal.timeout(4500),
       });
 
       if (!pageRes.ok) return { latUrl: null, subUrl: null };
@@ -327,7 +336,7 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
           "Content-Type": "application/json",
           Referer: pageUrl,
           "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
         },
         body: JSON.stringify({
           type: isTv ? "tv" : "movie",
@@ -337,7 +346,7 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
           mode: "custom",
           token: tokenMatch[1],
         }),
-        signal: AbortSignal.timeout(3000),
+        signal: AbortSignal.timeout(4500),
       });
 
       if (!resolveRes.ok) return { latUrl: null, subUrl: null };
@@ -350,10 +359,12 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
           const score = (srv?: string) => {
             const name = (srv || "").toLowerCase();
             if (name.includes("streamwish")) return 1;
-            if (name.includes("dropload")) return 2;
-            if (name.includes("filemoon")) return 3;
-            if (name.includes("doodstream")) return 4;
-            return 5;
+            if (name.includes("mixdrop")) return 2;
+            if (name.includes("vidhide")) return 3;
+            if (name.includes("filemoon")) return 4;
+            if (name.includes("dropload")) return 5;
+            if (name.includes("doodstream")) return 6;
+            return 7;
           };
           return score(a.server || a.name) - score(b.server || b.name);
         });

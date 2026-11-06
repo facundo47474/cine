@@ -318,6 +318,7 @@ export default function SmartPlayer({
   const [streamData, setStreamData] = useState<ExtractorResponseData | null>(
     null
   );
+  const [shieldActive, setShieldActive] = useState<boolean>(true);
 
   const internalVideoRef = useRef<HTMLVideoElement | null>(null);
   const internalIframeRef = useRef<HTMLIFrameElement | null>(null);
@@ -386,6 +387,31 @@ export default function SmartPlayer({
     updateStatus("playing_iframe");
   }, [destroyHlsInstance, updateStatus]);
 
+  // Escudo anti-anuncios y neutralizador de popups en modo fallback iframe
+  useEffect(() => {
+    if (status !== "playing_iframe") return;
+
+    const originalWindowOpen = window.open;
+    window.open = () => null;
+
+    const handleWindowBlur = () => {
+      if (document.activeElement === internalIframeRef.current) {
+        setTimeout(() => {
+          try {
+            window.focus();
+          } catch {}
+        }, 30);
+      }
+    };
+
+    window.addEventListener("blur", handleWindowBlur);
+
+    return () => {
+      window.open = originalWindowOpen;
+      window.removeEventListener("blur", handleWindowBlur);
+    };
+  }, [status]);
+
   // 1. Al montar o cambiar embedUrl, consultar /api/extractor inmediatamente
   useEffect(() => {
     if (!embedUrl) return;
@@ -395,6 +421,7 @@ export default function SmartPlayer({
 
     destroyHlsInstance();
     initialSeekDoneRef.current = false;
+    setShieldActive(true);
     updateStatus("loading");
     setStreamData(null);
 
@@ -605,18 +632,35 @@ export default function SmartPlayer({
         />
       )}
 
-      {/* ESTADO 3: Reproducción inmediata en Iframe sin atributo sandbox */}
+      {/* ESTADO 3: Reproducción inmediata en Iframe con Escudo Anti-Anuncios */}
       {status === "playing_iframe" && (
-        <iframe
-          ref={setIframeRefs}
-          key={targetIframeUrl}
-          src={targetIframeUrl}
-          title={title || "Reproductor de video"}
-          className="w-full h-full border-0"
-          allow="autoplay *; fullscreen *; picture-in-picture *; encrypted-media *"
-          allowFullScreen
-          onError={() => onFatalError?.()}
-        />
+        <div className="relative w-full h-full">
+          <iframe
+            ref={setIframeRefs}
+            key={targetIframeUrl}
+            src={targetIframeUrl}
+            title={title || "Reproductor de video"}
+            className="w-full h-full border-0"
+            allow="autoplay *; fullscreen *; picture-in-picture *; encrypted-media *"
+            allowFullScreen
+            onError={() => onFatalError?.()}
+          />
+          {shieldActive && (
+            <div
+              onClick={() => {
+                setShieldActive(false);
+                window.focus();
+              }}
+              onTouchStart={() => {
+                setShieldActive(false);
+                window.focus();
+              }}
+              className="absolute inset-0 z-20 bg-transparent cursor-pointer"
+              title="Click para reproducir"
+              aria-hidden="true"
+            />
+          )}
+        </div>
       )}
     </div>
   );

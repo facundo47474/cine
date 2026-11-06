@@ -293,15 +293,16 @@ export class CatalogService {
     );
     if (hasLegacyAggregator) return true;
 
-    // Si ya tiene al menos un enlace directo resuelto en Español Latino (hglink.to o dr0pstream.com),
-    // no lo sobreescribimos en producción.
-    const hasResolvedDirectLatino = playable.some(
+    // Si ya tiene al menos un enlace directo extraíble en Español Latino (Streamwish, Mixdrop, Vidhide, Filemoon),
+    // no lo sobreescribimos en producción. Si solo tiene dr0pstream.com o embed69.org, permitimos actualizarlo.
+    const hasResolvedExtractableLatino = playable.some(
       (m) =>
         m.language === "Latino" &&
-        !m.rawUrl.includes("embed69.org") &&
-        !m.rawUrl.includes("vidsrc.me")
+        /hglink\.to|audinifer\.com|vibuxer\.com|streamwish|mxdrop\.to|mixdrop|morencius\.com|vidhide|filemoon/i.test(
+          m.rawUrl
+        )
     );
-    if (hasResolvedDirectLatino) return false;
+    if (hasResolvedExtractableLatino) return false;
 
     const hasDegradedStreamwish = movie.mirrors.some(
       (m) =>
@@ -323,7 +324,8 @@ export class CatalogService {
       if (
         !m.rawUrl.includes("embed69.org") &&
         !m.rawUrl.includes("vidsrc.me") &&
-        !m.rawUrl.includes("multiembed.mov")
+        !m.rawUrl.includes("multiembed.mov") &&
+        !m.rawUrl.includes("dr0pstream.com")
       ) {
         existingDirectByServer.set(m.serverName, m.rawUrl);
       }

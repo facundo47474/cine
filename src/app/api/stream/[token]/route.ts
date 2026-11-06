@@ -91,12 +91,14 @@ function appendResumeTimeParam(rawUrl: string, startSeconds: number): string {
 function getServerPriorityWeight(servername?: string): number {
   const normalized = (servername || "").toLowerCase();
   if (normalized.includes("streamwish")) return 1;
-  if (normalized.includes("filemoon")) return 2;
-  if (normalized.includes("doodstream")) return 3;
-  if (normalized.includes("rapidvideo")) return 4;
-  if (normalized.includes("vidhide")) return 8;
-  if (normalized.includes("voe")) return 9;
-  return 5;
+  if (normalized.includes("mixdrop")) return 2;
+  if (normalized.includes("vidhide")) return 3;
+  if (normalized.includes("filemoon")) return 4;
+  if (normalized.includes("voe")) return 5;
+  if (normalized.includes("dropload")) return 6;
+  if (normalized.includes("doodstream")) return 7;
+  if (normalized.includes("rapidvideo")) return 8;
+  return 9;
 }
 
 function solveEmbed69AesKey(
@@ -444,10 +446,12 @@ async function resolveFallbackFromPlayLatin(
       const score = (srv?: string) => {
         const name = (srv || "").toLowerCase();
         if (name.includes("streamwish")) return 1;
-        if (name.includes("dropload")) return 2;
-        if (name.includes("filemoon")) return 3;
-        if (name.includes("doodstream")) return 4;
-        return 5;
+        if (name.includes("mixdrop")) return 2;
+        if (name.includes("vidhide")) return 3;
+        if (name.includes("filemoon")) return 4;
+        if (name.includes("dropload")) return 5;
+        if (name.includes("doodstream")) return 6;
+        return 7;
       };
       return score(a.server || a.name) - score(b.server || b.name);
     });
@@ -471,7 +475,7 @@ interface StreamwishDirectHlsInfo {
  */
 function unpackDeanEdwardsBlock(html: string): string | null {
   const packerRegex =
-    /eval\(function\(p,a,c,k,e,d\)\{[\s\S]*?\}\('([\s\S]*?)',\s*(\d+),\s*(\d+),\s*'([\s\S]*?)'\.split\('\|'\)\)\)/;
+    /eval\(function\(p,a,c,k,e,[dr]\)\{[\s\S]*?\}\('([\s\S]*?)',\s*(\d+),\s*(\d+),\s*'([\s\S]*?)'\.split\('\|'\)(?:,\s*\d+,\s*\{\})?\)\)/;
   const match = html.match(packerRegex);
   if (!match) return null;
 
@@ -482,10 +486,25 @@ function unpackDeanEdwardsBlock(html: string): string | null {
 
   if (!radix || !count || symtab.length === 0) return null;
 
+  const encodeBase = (num: number, base: number): string => {
+    const chars =
+      "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    if (base <= 36) {
+      return num.toString(base);
+    }
+    let result = "";
+    let n = num;
+    do {
+      result = chars[n % base] + result;
+      n = Math.floor(n / base);
+    } while (n > 0);
+    return result;
+  };
+
   const lookup = new Map<string, string>();
   for (let i = 0; i < count; i++) {
     if (symtab[i]) {
-      lookup.set(i.toString(radix), symtab[i]);
+      lookup.set(encodeBase(i, radix), symtab[i]);
     }
   }
 
@@ -840,11 +859,22 @@ export async function GET(
       } catch (e) {
         window.open = function() { return null; };
       }
-      window.onbeforeunload = null;
+      window.onbeforeunload = function(e) {
+        try {
+          if (document.activeElement && document.activeElement.tagName === "IFRAME") {
+            e.preventDefault();
+            e.returnValue = "";
+            return "";
+          }
+        } catch (err) {}
+      };
       window.addEventListener("blur", function() {
         setTimeout(function() {
           try { window.focus(); } catch (e) {}
-        }, 50);
+        }, 25);
+        setTimeout(function() {
+          try { window.focus(); } catch (e) {}
+        }, 120);
       });
       window.addEventListener("message", function(event) {
         try {

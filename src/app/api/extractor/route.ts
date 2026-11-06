@@ -150,17 +150,32 @@ function decryptEmbed69Link(
 function getServerPriorityWeight(servername?: string): number {
   const normalized = (servername || "").toLowerCase();
   if (normalized.includes("streamwish")) return 1;
-  if (normalized.includes("filemoon")) return 2;
-  if (normalized.includes("doodstream")) return 3;
-  if (normalized.includes("rapidvideo")) return 4;
-  if (normalized.includes("vidhide")) return 8;
-  if (normalized.includes("voe")) return 9;
-  return 5;
+  if (normalized.includes("mixdrop")) return 2;
+  if (normalized.includes("vidhide")) return 3;
+  if (normalized.includes("filemoon")) return 4;
+  if (normalized.includes("voe")) return 5;
+  if (normalized.includes("dropload")) return 6;
+  if (normalized.includes("doodstream")) return 7;
+  if (normalized.includes("rapidvideo")) return 8;
+  return 9;
 }
 
-async function resolveEmbed69OrPlayLatinToDirectEmbed(
+/**
+ * Resuelve todos los enlaces de servidores candidatos desde Embed69 y PlayLatinSrc
+ * ordenados por facilidad de extracción limpia (Streamwish -> Mixdrop -> Vidhide -> Filemoon -> otros).
+ */
+async function resolveEmbed69OrPlayLatinToDirectEmbeds(
   rawUrl: string
-): Promise<string | null> {
+): Promise<string[]> {
+  const resolvedUrls: string[] = [];
+  const addUnique = (url?: string | null) => {
+    if (!url) return;
+    const trimmed = url.trim();
+    if (trimmed.startsWith("http") && !resolvedUrls.includes(trimmed)) {
+      resolvedUrls.push(trimmed);
+    }
+  };
+
   try {
     const parsedUrl = new URL(rawUrl);
     const requestedLang = (
@@ -168,86 +183,86 @@ async function resolveEmbed69OrPlayLatinToDirectEmbed(
     ).toUpperCase();
     const baseCleanUrl = `${parsedUrl.origin}${parsedUrl.pathname}`;
 
-    const candidateUrls = [baseCleanUrl];
-    const epMatch = baseCleanUrl.match(
-      /^(https?:\/\/[^/]+\/f\/tt\d+-\d+x)(\d+)$/i
-    );
-    if (epMatch) {
-      const prefix = epMatch[1];
-      const epDigits = epMatch[2];
-      const unpadded = String(Number(epDigits));
-      const padded = unpadded.padStart(2, "0");
-      const altUrl =
-        epDigits === padded ? `${prefix}${unpadded}` : `${prefix}${padded}`;
-      if (altUrl !== baseCleanUrl) candidateUrls.push(altUrl);
-    }
-
-    const fetchCandidate = async (url: string): Promise<string | null> => {
-      try {
-        const res = await fetch(url, {
-          headers: {
-            "User-Agent": BROWSER_USER_AGENT,
-            Accept:
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          },
-          signal: AbortSignal.timeout(6000),
-        });
-        if (!res.ok) return null;
-        const text = await res.text();
-        if (text.includes("dataLink") && !text.includes("No folders found")) {
-          return text;
-        }
-        return null;
-      } catch {
-        return null;
-      }
-    };
-
-    const htmlList = await Promise.all(
-      candidateUrls.map((u) => fetchCandidate(u))
-    );
-    const html = htmlList.find((h): h is string => Boolean(h));
-
-    if (html) {
-      const cm = html.match(/POW_CHALLENGE\s*=\s*'([^']+)'/);
-      const dm = html.match(/POW_DIFFICULTY\s*=\s*(\d+)/);
-      const sm = html.match(/POW_SALT\s*=\s*'([^']+)'/);
-      const dlm = html.match(
-        /let\s+dataLink\s*=\s*(\[\{[\s\S]*?\}\])\s*;\s*let\s+currentLanguageServers/
+    if (rawUrl.includes("embed69.org/f/")) {
+      const candidateUrls = [baseCleanUrl];
+      const epMatch = baseCleanUrl.match(
+        /^(https?:\/\/[^/]+\/f\/tt\d+-\d+x)(\d+)$/i
       );
+      if (epMatch) {
+        const prefix = epMatch[1];
+        const epDigits = epMatch[2];
+        const unpadded = String(Number(epDigits));
+        const padded = unpadded.padStart(2, "0");
+        const altUrl =
+          epDigits === padded ? `${prefix}${unpadded}` : `${prefix}${padded}`;
+        if (altUrl !== baseCleanUrl) candidateUrls.push(altUrl);
+      }
 
-      if (cm && dm && sm && dlm) {
-        const aesKey = solveEmbed69AesKey(cm[1], Number(dm[1]), sm[1]);
-        if (aesKey) {
-          const dataLink = JSON.parse(dlm[1]) as Embed69LanguageBlock[];
-          if (Array.isArray(dataLink) && dataLink.length > 0) {
-            dataLink.sort((a, b) => {
-              const getRank = (langRaw?: string) => {
-                const l = (langRaw || "").toUpperCase();
-                if (requestedLang === "SUB") {
-                  if (l === "SUB" || l === "VOSE") return 1;
-                  if (l === "LAT" || l === "LATINO") return 2;
+      const fetchCandidate = async (url: string): Promise<string | null> => {
+        try {
+          const res = await fetch(url, {
+            headers: {
+              "User-Agent": BROWSER_USER_AGENT,
+              Accept:
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+            signal: AbortSignal.timeout(6000),
+          });
+          if (!res.ok) return null;
+          const text = await res.text();
+          if (text.includes("dataLink") && !text.includes("No folders found")) {
+            return text;
+          }
+          return null;
+        } catch {
+          return null;
+        }
+      };
+
+      const htmlList = await Promise.all(
+        candidateUrls.map((u) => fetchCandidate(u))
+      );
+      const html = htmlList.find((h): h is string => Boolean(h));
+
+      if (html) {
+        const cm = html.match(/POW_CHALLENGE\s*=\s*'([^']+)'/);
+        const dm = html.match(/POW_DIFFICULTY\s*=\s*(\d+)/);
+        const sm = html.match(/POW_SALT\s*=\s*'([^']+)'/);
+        const dlm = html.match(
+          /let\s+dataLink\s*=\s*(\[\{[\s\S]*?\}\])\s*;\s*let\s+currentLanguageServers/
+        );
+
+        if (cm && dm && sm && dlm) {
+          const aesKey = solveEmbed69AesKey(cm[1], Number(dm[1]), sm[1]);
+          if (aesKey) {
+            const dataLink = JSON.parse(dlm[1]) as Embed69LanguageBlock[];
+            if (Array.isArray(dataLink) && dataLink.length > 0) {
+              dataLink.sort((a, b) => {
+                const getRank = (langRaw?: string) => {
+                  const l = (langRaw || "").toUpperCase();
+                  if (requestedLang === "SUB") {
+                    if (l === "SUB" || l === "VOSE") return 1;
+                    if (l === "LAT" || l === "LATINO") return 2;
+                    return 3;
+                  }
+                  if (l === "LAT" || l === "LATINO") return 1;
+                  if (l === "ESP" || l === "CASTELLANO") return 2;
                   return 3;
-                }
-                if (l === "LAT" || l === "LATINO") return 1;
-                if (l === "ESP" || l === "CASTELLANO") return 2;
-                return 3;
-              };
-              return getRank(a.video_language) - getRank(b.video_language);
-            });
+                };
+                return getRank(a.video_language) - getRank(b.video_language);
+              });
 
-            for (const block of dataLink) {
-              if (!Array.isArray(block.sortedEmbeds)) continue;
-              const ordered = [...block.sortedEmbeds].sort(
-                (a, b) =>
-                  getServerPriorityWeight(a.servername) -
-                  getServerPriorityWeight(b.servername)
-              );
-              for (const entry of ordered) {
-                if (!entry.link) continue;
-                const dec = decryptEmbed69Link(entry.link, aesKey);
-                if (dec && dec.startsWith("http")) {
-                  return dec;
+              for (const block of dataLink) {
+                if (!Array.isArray(block.sortedEmbeds)) continue;
+                const ordered = [...block.sortedEmbeds].sort(
+                  (a, b) =>
+                    getServerPriorityWeight(a.servername) -
+                    getServerPriorityWeight(b.servername)
+                );
+                for (const entry of ordered) {
+                  if (!entry.link) continue;
+                  const dec = decryptEmbed69Link(entry.link, aesKey);
+                  addUnique(dec);
                 }
               }
             }
@@ -256,83 +271,118 @@ async function resolveEmbed69OrPlayLatinToDirectEmbed(
       }
     }
 
-    // Fallback a PlayLatinSrc (que funciona directamente desde IPs de Vercel AWS)
+    // Fallback / complemento desde PlayLatinSrc (incluye Mixdrop, Streamwish, Filemoon, etc.)
     const tvMatch = rawUrl.match(/(tt\d+)-(\d+)x(\d+)/i);
     const movieMatch = rawUrl.match(/(tt\d+)/i);
-    if (!tvMatch && !movieMatch) return null;
+    if (tvMatch || movieMatch) {
+      const isTv = Boolean(tvMatch);
+      const imdbId = tvMatch ? tvMatch[1] : movieMatch![1];
+      const seasonStr = tvMatch ? String(Number(tvMatch[2])) : "1";
+      const episodeStr = tvMatch ? String(Number(tvMatch[3])) : "1";
 
-    const isTv = Boolean(tvMatch);
-    const imdbId = tvMatch ? tvMatch[1] : movieMatch![1];
-    const seasonStr = tvMatch ? String(Number(tvMatch[2])) : "1";
-    const episodeStr = tvMatch ? String(Number(tvMatch[3])) : "1";
+      const pageUrl = isTv
+        ? `https://playlatinsrc.co/custom/serial/${imdbId}/${seasonStr}/${episodeStr}`
+        : `https://playlatinsrc.co/custom/movie/${imdbId}`;
+      const pageRes = await fetch(pageUrl, {
+        headers: { "User-Agent": BROWSER_USER_AGENT },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (pageRes.ok) {
+        const pageHtml = await pageRes.text();
+        const tokenMatch = pageHtml.match(/data-resolve-token="([^"]+)"/);
+        if (tokenMatch) {
+          const resolveRes = await fetch("https://playlatinsrc.co/api/resolve", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Referer: pageUrl,
+              "User-Agent": BROWSER_USER_AGENT,
+            },
+            body: JSON.stringify({
+              type: isTv ? "tv" : "movie",
+              id: imdbId,
+              season: seasonStr,
+              episode: episodeStr,
+              mode: "custom",
+              token: tokenMatch[1],
+            }),
+            signal: AbortSignal.timeout(5000),
+          });
+          if (resolveRes.ok) {
+            const data = (await resolveRes.json()) as PlayLatinResolveResponse;
+            const sources = Array.isArray(data.sources) ? data.sources : [];
+            const validSources = sources.filter((s) =>
+              Boolean(s.url && s.url.startsWith("http"))
+            );
 
-    const pageUrl = isTv
-      ? `https://playlatinsrc.co/custom/serial/${imdbId}/${seasonStr}/${episodeStr}`
-      : `https://playlatinsrc.co/custom/movie/${imdbId}`;
-    const pageRes = await fetch(pageUrl, {
-      headers: { "User-Agent": BROWSER_USER_AGENT },
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!pageRes.ok) return null;
+            const targetVersion =
+              requestedLang === "SUB" || requestedLang === "VOSE"
+                ? "subtitulado"
+                : "latino";
 
-    const pageHtml = await pageRes.text();
-    const tokenMatch = pageHtml.match(/data-resolve-token="([^"]+)"/);
-    if (!tokenMatch) return null;
+            const langFiltered = validSources.filter((s) => {
+              const ver = (s.version || "").toLowerCase();
+              if (targetVersion === "subtitulado") {
+                return ver === "subtitulado" || ver === "sub";
+              }
+              return ver === "latino" || ver === "castellano" || (isTv && !ver);
+            });
 
-    const resolveRes = await fetch("https://playlatinsrc.co/api/resolve", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Referer: pageUrl,
-        "User-Agent": BROWSER_USER_AGENT,
-      },
-      body: JSON.stringify({
-        type: isTv ? "tv" : "movie",
-        id: imdbId,
-        season: seasonStr,
-        episode: episodeStr,
-        mode: "custom",
-        token: tokenMatch[1],
-      }),
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!resolveRes.ok) return null;
+            const orderedSources = [
+              ...(langFiltered.length > 0 ? langFiltered : validSources),
+            ].sort(
+              (a, b) =>
+                getServerPriorityWeight(a.server || a.name) -
+                getServerPriorityWeight(b.server || b.name)
+            );
 
-    const data = (await resolveRes.json()) as PlayLatinResolveResponse;
-    const sources = Array.isArray(data.sources) ? data.sources : [];
-    const validSources = sources.filter((s) =>
-      Boolean(s.url && s.url.startsWith("http"))
-    );
-    if (validSources.length === 0) return null;
-
-    return validSources[0].url || null;
+            for (const s of orderedSources) {
+              addUnique(s.url);
+            }
+          }
+        }
+      }
+    }
   } catch {
-    return null;
+    // Continuar con los candidatos ya recolectados
   }
+
+  return resolvedUrls;
 }
 
-/**
- * Extrae una URL de stream (.m3u8 o .mp4) analizando el HTML original y los bloques desempaquetados.
- */
-function extractStreamFromText(
-  combinedText: string,
-  baseOrigin: string
-): {
+interface ExtractedStreamCandidate {
   streamUrl: string;
   type: "hls" | "mp4";
   durationSeconds?: number;
   posterUrl?: string;
-} | null {
+}
+
+/**
+ * Extrae todas las URLs de stream candidatas (.m3u8 o .mp4) analizando el HTML original
+ * y los bloques desempaquetados (soporta Streamwish, Mixdrop, Vidhide, Filemoon, Dropload, Supervideo).
+ */
+function extractCandidatesFromText(
+  combinedText: string,
+  baseOrigin: string
+): ExtractedStreamCandidate[] {
   const durationMatch = combinedText.match(/duration\s*:\s*["']?([0-9.]+)["']?/i);
   const durationSeconds = durationMatch
     ? Math.floor(Number(durationMatch[1]) || 0)
     : undefined;
   const posterMatch = combinedText.match(/image\s*:\s*["']([^"']+)["']/i);
-  const posterUrl = posterMatch?.[1] || undefined;
+  const rawPoster = posterMatch?.[1]?.replace(/\\\//g, "/").trim();
+  const posterUrl = rawPoster
+    ? rawPoster.startsWith("//")
+      ? `https:${rawPoster}`
+      : rawPoster
+    : undefined;
 
   const resolveCandidateUrl = (rawCandidate: string): string | null => {
     const cleaned = rawCandidate.replace(/\\\//g, "/").trim();
     if (!cleaned) return null;
+    if (cleaned.startsWith("//")) {
+      return `https:${cleaned}`;
+    }
     if (cleaned.startsWith("http://") || cleaned.startsWith("https://")) {
       return cleaned;
     }
@@ -346,69 +396,101 @@ function extractStreamFromText(
     return null;
   };
 
-  // 1. Claves JSON prioritarias de JWPlayer / VideoJS (Streamwish, Filemoon, Dropload, Supervideo, Vidhide)
-  // Se prioriza hls4 (CDN global rápido, normalizado en /api/stream-proxy) y luego hls2 como respaldo
-  const jsonKeyRegexes = [
-    /"hls4"\s*:\s*"([^"]+)"/i,
-    /"hls2"\s*:\s*"([^"]+)"/i,
-    /"hls3"\s*:\s*"([^"]+)"/i,
-    /file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i,
-    /sources\s*:\s*\[\s*\{[^}]*?file\s*:\s*["']([^"']+)["']/i,
-    /file\s*:\s*["'](https?:\/\/[^"']+\.mp4[^"']*)["']/i,
+  const candidates: ExtractedStreamCandidate[] = [];
+  const seenUrls = new Set<string>();
+
+  const pushCandidate = (rawUrl: string, forcedType?: "hls" | "mp4") => {
+    const resolved = resolveCandidateUrl(rawUrl);
+    if (!resolved || seenUrls.has(resolved)) return;
+    if (/preroll|vast|adserver|banner|promo/i.test(resolved)) return;
+    seenUrls.add(resolved);
+
+    const isMp4 =
+      forcedType === "mp4" ||
+      (/\.mp4(\?|$)/i.test(resolved) && !/\.m3u8/i.test(resolved));
+
+    candidates.push({
+      streamUrl: resolved,
+      type: isMp4 ? "mp4" : "hls",
+      durationSeconds,
+      posterUrl,
+    });
+  };
+
+  // 1. Claves JSON y variables prioritarias (Streamwish hls4/hls2/hls3, Mixdrop MDCore.wurl, Vidhide, Filemoon, JWPlayer)
+  const jsonKeyRegexes: { regex: RegExp; forcedType?: "hls" | "mp4" }[] = [
+    { regex: /"hls4"\s*:\s*"([^"]+)"/i, forcedType: "hls" },
+    { regex: /"hls2"\s*:\s*"([^"]+)"/i, forcedType: "hls" },
+    { regex: /"hls3"\s*:\s*"([^"]+)"/i, forcedType: "hls" },
+    {
+      regex: /(?:MDCore\.)?wurl\s*=\s*["']((?:https?:)?\/\/[^"']+\.mp4[^"']*)["']/i,
+      forcedType: "mp4",
+    },
+    { regex: /file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i, forcedType: "hls" },
+    {
+      regex: /sources\s*:\s*\[\s*\{[^}]*?file\s*:\s*["']([^"']+)["']/i,
+    },
+    {
+      regex: /file\s*:\s*["']((?:https?:)?\/\/[^"']+\.mp4[^"']*)["']/i,
+      forcedType: "mp4",
+    },
   ];
 
-  for (const regex of jsonKeyRegexes) {
-    const match = combinedText.match(regex);
+  for (const item of jsonKeyRegexes) {
+    const match = combinedText.match(item.regex);
     if (match && match[1]) {
-      const resolved = resolveCandidateUrl(match[1]);
-      if (resolved) {
-        const isMp4 = /\.mp4(\?|$)/i.test(resolved) && !/\.m3u8/i.test(resolved);
-        return {
-          streamUrl: resolved,
-          type: isMp4 ? "mp4" : "hls",
-          durationSeconds,
-          posterUrl,
-        };
-      }
+      pushCandidate(match[1], item.forcedType);
     }
   }
 
   // 2. Búsqueda general por Expresiones Regulares de enlaces .m3u8
-  const m3u8Regex = /(https?:\/\/[^\s"'<>\\]+?\.m3u8[^\s"'<>\\]*)/gi;
+  const m3u8Regex = /((?:https?:)?\/\/[^\s"'<>\\]+?\.m3u8[^\s"'<>\\]*)/gi;
   const m3u8Matches = combinedText.match(m3u8Regex);
-  if (m3u8Matches && m3u8Matches.length > 0) {
-    const resolved = resolveCandidateUrl(m3u8Matches[0]);
-    if (resolved) {
-      return {
-        streamUrl: resolved,
-        type: "hls",
-        durationSeconds,
-        posterUrl,
-      };
+  if (m3u8Matches) {
+    for (const m of m3u8Matches) {
+      pushCandidate(m, "hls");
     }
   }
 
   // 3. Búsqueda general por Expresiones Regulares de enlaces .mp4
-  const mp4Regex = /(https?:\/\/[^\s"'<>\\]+?\.mp4[^\s"'<>\\]*)/gi;
+  const mp4Regex = /((?:https?:)?\/\/[^\s"'<>\\]+?\.mp4[^\s"'<>\\]*)/gi;
   const mp4Matches = combinedText.match(mp4Regex);
-  if (mp4Matches && mp4Matches.length > 0) {
-    const validMp4 = mp4Matches.find(
-      (u) => !/preroll|vast|adserver|banner|promo/i.test(u)
-    );
-    if (validMp4) {
-      const resolved = resolveCandidateUrl(validMp4);
-      if (resolved) {
-        return {
-          streamUrl: resolved,
-          type: "mp4",
-          durationSeconds,
-          posterUrl,
-        };
-      }
+  if (mp4Matches) {
+    for (const m of mp4Matches) {
+      pushCandidate(m, "mp4");
     }
   }
 
-  return null;
+  return candidates;
+}
+
+/**
+ * Verifica rápidamente si un manifiesto HLS responde con #EXTM3U válido para descartar
+ * nodos CDN caídos (ej. 504 Gateway Time-out en premilkyway.com) y pasar al respaldo (hls4 / hls3 / Mixdrop).
+ */
+async function verifyStreamCandidateAlive(
+  candidate: ExtractedStreamCandidate,
+  referer: string
+): Promise<boolean> {
+  if (candidate.type === "mp4") {
+    return true;
+  }
+  try {
+    const res = await fetch(candidate.streamUrl, {
+      method: "GET",
+      headers: {
+        "User-Agent": BROWSER_USER_AGENT,
+        Referer: referer,
+        Accept: "*/*",
+      },
+      signal: AbortSignal.timeout(2800),
+    });
+    if (!res.ok) return false;
+    const text = await res.text();
+    return text.includes("#EXTM3U");
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -448,67 +530,79 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Si el target es un contenedor Embed69, primero resolvemos el servidor de video subyacente
-    if (targetEmbedUrl.includes("embed69.org/f/")) {
-      const resolvedDirectEmbed =
-        await resolveEmbed69OrPlayLatinToDirectEmbed(targetEmbedUrl);
-      if (resolvedDirectEmbed) {
-        targetEmbedUrl = resolvedDirectEmbed;
-        if (!inputUrl.includes("/api/stream/")) {
-          fallbackIframeUrl = resolvedDirectEmbed;
-        }
-      }
-    }
-
-    const parsedEmbed = new URL(targetEmbedUrl);
-    const embedOrigin = parsedEmbed.origin;
+    const parsedInitial = new URL(targetEmbedUrl);
+    const initialOrigin = parsedInitial.origin;
 
     // 1. Si ya es un enlace directo .m3u8 o .mp4, devolverlo directamente como exitoso
-    if (/\.m3u8(\?|$)/i.test(parsedEmbed.pathname)) {
+    if (/\.m3u8(\?|$)/i.test(parsedInitial.pathname)) {
       return NextResponse.json({
         success: true,
         streamUrl: targetEmbedUrl,
         type: "hls",
-        referer: embedOrigin,
+        referer: initialOrigin,
       });
     }
 
-    if (/\.mp4(\?|$)/i.test(parsedEmbed.pathname)) {
+    if (/\.mp4(\?|$)/i.test(parsedInitial.pathname)) {
       return NextResponse.json({
         success: true,
         streamUrl: targetEmbedUrl,
         type: "mp4",
-        referer: embedOrigin,
+        referer: initialOrigin,
       });
     }
 
-    // Construimos la lista de endpoints candidatos a inspeccionar
-    // (Para Streamwish hglink.to es un wrapper de redirección, mientras que audinifer.com / vibuxer.com contienen el packer con el .m3u8)
-    const candidateFetchTargets: { fetchUrl: string; referer: string }[] = [];
-    const codeMatch = targetEmbedUrl.match(/\/e\/([a-zA-Z0-9_-]+)/);
-    const isStreamwishFamily =
-      /hglink\.to|audinifer\.com|vibuxer\.com|hanerix\.com|streamwish|strwish|wishembed|awish|dwish|mwish|swdyu/i.test(
-        targetEmbedUrl
-      );
-
-    if (isStreamwishFamily && codeMatch?.[1]) {
-      const fileCode = codeMatch[1];
-      candidateFetchTargets.push(
-        {
-          fetchUrl: `https://audinifer.com/e/${fileCode}`,
-          referer: "https://hglink.to/",
-        },
-        {
-          fetchUrl: `https://vibuxer.com/e/${fileCode}`,
-          referer: "https://hglink.to/",
+    // Si el target es un contenedor Embed69 (o contiene un IMDb ID tt...), obtenemos todos los embeds candidatos
+    let embedUrlsToProbe: string[] = [targetEmbedUrl];
+    if (targetEmbedUrl.includes("embed69.org/f/")) {
+      const resolvedEmbeds =
+        await resolveEmbed69OrPlayLatinToDirectEmbeds(targetEmbedUrl);
+      if (resolvedEmbeds.length > 0) {
+        embedUrlsToProbe = resolvedEmbeds;
+        if (!inputUrl.includes("/api/stream/")) {
+          fallbackIframeUrl = resolvedEmbeds[0];
         }
-      );
+      }
     }
 
-    candidateFetchTargets.push({
-      fetchUrl: targetEmbedUrl,
-      referer: embedOrigin,
-    });
+    // Construimos la lista de endpoints candidatos a inspeccionar
+    const candidateFetchTargets: { fetchUrl: string; referer: string }[] = [];
+    const seenFetchUrls = new Set<string>();
+    const addFetchTarget = (fetchUrl: string, referer: string) => {
+      if (!seenFetchUrls.has(fetchUrl)) {
+        seenFetchUrls.add(fetchUrl);
+        candidateFetchTargets.push({ fetchUrl, referer });
+      }
+    };
+
+    for (const candidateEmbed of embedUrlsToProbe) {
+      let candidateOrigin = initialOrigin;
+      try {
+        candidateOrigin = new URL(candidateEmbed).origin;
+      } catch {
+        // Usar initialOrigin
+      }
+
+      const codeMatch = candidateEmbed.match(/\/(?:e|embed)\/([a-zA-Z0-9_-]+)/);
+      const isStreamwishFamily =
+        /hglink\.to|audinifer\.com|vibuxer\.com|hanerix\.com|streamwish|strwish|wishembed|awish|dwish|mwish|swdyu/i.test(
+          candidateEmbed
+        );
+
+      if (isStreamwishFamily && codeMatch?.[1]) {
+        const fileCode = codeMatch[1];
+        addFetchTarget(
+          `https://audinifer.com/e/${fileCode}`,
+          "https://hglink.to/"
+        );
+        addFetchTarget(
+          `https://vibuxer.com/e/${fileCode}`,
+          "https://hglink.to/"
+        );
+      }
+
+      addFetchTarget(candidateEmbed, `${candidateOrigin}/`);
+    }
 
     const probeTarget = async (target: {
       fetchUrl: string;
@@ -532,14 +626,28 @@ export async function GET(request: NextRequest) {
         const unpacked = unpackDeanEdwardsBlocks(html);
         const combinedText = `${html}\n${unpacked}`;
         const fetchOrigin = new URL(target.fetchUrl).origin;
+        const streamReferer = `${fetchOrigin}/`;
 
-        const extracted = extractStreamFromText(combinedText, fetchOrigin);
-        if (!extracted) return null;
+        const extractedCandidates = extractCandidatesFromText(
+          combinedText,
+          fetchOrigin
+        );
+        if (extractedCandidates.length === 0) return null;
 
-        return {
-          ...extracted,
-          referer: `${fetchOrigin}/`,
-        };
+        for (const candidate of extractedCandidates) {
+          const alive = await verifyStreamCandidateAlive(
+            candidate,
+            streamReferer
+          );
+          if (alive) {
+            return {
+              ...candidate,
+              referer: streamReferer,
+            };
+          }
+        }
+
+        return null;
       } catch {
         return null;
       }

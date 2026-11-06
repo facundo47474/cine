@@ -111,7 +111,8 @@ export async function GET(request: NextRequest) {
     const isHlsManifest =
       /\.m3u8(\?|$)/i.test(parsedStreamUrl.pathname) ||
       /\.m3u8/i.test(finalBaseUrl) ||
-      /master\.txt(\?|$)/i.test(parsedStreamUrl.pathname) ||
+      /(?:master|index[^/]*)\.txt(\?|$)/i.test(parsedStreamUrl.pathname) ||
+      /\/hls3\/.*\.txt(\?|$)/i.test(parsedStreamUrl.pathname) ||
       contentType.includes("mpegurl") ||
       contentType.includes("x-mpegurl");
 
