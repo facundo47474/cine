@@ -246,10 +246,16 @@ export default function SmartVideoPlayer({
   const orderedStreams = useMemo(() => {
     const getServerExtractRank = (serverName: string): number => {
       const lower = (serverName || "").toLowerCase();
-      if (lower.includes("streamwish")) return 1;
-      if (lower.includes("filemoon") || lower.includes("vidhide")) return 2;
-      if (lower.includes("dropload")) return 3;
-      return 4;
+      if (
+        lower.includes("streamwish") ||
+        lower.includes("mixdrop") ||
+        lower.includes("vidhide") ||
+        lower.includes("filemoon")
+      ) {
+        return 1;
+      }
+      if (lower.includes("dropload")) return 2;
+      return 3;
     };
 
     const sorted = [...streams].sort((a, b) => {

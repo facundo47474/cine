@@ -403,6 +403,29 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
     }
   }
 
+  private detectServerNameFromUrl(url: string, suffix: "Lat" | "Sub"): string {
+    const lower = url.toLowerCase();
+    if (lower.includes("mxdrop") || lower.includes("mixdrop")) {
+      return `Mixdrop-${suffix}`;
+    }
+    if (
+      lower.includes("morencius") ||
+      lower.includes("vidhide") ||
+      lower.includes("filemoon")
+    ) {
+      return `Vidhide-${suffix}`;
+    }
+    if (
+      lower.includes("hglink") ||
+      lower.includes("audinifer") ||
+      lower.includes("vibuxer") ||
+      lower.includes("streamwish")
+    ) {
+      return `Streamwish2-${suffix}`;
+    }
+    return `Dropload-${suffix}`;
+  }
+
   public async resolveDefaultMirrorsForTmdb(
     tmdbId: number
   ): Promise<CreateMirrorInput[]> {
@@ -433,7 +456,7 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
 
       if (playLatin.latUrl) {
         candidates.push({
-          serverName: "Dropload-Lat",
+          serverName: this.detectServerNameFromUrl(playLatin.latUrl, "Lat"),
           language: "Latino",
           rawUrl: playLatin.latUrl,
           format: MirrorFormat.EMBED,
@@ -457,7 +480,7 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
 
       if (playLatin.subUrl) {
         candidates.push({
-          serverName: "Dropload-Sub",
+          serverName: this.detectServerNameFromUrl(playLatin.subUrl, "Sub"),
           language: "Inglés (Sub)",
           rawUrl: playLatin.subUrl,
           format: MirrorFormat.EMBED,
@@ -518,7 +541,7 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
 
       if (playLatin.latUrl) {
         candidates.push({
-          serverName: "Dropload-Lat",
+          serverName: this.detectServerNameFromUrl(playLatin.latUrl, "Lat"),
           language: "Latino",
           rawUrl: playLatin.latUrl,
           format: MirrorFormat.EMBED,
@@ -542,7 +565,7 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
 
       if (playLatin.subUrl) {
         candidates.push({
-          serverName: "Dropload-Sub",
+          serverName: this.detectServerNameFromUrl(playLatin.subUrl, "Sub"),
           language: "Inglés (Sub)",
           rawUrl: playLatin.subUrl,
           format: MirrorFormat.EMBED,

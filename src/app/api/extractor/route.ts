@@ -2,6 +2,7 @@ import crypto from "crypto";
 import dns from "dns";
 import { NextRequest, NextResponse } from "next/server";
 import { tokenCryptoService } from "@/infrastructure/container";
+import { prisma } from "@/infrastructure/database/prismaClient";
 
 try {
   dns.setDefaultResultOrder("ipv4first");
@@ -183,166 +184,191 @@ async function resolveEmbed69OrPlayLatinToDirectEmbeds(
     ).toUpperCase();
     const baseCleanUrl = `${parsedUrl.origin}${parsedUrl.pathname}`;
 
-    if (rawUrl.includes("embed69.org/f/")) {
-      const candidateUrls = [baseCleanUrl];
-      const epMatch = baseCleanUrl.match(
-        /^(https?:\/\/[^/]+\/f\/tt\d+-\d+x)(\d+)$/i
-      );
-      if (epMatch) {
-        const prefix = epMatch[1];
-        const epDigits = epMatch[2];
-        const unpadded = String(Number(epDigits));
-        const padded = unpadded.padStart(2, "0");
-        const altUrl =
-          epDigits === padded ? `${prefix}${unpadded}` : `${prefix}${padded}`;
-        if (altUrl !== baseCleanUrl) candidateUrls.push(altUrl);
-      }
-
-      const fetchCandidate = async (url: string): Promise<string | null> => {
-        try {
-          const res = await fetch(url, {
-            headers: {
-              "User-Agent": BROWSER_USER_AGENT,
-              Accept:
-                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            },
-            signal: AbortSignal.timeout(6000),
-          });
-          if (!res.ok) return null;
-          const text = await res.text();
-          if (text.includes("dataLink") && !text.includes("No folders found")) {
-            return text;
-          }
-          return null;
-        } catch {
-          return null;
-        }
-      };
-
-      const htmlList = await Promise.all(
-        candidateUrls.map((u) => fetchCandidate(u))
-      );
-      const html = htmlList.find((h): h is string => Boolean(h));
-
-      if (html) {
-        const cm = html.match(/POW_CHALLENGE\s*=\s*'([^']+)'/);
-        const dm = html.match(/POW_DIFFICULTY\s*=\s*(\d+)/);
-        const sm = html.match(/POW_SALT\s*=\s*'([^']+)'/);
-        const dlm = html.match(
-          /let\s+dataLink\s*=\s*(\[\{[\s\S]*?\}\])\s*;\s*let\s+currentLanguageServers/
+    const resolveFromEmbed69 = async (): Promise<string[]> => {
+      const list: string[] = [];
+      if (!rawUrl.includes("embed69.org/f/")) return list;
+      try {
+        const candidateUrls = [baseCleanUrl];
+        const epMatch = baseCleanUrl.match(
+          /^(https?:\/\/[^/]+\/f\/tt\d+-\d+x)(\d+)$/i
         );
+        if (epMatch) {
+          const prefix = epMatch[1];
+          const epDigits = epMatch[2];
+          const unpadded = String(Number(epDigits));
+          const padded = unpadded.padStart(2, "0");
+          const altUrl =
+            epDigits === padded ? `${prefix}${unpadded}` : `${prefix}${padded}`;
+          if (altUrl !== baseCleanUrl) candidateUrls.push(altUrl);
+        }
 
-        if (cm && dm && sm && dlm) {
-          const aesKey = solveEmbed69AesKey(cm[1], Number(dm[1]), sm[1]);
-          if (aesKey) {
-            const dataLink = JSON.parse(dlm[1]) as Embed69LanguageBlock[];
-            if (Array.isArray(dataLink) && dataLink.length > 0) {
-              dataLink.sort((a, b) => {
-                const getRank = (langRaw?: string) => {
-                  const l = (langRaw || "").toUpperCase();
-                  if (requestedLang === "SUB") {
-                    if (l === "SUB" || l === "VOSE") return 1;
-                    if (l === "LAT" || l === "LATINO") return 2;
+        const fetchCandidate = async (url: string): Promise<string | null> => {
+          try {
+            const res = await fetch(url, {
+              headers: {
+                "User-Agent": BROWSER_USER_AGENT,
+                Accept:
+                  "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+              },
+              signal: AbortSignal.timeout(4500),
+            });
+            if (!res.ok) return null;
+            const text = await res.text();
+            if (
+              text.includes("dataLink") &&
+              !text.includes("No folders found")
+            ) {
+              return text;
+            }
+            return null;
+          } catch {
+            return null;
+          }
+        };
+
+        const htmlList = await Promise.all(
+          candidateUrls.map((u) => fetchCandidate(u))
+        );
+        const html = htmlList.find((h): h is string => Boolean(h));
+
+        if (html) {
+          const cm = html.match(/POW_CHALLENGE\s*=\s*'([^']+)'/);
+          const dm = html.match(/POW_DIFFICULTY\s*=\s*(\d+)/);
+          const sm = html.match(/POW_SALT\s*=\s*'([^']+)'/);
+          const dlm = html.match(
+            /let\s+dataLink\s*=\s*(\[\{[\s\S]*?\}\])\s*;\s*let\s+currentLanguageServers/
+          );
+
+          if (cm && dm && sm && dlm) {
+            const aesKey = solveEmbed69AesKey(cm[1], Number(dm[1]), sm[1]);
+            if (aesKey) {
+              const dataLink = JSON.parse(dlm[1]) as Embed69LanguageBlock[];
+              if (Array.isArray(dataLink) && dataLink.length > 0) {
+                dataLink.sort((a, b) => {
+                  const getRank = (langRaw?: string) => {
+                    const l = (langRaw || "").toUpperCase();
+                    if (requestedLang === "SUB") {
+                      if (l === "SUB" || l === "VOSE") return 1;
+                      if (l === "LAT" || l === "LATINO") return 2;
+                      return 3;
+                    }
+                    if (l === "LAT" || l === "LATINO") return 1;
+                    if (l === "ESP" || l === "CASTELLANO") return 2;
                     return 3;
-                  }
-                  if (l === "LAT" || l === "LATINO") return 1;
-                  if (l === "ESP" || l === "CASTELLANO") return 2;
-                  return 3;
-                };
-                return getRank(a.video_language) - getRank(b.video_language);
-              });
+                  };
+                  return getRank(a.video_language) - getRank(b.video_language);
+                });
 
-              for (const block of dataLink) {
-                if (!Array.isArray(block.sortedEmbeds)) continue;
-                const ordered = [...block.sortedEmbeds].sort(
-                  (a, b) =>
-                    getServerPriorityWeight(a.servername) -
-                    getServerPriorityWeight(b.servername)
-                );
-                for (const entry of ordered) {
-                  if (!entry.link) continue;
-                  const dec = decryptEmbed69Link(entry.link, aesKey);
-                  addUnique(dec);
+                for (const block of dataLink) {
+                  if (!Array.isArray(block.sortedEmbeds)) continue;
+                  const ordered = [...block.sortedEmbeds].sort(
+                    (a, b) =>
+                      getServerPriorityWeight(a.servername) -
+                      getServerPriorityWeight(b.servername)
+                  );
+                  for (const entry of ordered) {
+                    if (!entry.link) continue;
+                    const dec = decryptEmbed69Link(entry.link, aesKey);
+                    if (dec) list.push(dec);
+                  }
                 }
               }
             }
           }
         }
+      } catch {
+        // Silencioso
       }
-    }
+      return list;
+    };
 
-    // Fallback / complemento desde PlayLatinSrc (incluye Mixdrop, Streamwish, Filemoon, etc.)
-    const tvMatch = rawUrl.match(/(tt\d+)-(\d+)x(\d+)/i);
-    const movieMatch = rawUrl.match(/(tt\d+)/i);
-    if (tvMatch || movieMatch) {
-      const isTv = Boolean(tvMatch);
-      const imdbId = tvMatch ? tvMatch[1] : movieMatch![1];
-      const seasonStr = tvMatch ? String(Number(tvMatch[2])) : "1";
-      const episodeStr = tvMatch ? String(Number(tvMatch[3])) : "1";
+    const resolveFromPlayLatin = async (): Promise<string[]> => {
+      const list: string[] = [];
+      try {
+        const tvMatch = rawUrl.match(/(tt\d+)-(\d+)x(\d+)/i);
+        const movieMatch = rawUrl.match(/(tt\d+)/i);
+        if (!tvMatch && !movieMatch) return list;
 
-      const pageUrl = isTv
-        ? `https://playlatinsrc.co/custom/serial/${imdbId}/${seasonStr}/${episodeStr}`
-        : `https://playlatinsrc.co/custom/movie/${imdbId}`;
-      const pageRes = await fetch(pageUrl, {
-        headers: { "User-Agent": BROWSER_USER_AGENT },
-        signal: AbortSignal.timeout(5000),
-      });
-      if (pageRes.ok) {
+        const isTv = Boolean(tvMatch);
+        const imdbId = tvMatch ? tvMatch[1] : movieMatch![1];
+        const seasonStr = tvMatch ? String(Number(tvMatch[2])) : "1";
+        const episodeStr = tvMatch ? String(Number(tvMatch[3])) : "1";
+
+        const pageUrl = isTv
+          ? `https://playlatinsrc.co/custom/serial/${imdbId}/${seasonStr}/${episodeStr}`
+          : `https://playlatinsrc.co/custom/movie/${imdbId}`;
+        const pageRes = await fetch(pageUrl, {
+          headers: { "User-Agent": BROWSER_USER_AGENT },
+          signal: AbortSignal.timeout(4500),
+        });
+        if (!pageRes.ok) return list;
+
         const pageHtml = await pageRes.text();
         const tokenMatch = pageHtml.match(/data-resolve-token="([^"]+)"/);
-        if (tokenMatch) {
-          const resolveRes = await fetch("https://playlatinsrc.co/api/resolve", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Referer: pageUrl,
-              "User-Agent": BROWSER_USER_AGENT,
-            },
-            body: JSON.stringify({
-              type: isTv ? "tv" : "movie",
-              id: imdbId,
-              season: seasonStr,
-              episode: episodeStr,
-              mode: "custom",
-              token: tokenMatch[1],
-            }),
-            signal: AbortSignal.timeout(5000),
-          });
-          if (resolveRes.ok) {
-            const data = (await resolveRes.json()) as PlayLatinResolveResponse;
-            const sources = Array.isArray(data.sources) ? data.sources : [];
-            const validSources = sources.filter((s) =>
-              Boolean(s.url && s.url.startsWith("http"))
-            );
+        if (!tokenMatch) return list;
 
-            const targetVersion =
-              requestedLang === "SUB" || requestedLang === "VOSE"
-                ? "subtitulado"
-                : "latino";
+        const resolveRes = await fetch("https://playlatinsrc.co/api/resolve", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Referer: pageUrl,
+            "User-Agent": BROWSER_USER_AGENT,
+          },
+          body: JSON.stringify({
+            type: isTv ? "tv" : "movie",
+            id: imdbId,
+            season: seasonStr,
+            episode: episodeStr,
+            mode: "custom",
+            token: tokenMatch[1],
+          }),
+          signal: AbortSignal.timeout(4500),
+        });
+        if (!resolveRes.ok) return list;
 
-            const langFiltered = validSources.filter((s) => {
-              const ver = (s.version || "").toLowerCase();
-              if (targetVersion === "subtitulado") {
-                return ver === "subtitulado" || ver === "sub";
-              }
-              return ver === "latino" || ver === "castellano" || (isTv && !ver);
-            });
+        const data = (await resolveRes.json()) as PlayLatinResolveResponse;
+        const sources = Array.isArray(data.sources) ? data.sources : [];
+        const validSources = sources.filter((s) =>
+          Boolean(s.url && s.url.startsWith("http"))
+        );
 
-            const orderedSources = [
-              ...(langFiltered.length > 0 ? langFiltered : validSources),
-            ].sort(
-              (a, b) =>
-                getServerPriorityWeight(a.server || a.name) -
-                getServerPriorityWeight(b.server || b.name)
-            );
+        const targetVersion =
+          requestedLang === "SUB" || requestedLang === "VOSE"
+            ? "subtitulado"
+            : "latino";
 
-            for (const s of orderedSources) {
-              addUnique(s.url);
-            }
+        const langFiltered = validSources.filter((s) => {
+          const ver = (s.version || "").toLowerCase();
+          if (targetVersion === "subtitulado") {
+            return ver === "subtitulado" || ver === "sub";
           }
+          return ver === "latino" || ver === "castellano" || (isTv && !ver);
+        });
+
+        const orderedSources = [
+          ...(langFiltered.length > 0 ? langFiltered : validSources),
+        ].sort(
+          (a, b) =>
+            getServerPriorityWeight(a.server || a.name) -
+            getServerPriorityWeight(b.server || b.name)
+        );
+
+        for (const s of orderedSources) {
+          if (s.url) list.push(s.url);
         }
+      } catch {
+        // Silencioso
       }
-    }
+      return list;
+    };
+
+    const [embed69List, playLatinList] = await Promise.all([
+      resolveFromEmbed69(),
+      resolveFromPlayLatin(),
+    ]);
+
+    for (const u of embed69List) addUnique(u);
+    for (const u of playLatinList) addUnique(u);
   } catch {
     // Continuar con los candidatos ya recolectados
   }
@@ -513,6 +539,9 @@ export async function GET(request: NextRequest) {
 
   let targetEmbedUrl = inputUrl;
   let fallbackIframeUrl = inputUrl;
+  let decryptedMirrorId: string | null = null;
+  let decryptedMovieId: string | null = null;
+  let originalRawUrl: string | null = null;
 
   try {
     // Soportar URLs firmadas internas (/api/stream/[token]) desencriptando el token automáticamente
@@ -526,6 +555,9 @@ export async function GET(request: NextRequest) {
         const decodedToken = decodeURIComponent(tokenPart);
         const payload = tokenCryptoService.decryptStreamToken(decodedToken);
         targetEmbedUrl = payload.rawUrl;
+        originalRawUrl = payload.rawUrl;
+        decryptedMirrorId = payload.mirrorId;
+        decryptedMovieId = payload.movieId;
         fallbackIframeUrl = inputUrl;
       }
     }
@@ -552,11 +584,42 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // Si el target es un contenedor Embed69 (o contiene un IMDb ID tt...), obtenemos todos los embeds candidatos
+    // Si el target es un contenedor Embed69 (o si es un mirror antiguo dr0pstream/doodstream con hermano embed69 en BD),
+    // obtenemos todos los embeds directos candidatos (Streamwish, Mixdrop, Vidhide, Filemoon)
     let embedUrlsToProbe: string[] = [targetEmbedUrl];
-    if (targetEmbedUrl.includes("embed69.org/f/")) {
+    let embed69LookupUrl: string | null = targetEmbedUrl.includes("embed69.org/f/")
+      ? targetEmbedUrl
+      : null;
+
+    if (
+      !embed69LookupUrl &&
+      decryptedMovieId &&
+      /dr0pstream\.com|dropload|doodstream/i.test(targetEmbedUrl)
+    ) {
+      try {
+        if (decryptedMirrorId?.startsWith("ep-")) {
+          const epId = decryptedMirrorId.slice(3).replace(/-\d+$/, "");
+          const sibling = await prisma.episodeMirror.findFirst({
+            where: { episodeId: epId, rawUrl: { contains: "embed69.org/f/" } },
+          });
+          if (sibling?.rawUrl) embed69LookupUrl = sibling.rawUrl;
+        } else {
+          const sibling = await prisma.mirrorLink.findFirst({
+            where: {
+              movieId: decryptedMovieId,
+              rawUrl: { contains: "embed69.org/f/" },
+            },
+          });
+          if (sibling?.rawUrl) embed69LookupUrl = sibling.rawUrl;
+        }
+      } catch {
+        // Silencioso
+      }
+    }
+
+    if (embed69LookupUrl) {
       const resolvedEmbeds =
-        await resolveEmbed69OrPlayLatinToDirectEmbeds(targetEmbedUrl);
+        await resolveEmbed69OrPlayLatinToDirectEmbeds(embed69LookupUrl);
       if (resolvedEmbeds.length > 0) {
         embedUrlsToProbe = resolvedEmbeds;
         if (!inputUrl.includes("/api/stream/")) {
@@ -566,12 +629,20 @@ export async function GET(request: NextRequest) {
     }
 
     // Construimos la lista de endpoints candidatos a inspeccionar
-    const candidateFetchTargets: { fetchUrl: string; referer: string }[] = [];
+    const candidateFetchTargets: {
+      fetchUrl: string;
+      referer: string;
+      sourceEmbedUrl: string;
+    }[] = [];
     const seenFetchUrls = new Set<string>();
-    const addFetchTarget = (fetchUrl: string, referer: string) => {
+    const addFetchTarget = (
+      fetchUrl: string,
+      referer: string,
+      sourceEmbedUrl: string
+    ) => {
       if (!seenFetchUrls.has(fetchUrl)) {
         seenFetchUrls.add(fetchUrl);
-        candidateFetchTargets.push({ fetchUrl, referer });
+        candidateFetchTargets.push({ fetchUrl, referer, sourceEmbedUrl });
       }
     };
 
@@ -591,22 +662,26 @@ export async function GET(request: NextRequest) {
 
       if (isStreamwishFamily && codeMatch?.[1]) {
         const fileCode = codeMatch[1];
+        const canonicalSwEmbed = `https://hglink.to/e/${fileCode}`;
         addFetchTarget(
           `https://audinifer.com/e/${fileCode}`,
-          "https://hglink.to/"
+          "https://hglink.to/",
+          canonicalSwEmbed
         );
         addFetchTarget(
           `https://vibuxer.com/e/${fileCode}`,
-          "https://hglink.to/"
+          "https://hglink.to/",
+          canonicalSwEmbed
         );
       }
 
-      addFetchTarget(candidateEmbed, `${candidateOrigin}/`);
+      addFetchTarget(candidateEmbed, `${candidateOrigin}/`, candidateEmbed);
     }
 
     const probeTarget = async (target: {
       fetchUrl: string;
       referer: string;
+      sourceEmbedUrl: string;
     }) => {
       try {
         const res = await fetch(target.fetchUrl, {
@@ -643,6 +718,7 @@ export async function GET(request: NextRequest) {
             return {
               ...candidate,
               referer: streamReferer,
+              sourceEmbedUrl: target.sourceEmbedUrl,
             };
           }
         }
@@ -659,6 +735,37 @@ export async function GET(request: NextRequest) {
     const hit = probeResults.find((r) => Boolean(r));
 
     if (hit) {
+      // Auto-reparación en BD: si el mirror original estaba guardado como "el barrio" (embed69.org o dr0pstream.com)
+      // y acabamos de resolver y verificar la "dirección exacta" (hglink.to, mxdrop.to, morencius.com),
+      // actualizamos el registro en BD en segundo plano para que quede guardado permanentemente.
+      if (
+        decryptedMirrorId &&
+        originalRawUrl &&
+        hit.sourceEmbedUrl &&
+        hit.sourceEmbedUrl !== originalRawUrl &&
+        /embed69\.org|dr0pstream\.com|doodstream/i.test(originalRawUrl) &&
+        !hit.sourceEmbedUrl.includes("embed69.org")
+      ) {
+        void (async () => {
+          try {
+            if (decryptedMirrorId.startsWith("ep-")) {
+              const epId = decryptedMirrorId.slice(3).replace(/-\d+$/, "");
+              await prisma.episodeMirror.updateMany({
+                where: { episodeId: epId, rawUrl: originalRawUrl },
+                data: { rawUrl: hit.sourceEmbedUrl },
+              });
+            } else {
+              await prisma.mirrorLink.updateMany({
+                where: { id: decryptedMirrorId },
+                data: { rawUrl: hit.sourceEmbedUrl },
+              });
+            }
+          } catch {
+            // Silencioso en background
+          }
+        })();
+      }
+
       return NextResponse.json({
         success: true,
         streamUrl: hit.streamUrl,
