@@ -11,6 +11,7 @@ try {
 }
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
@@ -814,18 +815,22 @@ export async function GET(request: NextRequest) {
         );
         if (extractedCandidates.length === 0) return null;
 
-        for (const candidate of extractedCandidates) {
-          const alive = await verifyStreamCandidateAlive(
-            candidate,
-            streamReferer
-          );
-          if (alive) {
-            return {
-              ...candidate,
-              referer: streamReferer,
-              sourceEmbedUrl: target.sourceEmbedUrl,
-            };
-          }
+        const aliveChecks = await Promise.all(
+          extractedCandidates.map(async (candidate) => {
+            const alive = await verifyStreamCandidateAlive(
+              candidate,
+              streamReferer
+            );
+            return alive ? candidate : null;
+          })
+        );
+        const firstAliveCandidate = aliveChecks.find((c) => Boolean(c));
+        if (firstAliveCandidate) {
+          return {
+            ...firstAliveCandidate,
+            referer: streamReferer,
+            sourceEmbedUrl: target.sourceEmbedUrl,
+          };
         }
 
         return null;

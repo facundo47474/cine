@@ -8,6 +8,10 @@ try {
 }
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
+
+// Límite seguro por debajo de los 4.5 MB máximos de payload por invocación Serverless en Vercel
+const MAX_VERCEL_MP4_CHUNK_BYTES = 3_500_000;
 
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
@@ -83,8 +87,23 @@ export async function GET(request: NextRequest) {
     Accept: "*/*",
   };
 
+  const isLikelyMp4Request = /\.mp4(\?|$)/i.test(parsedStreamUrl.pathname);
   const rangeHeader = request.headers.get("range");
-  if (rangeHeader) {
+  if (isLikelyMp4Request) {
+    // En Vercel Serverless el payload máximo de respuesta es 4.5 MB.
+    // Acotamos cada petición Range de archivos .mp4 a bloques de 3.5 MB (HTTP 206)
+    // para que el elemento <video> solicite los siguientes bloques progresivamente sin error 502/413.
+    const rangeMatch = rangeHeader?.match(/bytes=(\d+)-(\d*)/i);
+    const startByte = rangeMatch ? Number(rangeMatch[1]) : 0;
+    const requestedEnd =
+      rangeMatch && rangeMatch[2] ? Number(rangeMatch[2]) : null;
+    const maxEndByte = startByte + MAX_VERCEL_MP4_CHUNK_BYTES - 1;
+    const safeEndByte =
+      requestedEnd !== null
+        ? Math.min(requestedEnd, maxEndByte)
+        : maxEndByte;
+    upstreamHeaders["Range"] = `bytes=${startByte}-${safeEndByte}`;
+  } else if (rangeHeader) {
     upstreamHeaders["Range"] = rangeHeader;
   }
 
