@@ -35,13 +35,15 @@ export class SeriesService {
 
     let preloadedCast: CastMemberDto[] = [];
 
-    // Si no está en BD y es un ID de TMDB (o "tmdb-1234"), lo importamos automáticamente de TMDB
-    if (!details) {
-      let tmdbId: number | null = null;
-      if (slugOrId.startsWith("tmdb-")) {
-        tmdbId = Number(slugOrId.replace("tmdb-", ""));
-      } else if (!isNaN(Number(slugOrId))) {
-        tmdbId = Number(slugOrId);
+    // Si no está en BD (o quedó sin temporadas cargadas) y tenemos un ID de TMDB, lo importamos automáticamente de TMDB
+    if (!details || details.seasons.length === 0) {
+      let tmdbId: number | null = details?.series.tmdbId ?? null;
+      if (!tmdbId) {
+        if (slugOrId.startsWith("tmdb-")) {
+          tmdbId = Number(slugOrId.replace("tmdb-", ""));
+        } else if (!isNaN(Number(slugOrId))) {
+          tmdbId = Number(slugOrId);
+        }
       }
 
       if (tmdbId && tmdbId > 0) {
@@ -103,6 +105,9 @@ export class SeriesService {
             `[SeriesService] Error auto-importando serie TMDB #${tmdbId}:`,
             error
           );
+          if (!details) {
+            details = await this.seriesRepository.findSeriesDetails(slugOrId);
+          }
         }
       }
     }
@@ -534,10 +539,13 @@ export class SeriesService {
 
     // 2. Mirrors de BD
     const existingPlayable = episode.getPlayableMirrors();
-    const hasDirectResolvedInDb = existingPlayable.some((m) =>
-      /hglink\.to|audinifer\.com|vibuxer\.com|streamwish|mxdrop\.to|mixdrop|morencius\.com|vidhide|filemoon/i.test(
-        m.rawUrl
-      )
+    const hasDirectResolvedInDb = existingPlayable.some(
+      (m) =>
+        !m.rawUrl.includes("embed69.org") &&
+        !m.rawUrl.includes("vidsrc.me") &&
+        /hglink\.to|audinifer\.com|vibuxer\.com|streamwish|mxdrop\.to|mixdrop|morencius\.com|vidhide|filemoon/i.test(
+          m.rawUrl
+        )
     );
 
     if (hasDirectResolvedInDb) {

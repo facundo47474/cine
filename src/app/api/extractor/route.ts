@@ -161,6 +161,100 @@ function getServerPriorityWeight(servername?: string): number {
   return 9;
 }
 
+function normalizeStreamwishEmbedUrl(rawUrl: string): string {
+  const trimmed = rawUrl.trim();
+  const swMatch = trimmed.match(
+    /^https?:\/\/(?:www\.)?streamwish\.(?:to|com|gg)\/e\/([a-zA-Z0-9_-]+)/i
+  );
+  if (swMatch?.[1]) {
+    return `https://hglink.to/e/${swMatch[1]}`;
+  }
+  return trimmed;
+}
+
+function parseDomEmbedsFromEmbed69Html(
+  html: string,
+  requestedLang: string
+): string[] {
+  if (!html.includes("data-url=")) return [];
+
+  const langByCode = new Map<string, string>([
+    ["0", "LAT"],
+    ["1", "ESP"],
+    ["2", "SUB"],
+  ]);
+
+  const selectBlock = html.match(
+    /<ul[^>]*class="[^"]*SelectLangDisp[^"]*"[^>]*>([\s\S]*?)<\/ul>/i
+  );
+  if (selectBlock?.[1]) {
+    const liRegex = /<li[^>]*data-lang="([^"]+)"[^>]*>([\s\S]*?)<\/li>/gi;
+    let liMatch: RegExpExecArray | null;
+    while ((liMatch = liRegex.exec(selectBlock[1])) !== null) {
+      const code = liMatch[1].trim();
+      const inner = liMatch[2];
+      if (/LAT\.png|latino/i.test(inner)) {
+        langByCode.set(code, "LAT");
+      } else if (/ESP\.png|espa|castellano/i.test(inner)) {
+        langByCode.set(code, "ESP");
+      } else if (/SUB\.png|subtitulado|vose/i.test(inner)) {
+        langByCode.set(code, "SUB");
+      }
+    }
+  }
+
+  const parsedItems: { lang: string; servername: string; url: string }[] = [];
+  const optionLiRegex = /<li([^>]*data-url="[^"]+"[^>]*)>([\s\S]*?)<\/li>/gi;
+  let optMatch: RegExpExecArray | null;
+  while ((optMatch = optionLiRegex.exec(html)) !== null) {
+    const attrs = optMatch[1];
+    const inner = optMatch[2];
+    if (/data-download\s*=\s*["']1["']/i.test(attrs)) continue;
+
+    const urlMatch = attrs.match(/data-url="([^"]+)"/i);
+    if (!urlMatch?.[1]) continue;
+
+    const rawUrl = urlMatch[1].trim();
+    if (!rawUrl.startsWith("http") || /1fichier\.com/i.test(rawUrl)) continue;
+
+    const langCode = attrs.match(/data-lang="([^"]*)"/i)?.[1]?.trim() ?? "0";
+    const lang = langByCode.get(langCode) || "LAT";
+    const servername =
+      inner.match(/<span>([^<]+)<\/span>/i)?.[1]?.trim() ||
+      inner.match(/alt="([^"]+)"/i)?.[1]?.trim() ||
+      rawUrl;
+
+    parsedItems.push({
+      lang,
+      servername,
+      url: normalizeStreamwishEmbedUrl(rawUrl),
+    });
+  }
+
+  const getLangRank = (langRaw: string) => {
+    const l = langRaw.toUpperCase();
+    if (requestedLang === "SUB") {
+      if (l === "SUB" || l === "VOSE") return 1;
+      if (l === "LAT" || l === "LATINO") return 2;
+      return 3;
+    }
+    if (l === "LAT" || l === "LATINO") return 1;
+    if (l === "ESP" || l === "CASTELLANO") return 2;
+    return 3;
+  };
+
+  parsedItems.sort((a, b) => {
+    const langDiff = getLangRank(a.lang) - getLangRank(b.lang);
+    if (langDiff !== 0) return langDiff;
+    return (
+      getServerPriorityWeight(a.servername) -
+      getServerPriorityWeight(b.servername)
+    );
+  });
+
+  return parsedItems.map((i) => i.url);
+}
+
 /**
  * Resuelve todos los enlaces de servidores candidatos desde Embed69 y PlayLatinSrc
  * ordenados por facilidad de extracción limpia (Streamwish -> Mixdrop -> Vidhide -> Filemoon -> otros).
@@ -171,7 +265,7 @@ async function resolveEmbed69OrPlayLatinToDirectEmbeds(
   const resolvedUrls: string[] = [];
   const addUnique = (url?: string | null) => {
     if (!url) return;
-    const trimmed = url.trim();
+    const trimmed = normalizeStreamwishEmbedUrl(url);
     if (trimmed.startsWith("http") && !resolvedUrls.includes(trimmed)) {
       resolvedUrls.push(trimmed);
     }
@@ -215,8 +309,8 @@ async function resolveEmbed69OrPlayLatinToDirectEmbeds(
             if (!res.ok) return null;
             const text = await res.text();
             if (
-              text.includes("dataLink") &&
-              !text.includes("No folders found")
+              !text.includes("No folders found") &&
+              (text.includes("dataLink") || text.includes("data-url="))
             ) {
               return text;
             }
@@ -232,6 +326,11 @@ async function resolveEmbed69OrPlayLatinToDirectEmbeds(
         const html = htmlList.find((h): h is string => Boolean(h));
 
         if (html) {
+          const domUrls = parseDomEmbedsFromEmbed69Html(html, requestedLang);
+          if (domUrls.length > 0) {
+            list.push(...domUrls);
+          }
+
           const cm = html.match(/POW_CHALLENGE\s*=\s*'([^']+)'/);
           const dm = html.match(/POW_DIFFICULTY\s*=\s*(\d+)/);
           const sm = html.match(/POW_SALT\s*=\s*'([^']+)'/);
@@ -269,7 +368,7 @@ async function resolveEmbed69OrPlayLatinToDirectEmbeds(
                   for (const entry of ordered) {
                     if (!entry.link) continue;
                     const dec = decryptEmbed69Link(entry.link, aesKey);
-                    if (dec) list.push(dec);
+                    if (dec) list.push(normalizeStreamwishEmbedUrl(dec));
                   }
                 }
               }
@@ -591,26 +690,32 @@ export async function GET(request: NextRequest) {
       ? targetEmbedUrl
       : null;
 
-    if (
-      !embed69LookupUrl &&
-      decryptedMovieId &&
-      /dr0pstream\.com|dropload|doodstream/i.test(targetEmbedUrl)
-    ) {
+    if (!embed69LookupUrl && decryptedMovieId && !targetEmbedUrl.includes("vidsrc.me")) {
       try {
-        if (decryptedMirrorId?.startsWith("ep-")) {
-          const epId = decryptedMirrorId.slice(3).replace(/-\d+$/, "");
-          const sibling = await prisma.episodeMirror.findFirst({
-            where: { episodeId: epId, rawUrl: { contains: "embed69.org/f/" } },
-          });
-          if (sibling?.rawUrl) embed69LookupUrl = sibling.rawUrl;
-        } else {
-          const sibling = await prisma.mirrorLink.findFirst({
-            where: {
-              movieId: decryptedMovieId,
-              rawUrl: { contains: "embed69.org/f/" },
-            },
-          });
-          if (sibling?.rawUrl) embed69LookupUrl = sibling.rawUrl;
+        const siblings = decryptedMirrorId?.startsWith("ep-")
+          ? await prisma.episodeMirror.findMany({
+              where: {
+                episodeId: decryptedMirrorId.slice(3).replace(/-\d+$/, ""),
+              },
+              orderBy: { priority: "asc" },
+            })
+          : await prisma.mirrorLink.findMany({
+              where: { movieId: decryptedMovieId },
+              orderBy: { priority: "asc" },
+            });
+
+        for (const sib of siblings) {
+          if (!sib.rawUrl || sib.rawUrl === targetEmbedUrl) continue;
+          if (sib.rawUrl.includes("embed69.org/f/")) {
+            if (!embed69LookupUrl && /dr0pstream\.com|dropload|doodstream/i.test(targetEmbedUrl)) {
+              embed69LookupUrl = sib.rawUrl;
+            }
+          } else if (
+            !sib.rawUrl.includes("vidsrc.me") &&
+            !embedUrlsToProbe.includes(sib.rawUrl)
+          ) {
+            embedUrlsToProbe.push(sib.rawUrl);
+          }
         }
       } catch {
         // Silencioso

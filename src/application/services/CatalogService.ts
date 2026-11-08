@@ -298,6 +298,8 @@ export class CatalogService {
     const hasResolvedExtractableLatino = playable.some(
       (m) =>
         m.language === "Latino" &&
+        !m.rawUrl.includes("embed69.org") &&
+        !m.rawUrl.includes("vidsrc.me") &&
         /hglink\.to|audinifer\.com|vibuxer\.com|streamwish|mxdrop\.to|mixdrop|morencius\.com|vidhide|filemoon/i.test(
           m.rawUrl
         )

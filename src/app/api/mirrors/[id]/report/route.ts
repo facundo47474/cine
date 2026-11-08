@@ -13,6 +13,13 @@ export async function POST(
 ) {
   try {
     const mirrorId = params.id;
+    if (mirrorId.startsWith("ep-")) {
+      return NextResponse.json({
+        ok: true,
+        skipped: true,
+      });
+    }
+
     const auditResult = await healthCheckerService.auditSingleMirror(mirrorId);
 
     if (!auditResult) {

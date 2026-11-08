@@ -28,7 +28,9 @@ interface Embed69LanguageBlock {
 
 interface Embed69StreamwishExtraction {
   latUrl: string | null;
+  latBackupUrl?: string | null;
   subUrl: string | null;
+  subBackupUrl?: string | null;
 }
 
 interface PlayLatinSourceEntry {
@@ -175,6 +177,109 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
     }
   }
 
+  private normalizeEmbedUrl(rawUrl: string): string {
+    const trimmed = rawUrl.trim();
+    const swMatch = trimmed.match(
+      /^https?:\/\/(?:www\.)?streamwish\.(?:to|com|gg)\/e\/([a-zA-Z0-9_-]+)/i
+    );
+    if (swMatch?.[1]) {
+      return `https://hglink.to/e/${swMatch[1]}`;
+    }
+    return trimmed;
+  }
+
+  private parseDomOptionsFromEmbed69(
+    html: string
+  ): Embed69StreamwishExtraction | null {
+    if (!html.includes("data-url=")) return null;
+
+    const langByCode = new Map<string, "LAT" | "ESP" | "SUB">([
+      ["0", "LAT"],
+      ["1", "ESP"],
+      ["2", "SUB"],
+    ]);
+
+    const selectBlock = html.match(
+      /<ul[^>]*class="[^"]*SelectLangDisp[^"]*"[^>]*>([\s\S]*?)<\/ul>/i
+    );
+    if (selectBlock?.[1]) {
+      const liRegex = /<li[^>]*data-lang="([^"]+)"[^>]*>([\s\S]*?)<\/li>/gi;
+      let liMatch: RegExpExecArray | null;
+      while ((liMatch = liRegex.exec(selectBlock[1])) !== null) {
+        const code = liMatch[1].trim();
+        const inner = liMatch[2];
+        if (/LAT\.png|latino/i.test(inner)) {
+          langByCode.set(code, "LAT");
+        } else if (/ESP\.png|espa|castellano/i.test(inner)) {
+          langByCode.set(code, "ESP");
+        } else if (/SUB\.png|subtitulado|vose/i.test(inner)) {
+          langByCode.set(code, "SUB");
+        }
+      }
+    }
+
+    const entriesByLang: Record<
+      "LAT" | "ESP" | "SUB",
+      { servername: string; url: string }[]
+    > = {
+      LAT: [],
+      ESP: [],
+      SUB: [],
+    };
+
+    const optionLiRegex =
+      /<li([^>]*data-url="[^"]+"[^>]*)>([\s\S]*?)<\/li>/gi;
+    let optMatch: RegExpExecArray | null;
+    while ((optMatch = optionLiRegex.exec(html)) !== null) {
+      const attrs = optMatch[1];
+      const inner = optMatch[2];
+      if (/data-download\s*=\s*["']1["']/i.test(attrs)) continue;
+
+      const urlMatch = attrs.match(/data-url="([^"]+)"/i);
+      if (!urlMatch?.[1]) continue;
+
+      const rawUrl = urlMatch[1].trim();
+      if (!rawUrl.startsWith("http") || /1fichier\.com/i.test(rawUrl)) continue;
+
+      const langCode =
+        attrs.match(/data-lang="([^"]*)"/i)?.[1]?.trim() ?? "0";
+      const mappedLang = langByCode.get(langCode) || "LAT";
+
+      const servername =
+        inner.match(/<span>([^<]+)<\/span>/i)?.[1]?.trim() ||
+        inner.match(/alt="([^"]+)"/i)?.[1]?.trim() ||
+        rawUrl;
+
+      entriesByLang[mappedLang].push({
+        servername,
+        url: this.normalizeEmbedUrl(rawUrl),
+      });
+    }
+
+    for (const k of ["LAT", "ESP", "SUB"] as const) {
+      entriesByLang[k].sort(
+        (a, b) =>
+          this.getServerPriorityWeight(a.servername) -
+          this.getServerPriorityWeight(b.servername)
+      );
+    }
+
+    const latPool =
+      entriesByLang.LAT.length > 0 ? entriesByLang.LAT : entriesByLang.ESP;
+    const subPool = entriesByLang.SUB;
+
+    if (latPool.length === 0 && subPool.length === 0) {
+      return null;
+    }
+
+    return {
+      latUrl: latPool[0]?.url || null,
+      latBackupUrl: latPool[1]?.url || null,
+      subUrl: subPool[0]?.url || null,
+      subBackupUrl: subPool[1]?.url || null,
+    };
+  }
+
   /**
    * Intenta extraer directamente los enlaces desencriptados de Streamwish (ej. hglink.to/e/...)
    * desde Embed69 para los idiomas Latino y Subtitulado.
@@ -211,7 +316,10 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
           });
           if (!res.ok) return null;
           const text = await res.text();
-          if (text.includes("dataLink") && !text.includes("No folders found")) {
+          if (
+            !text.includes("No folders found") &&
+            (text.includes("dataLink") || text.includes("data-url="))
+          ) {
             return text;
           }
           return null;
@@ -229,6 +337,13 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
         return { latUrl: null, subUrl: null };
       }
 
+      // Nuevo formato DOM de Embed69 (<li data-url="https://..." data-lang="0">)
+      const domExtracted = this.parseDomOptionsFromEmbed69(html);
+      if (domExtracted) {
+        return domExtracted;
+      }
+
+      // Formato clásico de Embed69 (let dataLink = [...] + POW_CHALLENGE)
       const challengeMatch = html.match(/POW_CHALLENGE\s*=\s*'([^']+)'/);
       const difficultyMatch = html.match(/POW_DIFFICULTY\s*=\s*(\d+)/);
       const saltMatch = html.match(/POW_SALT\s*=\s*'([^']+)'/);
@@ -258,9 +373,9 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
         return { latUrl: null, subUrl: null };
       }
 
-      let latUrl: string | null = null;
-      let espUrl: string | null = null;
-      let subUrl: string | null = null;
+      const latList: string[] = [];
+      const espList: string[] = [];
+      const subList: string[] = [];
 
       for (const block of dataLink) {
         if (
@@ -281,19 +396,26 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
           if (!candidate.link) continue;
           const decrypted = this.decryptEmbed69Link(candidate.link, aesKey);
           if (decrypted && decrypted.startsWith("http")) {
-            if ((lang === "LAT" || lang === "LATINO") && !latUrl) {
-              latUrl = decrypted;
-            } else if ((lang === "ESP" || lang === "CASTELLANO") && !espUrl) {
-              espUrl = decrypted;
-            } else if ((lang === "SUB" || lang === "VOSE") && !subUrl) {
-              subUrl = decrypted;
+            const normalized = this.normalizeEmbedUrl(decrypted);
+            if (lang === "LAT" || lang === "LATINO") {
+              latList.push(normalized);
+            } else if (lang === "ESP" || lang === "CASTELLANO") {
+              espList.push(normalized);
+            } else if (lang === "SUB" || lang === "VOSE") {
+              subList.push(normalized);
             }
-            break;
           }
         }
       }
 
-      return { latUrl: latUrl || espUrl, subUrl };
+      const finalLatList = latList.length > 0 ? latList : espList;
+
+      return {
+        latUrl: finalLatList[0] || null,
+        latBackupUrl: finalLatList[1] || null,
+        subUrl: subList[0] || null,
+        subBackupUrl: subList[1] || null,
+      };
     } catch {
       return { latUrl: null, subUrl: null };
     }
@@ -454,11 +576,12 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
         priority: hasDirectStreamwishLat ? 1 : 2,
       });
 
-      if (playLatin.latUrl) {
+      const secondaryLatUrl = playLatin.latUrl || streamwish.latBackupUrl;
+      if (secondaryLatUrl && secondaryLatUrl !== streamwish.latUrl) {
         candidates.push({
-          serverName: this.detectServerNameFromUrl(playLatin.latUrl, "Lat"),
+          serverName: this.detectServerNameFromUrl(secondaryLatUrl, "Lat"),
           language: "Latino",
-          rawUrl: playLatin.latUrl,
+          rawUrl: secondaryLatUrl,
           format: MirrorFormat.EMBED,
           quality: "1080p",
           priority: hasDirectStreamwishLat ? 2 : 1,
@@ -478,11 +601,12 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
         priority: hasDirectStreamwishSub ? 3 : 4,
       });
 
-      if (playLatin.subUrl) {
+      const secondarySubUrl = playLatin.subUrl || streamwish.subBackupUrl;
+      if (secondarySubUrl && secondarySubUrl !== streamwish.subUrl) {
         candidates.push({
-          serverName: this.detectServerNameFromUrl(playLatin.subUrl, "Sub"),
+          serverName: this.detectServerNameFromUrl(secondarySubUrl, "Sub"),
           language: "Inglés (Sub)",
-          rawUrl: playLatin.subUrl,
+          rawUrl: secondarySubUrl,
           format: MirrorFormat.EMBED,
           quality: "1080p",
           priority: hasDirectStreamwishSub ? 4 : 3,
@@ -539,11 +663,12 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
         priority: hasDirectStreamwishLat ? 1 : 2,
       });
 
-      if (playLatin.latUrl) {
+      const secondaryTvLatUrl = playLatin.latUrl || streamwish.latBackupUrl;
+      if (secondaryTvLatUrl && secondaryTvLatUrl !== streamwish.latUrl) {
         candidates.push({
-          serverName: this.detectServerNameFromUrl(playLatin.latUrl, "Lat"),
+          serverName: this.detectServerNameFromUrl(secondaryTvLatUrl, "Lat"),
           language: "Latino",
-          rawUrl: playLatin.latUrl,
+          rawUrl: secondaryTvLatUrl,
           format: MirrorFormat.EMBED,
           quality: "1080p",
           priority: hasDirectStreamwishLat ? 2 : 1,
@@ -563,11 +688,12 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
         priority: hasDirectStreamwishSub ? 3 : 4,
       });
 
-      if (playLatin.subUrl) {
+      const secondaryTvSubUrl = playLatin.subUrl || streamwish.subBackupUrl;
+      if (secondaryTvSubUrl && secondaryTvSubUrl !== streamwish.subUrl) {
         candidates.push({
-          serverName: this.detectServerNameFromUrl(playLatin.subUrl, "Sub"),
+          serverName: this.detectServerNameFromUrl(secondaryTvSubUrl, "Sub"),
           language: "Inglés (Sub)",
-          rawUrl: playLatin.subUrl,
+          rawUrl: secondaryTvSubUrl,
           format: MirrorFormat.EMBED,
           quality: "1080p",
           priority: hasDirectStreamwishSub ? 4 : 3,

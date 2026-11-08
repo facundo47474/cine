@@ -234,7 +234,10 @@ async function resolveDirectStreamwishUrlFromEmbed69(
         }
 
         const text = await res.text();
-        if (text.includes("No folders found") || !text.includes("dataLink")) {
+        if (
+          text.includes("No folders found") ||
+          (!text.includes("dataLink") && !text.includes("data-url="))
+        ) {
           return {
             html: null,
             notFound: true,
@@ -275,6 +278,100 @@ async function resolveDirectStreamwishUrlFromEmbed69(
 
     cleanEmbedUrl = validHit.resolvedUrl;
     const html = validHit.html;
+
+    const normalizeSwUrl = (u: string): string => {
+      const trimmed = u.trim();
+      const m = trimmed.match(
+        /^https?:\/\/(?:www\.)?streamwish\.(?:to|com|gg)\/e\/([a-zA-Z0-9_-]+)/i
+      );
+      return m?.[1] ? `https://hglink.to/e/${m[1]}` : trimmed;
+    };
+
+    // Nuevo formato DOM de Embed69 (<li data-url="https://..." data-lang="0">)
+    if (html.includes("data-url=")) {
+      const langByCode = new Map<string, string>([
+        ["0", "LAT"],
+        ["1", "ESP"],
+        ["2", "SUB"],
+      ]);
+
+      const selectBlock = html.match(
+        /<ul[^>]*class="[^"]*SelectLangDisp[^"]*"[^>]*>([\s\S]*?)<\/ul>/i
+      );
+      if (selectBlock?.[1]) {
+        const liRegex = /<li[^>]*data-lang="([^"]+)"[^>]*>([\s\S]*?)<\/li>/gi;
+        let liMatch: RegExpExecArray | null;
+        while ((liMatch = liRegex.exec(selectBlock[1])) !== null) {
+          const code = liMatch[1].trim();
+          const inner = liMatch[2];
+          if (/LAT\.png|latino/i.test(inner)) langByCode.set(code, "LAT");
+          else if (/ESP\.png|espa|castellano/i.test(inner))
+            langByCode.set(code, "ESP");
+          else if (/SUB\.png|subtitulado|vose/i.test(inner))
+            langByCode.set(code, "SUB");
+        }
+      }
+
+      const domEntries: { lang: string; servername: string; url: string }[] = [];
+      const optionLiRegex =
+        /<li([^>]*data-url="[^"]+"[^>]*)>([\s\S]*?)<\/li>/gi;
+      let optMatch: RegExpExecArray | null;
+      while ((optMatch = optionLiRegex.exec(html)) !== null) {
+        const attrs = optMatch[1];
+        const inner = optMatch[2];
+        if (/data-download\s*=\s*["']1["']/i.test(attrs)) continue;
+
+        const urlMatch = attrs.match(/data-url="([^"]+)"/i);
+        if (!urlMatch?.[1]) continue;
+
+        const candidateUrl = urlMatch[1].trim();
+        if (!candidateUrl.startsWith("http") || /1fichier\.com/i.test(candidateUrl))
+          continue;
+
+        const langCode =
+          attrs.match(/data-lang="([^"]*)"/i)?.[1]?.trim() ?? "0";
+        const lang = langByCode.get(langCode) || "LAT";
+        const servername =
+          inner.match(/<span>([^<]+)<\/span>/i)?.[1]?.trim() ||
+          inner.match(/alt="([^"]+)"/i)?.[1]?.trim() ||
+          candidateUrl;
+
+        domEntries.push({
+          lang,
+          servername,
+          url: normalizeSwUrl(candidateUrl),
+        });
+      }
+
+      if (domEntries.length > 0) {
+        const getLangRank = (langRaw: string) => {
+          const lang = langRaw.toUpperCase();
+          if (requestedLang === "SUB") {
+            if (lang === "SUB" || lang === "VOSE") return 1;
+            if (lang === "LAT" || lang === "LATINO") return 2;
+            return 3;
+          }
+          if (lang === "LAT" || lang === "LATINO") return 1;
+          if (lang === "ESP" || lang === "CASTELLANO") return 2;
+          return 3;
+        };
+
+        domEntries.sort((a, b) => {
+          const langDiff = getLangRank(a.lang) - getLangRank(b.lang);
+          if (langDiff !== 0) return langDiff;
+          return (
+            getServerPriorityWeight(a.servername) -
+            getServerPriorityWeight(b.servername)
+          );
+        });
+
+        return {
+          url: domEntries[0].url,
+          status: "RESOLVED",
+          cleanEmbedUrl,
+        };
+      }
+    }
 
     const challengeMatch = html.match(/POW_CHALLENGE\s*=\s*'([^']+)'/);
     const difficultyMatch = html.match(/POW_DIFFICULTY\s*=\s*(\d+)/);
@@ -342,7 +439,7 @@ async function resolveDirectStreamwishUrlFromEmbed69(
         const decryptedUrl = decryptEmbed69Link(candidate.link, aesKey);
         if (decryptedUrl && decryptedUrl.startsWith("http")) {
           return {
-            url: decryptedUrl,
+            url: normalizeSwUrl(decryptedUrl),
             status: "RESOLVED",
             cleanEmbedUrl,
           };
@@ -521,27 +618,40 @@ async function extractStreamwishDirectHls(
   embedUrl: string
 ): Promise<StreamwishDirectHlsInfo | null> {
   try {
-    const codeMatch = embedUrl.match(/\/e\/([a-zA-Z0-9_-]+)/);
+    const codeMatch = embedUrl.match(/\/(?:e|embed)\/([a-zA-Z0-9_-]+)/);
     if (!codeMatch) return null;
 
+    const isVidhideHost = /morencius\.com|vidhide/i.test(embedUrl);
     const isStreamwishHost =
       /hglink\.to|audinifer\.com|vibuxer\.com|hanerix\.com|streamwish|strwish|wishembed|awish|dwish|mwish|swdyu/i.test(
         embedUrl
       );
-    if (!isStreamwishHost) return null;
+    if (!isStreamwishHost && !isVidhideHost) return null;
 
     const fileCode = codeMatch[1];
-    const mirrorOrigins = ["https://audinifer.com", "https://vibuxer.com"];
+    const probeTargets = isVidhideHost
+      ? [{ url: embedUrl, origin: new URL(embedUrl).origin }]
+      : [
+          {
+            url: `https://audinifer.com/e/${fileCode}`,
+            origin: "https://audinifer.com",
+          },
+          {
+            url: `https://vibuxer.com/e/${fileCode}`,
+            origin: "https://vibuxer.com",
+          },
+        ];
 
-    const probeOrigin = async (
-      origin: string
-    ): Promise<{ origin: string; unpacked: string } | null> => {
+    const probeOrigin = async (target: {
+      url: string;
+      origin: string;
+    }): Promise<{ origin: string; unpacked: string } | null> => {
       try {
-        const res = await fetch(`${origin}/e/${fileCode}`, {
+        const res = await fetch(target.url, {
           headers: {
             "User-Agent":
               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            Referer: "https://hglink.to/",
+            Referer: isVidhideHost ? "https://embed69.org/" : "https://hglink.to/",
           },
           signal: AbortSignal.timeout(2500),
         });
@@ -549,14 +659,14 @@ async function extractStreamwishDirectHls(
         const html = await res.text();
         const unpacked = unpackDeanEdwardsBlock(html);
         if (!unpacked) return null;
-        return { origin, unpacked };
+        return { origin: target.origin, unpacked };
       } catch {
         return null;
       }
     };
 
     const originResults = await Promise.all(
-      mirrorOrigins.map((o) => probeOrigin(o))
+      probeTargets.map((t) => probeOrigin(t))
     );
     const hit = originResults.find(
       (r): r is { origin: string; unpacked: string } => Boolean(r)

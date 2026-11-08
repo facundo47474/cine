@@ -241,9 +241,13 @@ export class PrismaSeriesRepository implements ISeriesRepository {
     let seriesRecord: PrismaMovie;
 
     if (data.tmdbId) {
-      const existing = await this.db.movie.findFirst({
-        where: { tmdbId: data.tmdbId, mediaType: "SERIES" },
-      });
+      const existing =
+        (await this.db.movie.findFirst({
+          where: { tmdbId: data.tmdbId, mediaType: "SERIES" },
+        })) ||
+        (await this.db.movie.findUnique({
+          where: { tmdbId: data.tmdbId },
+        }));
 
       if (existing) {
         seriesRecord = await this.db.movie.update({
@@ -263,23 +267,35 @@ export class PrismaSeriesRepository implements ISeriesRepository {
           },
         });
       } else {
-        seriesRecord = await this.db.movie.create({
-          data: {
-            tmdbId: data.tmdbId,
-            mediaType: "SERIES",
-            title: data.title,
-            originalTitle: data.originalTitle ?? null,
-            synopsis: data.synopsis,
-            posterUrl: data.posterUrl,
-            backdropUrl: data.backdropUrl ?? null,
-            releaseYear: data.releaseYear,
-            durationMins: 45,
-            rating: data.rating,
-            qualityBadge: data.qualityBadge || "HD",
-            genres: data.genres || [],
-            isAvailable: true,
-          },
-        });
+        try {
+          seriesRecord = await this.db.movie.create({
+            data: {
+              tmdbId: data.tmdbId,
+              mediaType: "SERIES",
+              title: data.title,
+              originalTitle: data.originalTitle ?? null,
+              synopsis: data.synopsis,
+              posterUrl: data.posterUrl,
+              backdropUrl: data.backdropUrl ?? null,
+              releaseYear: data.releaseYear,
+              durationMins: 45,
+              rating: data.rating,
+              qualityBadge: data.qualityBadge || "HD",
+              genres: data.genres || [],
+              isAvailable: true,
+            },
+          });
+        } catch {
+          const concurrent = await this.db.movie.findUnique({
+            where: { tmdbId: data.tmdbId },
+          });
+          if (!concurrent) {
+            throw new Error(
+              `No se pudo crear ni recuperar la serie TMDB #${data.tmdbId}`
+            );
+          }
+          seriesRecord = concurrent;
+        }
       }
     } else {
       seriesRecord = await this.db.movie.create({
