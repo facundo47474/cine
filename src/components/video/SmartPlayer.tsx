@@ -2,7 +2,8 @@
 
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import Hls from "hls.js";
-import { ShieldCheck, ExternalLink, X } from "lucide-react";
+import { ShieldCheck, ExternalLink, X, AlertTriangle } from "lucide-react";
+import { isStreamwish } from "@/domain/utils/streamwishMatcher";
 
 export type SmartPlayerStatus = "loading" | "playing_native" | "playing_iframe";
 
@@ -21,6 +22,8 @@ export interface ExtractorResponseData {
   reason?: string;
   durationSeconds?: number;
   posterUrl?: string;
+  isStreamwish?: boolean;
+  isDirty?: boolean;
 }
 
 export interface SmartPlayerProps {
@@ -28,6 +31,7 @@ export interface SmartPlayerProps {
   backupEmbedUrls?: string[];
   title?: string;
   initialTimeSeconds?: number;
+  isDirty?: boolean;
   onTimeUpdate?: (currentTimeSec: number, durationSec: number) => void;
   onDurationChange?: (durationSec: number) => void;
   onPlay?: () => void;
@@ -304,6 +308,7 @@ export default function SmartPlayer({
   backupEmbedUrls = [],
   title,
   initialTimeSeconds = 0,
+  isDirty = false,
   onTimeUpdate,
   onDurationChange,
   onPlay,
@@ -328,6 +333,7 @@ export default function SmartPlayer({
   const backupEmbedUrlsRef = useRef<string[]>(backupEmbedUrls);
   const onDurationChangeRef = useRef(onDurationChange);
   const onStatusChangeRef = useRef(onStatusChange);
+  const onFatalErrorRef = useRef(onFatalError);
 
   useEffect(() => {
     initialTimeSecondsRef.current = initialTimeSeconds;
@@ -344,6 +350,10 @@ export default function SmartPlayer({
   useEffect(() => {
     onStatusChangeRef.current = onStatusChange;
   }, [onStatusChange]);
+
+  useEffect(() => {
+    onFatalErrorRef.current = onFatalError;
+  }, [onFatalError]);
 
   const updateStatus = useCallback((nextStatus: SmartPlayerStatus) => {
     setStatus(nextStatus);
@@ -466,10 +476,17 @@ export default function SmartPlayer({
       }
 
       if (!cancelled) {
+        const resolvedFallback = firstFailureData?.fallbackUrl ?? embedUrl;
+        if (!resolvedFallback) {
+          onFatalErrorRef.current?.();
+          return;
+        }
         setStreamData(
           firstFailureData || {
             success: false,
             fallbackUrl: embedUrl,
+            isStreamwish: !isDirty,
+            isDirty,
           }
         );
         switchToImmediateIframe();
@@ -483,7 +500,13 @@ export default function SmartPlayer({
       controller.abort();
       destroyHlsInstance();
     };
-  }, [embedUrl, destroyHlsInstance, switchToImmediateIframe, updateStatus]);
+  }, [
+    embedUrl,
+    isDirty,
+    destroyHlsInstance,
+    switchToImmediateIframe,
+    updateStatus,
+  ]);
 
   // 2. Inicialización de reproducción nativa con hls.js o HTML5 <video> vía /api/stream-proxy
   useEffect(() => {
@@ -585,6 +608,13 @@ export default function SmartPlayer({
   }, [status, streamData, destroyHlsInstance, switchToImmediateIframe]);
 
   const targetIframeUrl = streamData?.fallbackUrl || embedUrl;
+  const resolvedIsDirty = Boolean(
+    isDirty ||
+      streamData?.isDirty ||
+      (targetIframeUrl &&
+        !targetIframeUrl.startsWith("/api/stream/") &&
+        !isStreamwish({ url: targetIframeUrl }))
+  );
 
   const playerViewport = (
     <div className="relative w-full h-full aspect-video bg-black overflow-hidden select-none">
@@ -635,12 +665,23 @@ export default function SmartPlayer({
       {/* ESTADO 3: Reproducción inmediata en Iframe con Escudo Anti-Anuncios */}
       {status === "playing_iframe" && (
         <div className="relative w-full h-full">
+          {resolvedIsDirty && (
+            <div className="pointer-events-none absolute top-3 left-3 z-30 inline-flex items-center gap-1.5 rounded-lg bg-amber-500/90 px-2.5 py-1 text-[11px] font-bold text-black shadow-lg backdrop-blur-sm">
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span>Servidor alternativo · Bloqueo estricto activo</span>
+            </div>
+          )}
           <iframe
             ref={setIframeRefs}
-            key={targetIframeUrl}
+            key={`${targetIframeUrl}-${resolvedIsDirty ? "sandboxed" : "clean"}`}
             src={targetIframeUrl}
             title={title || "Reproductor de video"}
             className="w-full h-full border-0"
+            sandbox={
+              resolvedIsDirty
+                ? "allow-scripts allow-same-origin allow-presentation allow-forms"
+                : undefined
+            }
             allow="autoplay *; fullscreen *; picture-in-picture *; encrypted-media *"
             allowFullScreen
             onError={() => onFatalError?.()}

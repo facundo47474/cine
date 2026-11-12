@@ -8,6 +8,8 @@ export interface CreateMirrorInput {
   format: MirrorFormat;
   quality?: string;
   priority: number;
+  isStreamwish?: boolean;
+  isDirty?: boolean;
 }
 
 export interface UpsertMovieInput {

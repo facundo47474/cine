@@ -19,6 +19,16 @@ import {
   apiRateLimiter,
   getClientIp,
 } from "@/infrastructure/security/RateLimiter";
+import {
+  FALLBACK_IF_EMPTY,
+  STRICT_STREAMWISH_ONLY,
+  buildStreamwishExtractionTargets,
+  filterAndPrioritizeMirrors,
+  isMultiEmbedAggregatorUrl,
+  isStreamwish,
+  isStreamwishUrl,
+  normalizeStreamwishEmbedUrl,
+} from "@/domain/utils/streamwishMatcher";
 
 export const dynamic = "force-dynamic";
 
@@ -49,6 +59,7 @@ interface Embed69ResolutionResult {
   url: string | null;
   status: "RESOLVED" | "NOT_FOUND" | "BLOCKED_OR_ERROR";
   cleanEmbedUrl: string;
+  isStreamwish: boolean;
 }
 
 function escapeHtmlAttribute(value: string): string {
@@ -88,15 +99,18 @@ function appendResumeTimeParam(rawUrl: string, startSeconds: number): string {
   }
 }
 
-function getServerPriorityWeight(servername?: string): number {
-  const normalized = (servername || "").toLowerCase();
-  if (normalized.includes("streamwish")) return 1;
-  if (normalized.includes("mixdrop")) return 2;
-  if (normalized.includes("vidhide")) return 3;
+function getServerPriorityWeight(
+  servername?: string,
+  rawUrl?: string
+): number {
+  if (isStreamwish({ serverName: servername, url: rawUrl })) return 1;
+  const normalized = `${servername || ""} ${rawUrl || ""}`.toLowerCase();
+  if (normalized.includes("mixdrop") || normalized.includes("mxdrop")) return 2;
+  if (normalized.includes("vidhide") || normalized.includes("morencius")) return 3;
   if (normalized.includes("filemoon")) return 4;
   if (normalized.includes("voe")) return 5;
-  if (normalized.includes("dropload")) return 6;
-  if (normalized.includes("doodstream")) return 7;
+  if (normalized.includes("dropload") || normalized.includes("dr0pstream")) return 6;
+  if (normalized.includes("doodstream") || normalized.includes("dood")) return 7;
   if (normalized.includes("rapidvideo")) return 8;
   return 9;
 }
@@ -163,9 +177,8 @@ function decryptEmbed69Link(
 }
 
 /**
- * Extrae y desencripta directamente en el servidor el enlace de Streamwish
- * desde Embed69, distinguiendo si un título no existe ("NOT_FOUND") vs si Cloudflare
- * bloqueó la IP del datacenter de Vercel ("BLOCKED_OR_ERROR").
+ * Extrae y desencripta directamente en el servidor los enlaces de Embed69
+ * aplicando STRICT_STREAMWISH_ONLY / FALLBACK_IF_EMPTY mediante streamwishMatcher.
  */
 async function resolveDirectStreamwishUrlFromEmbed69(
   rawUrl: string
@@ -273,18 +286,23 @@ async function resolveDirectStreamwishUrlFromEmbed69(
         url: null,
         status: anyBlocked ? "BLOCKED_OR_ERROR" : "NOT_FOUND",
         cleanEmbedUrl,
+        isStreamwish: false,
       };
     }
 
     cleanEmbedUrl = validHit.resolvedUrl;
     const html = validHit.html;
 
-    const normalizeSwUrl = (u: string): string => {
-      const trimmed = u.trim();
-      const m = trimmed.match(
-        /^https?:\/\/(?:www\.)?streamwish\.(?:to|com|gg)\/e\/([a-zA-Z0-9_-]+)/i
-      );
-      return m?.[1] ? `https://hglink.to/e/${m[1]}` : trimmed;
+    const getLangRank = (langRaw: string) => {
+      const lang = langRaw.toUpperCase();
+      if (requestedLang === "SUB") {
+        if (lang === "SUB" || lang === "VOSE") return 1;
+        if (lang === "LAT" || lang === "LATINO") return 2;
+        return 3;
+      }
+      if (lang === "LAT" || lang === "LATINO") return 1;
+      if (lang === "ESP" || lang === "CASTELLANO") return 2;
+      return 3;
     };
 
     // Nuevo formato DOM de Embed69 (<li data-url="https://..." data-lang="0">)
@@ -312,7 +330,12 @@ async function resolveDirectStreamwishUrlFromEmbed69(
         }
       }
 
-      const domEntries: { lang: string; servername: string; url: string }[] = [];
+      const domEntries: {
+        lang: string;
+        serverName: string;
+        url: string;
+        priority: number;
+      }[] = [];
       const optionLiRegex =
         /<li([^>]*data-url="[^"]+"[^>]*)>([\s\S]*?)<\/li>/gi;
       let optMatch: RegExpExecArray | null;
@@ -331,44 +354,36 @@ async function resolveDirectStreamwishUrlFromEmbed69(
         const langCode =
           attrs.match(/data-lang="([^"]*)"/i)?.[1]?.trim() ?? "0";
         const lang = langByCode.get(langCode) || "LAT";
-        const servername =
+        const serverName =
           inner.match(/<span>([^<]+)<\/span>/i)?.[1]?.trim() ||
           inner.match(/alt="([^"]+)"/i)?.[1]?.trim() ||
           candidateUrl;
 
+        const normalizedUrl = isStreamwish({ serverName, url: candidateUrl })
+          ? normalizeStreamwishEmbedUrl(candidateUrl)
+          : candidateUrl;
+
         domEntries.push({
           lang,
-          servername,
-          url: normalizeSwUrl(candidateUrl),
+          serverName,
+          url: normalizedUrl,
+          priority:
+            getLangRank(lang) * 100 +
+            getServerPriorityWeight(serverName, normalizedUrl),
         });
       }
 
-      if (domEntries.length > 0) {
-        const getLangRank = (langRaw: string) => {
-          const lang = langRaw.toUpperCase();
-          if (requestedLang === "SUB") {
-            if (lang === "SUB" || lang === "VOSE") return 1;
-            if (lang === "LAT" || lang === "LATINO") return 2;
-            return 3;
-          }
-          if (lang === "LAT" || lang === "LATINO") return 1;
-          if (lang === "ESP" || lang === "CASTELLANO") return 2;
-          return 3;
-        };
+      const filteredDom = filterAndPrioritizeMirrors(domEntries, {
+        strictOnly: STRICT_STREAMWISH_ONLY,
+        fallbackIfEmpty: FALLBACK_IF_EMPTY,
+      });
 
-        domEntries.sort((a, b) => {
-          const langDiff = getLangRank(a.lang) - getLangRank(b.lang);
-          if (langDiff !== 0) return langDiff;
-          return (
-            getServerPriorityWeight(a.servername) -
-            getServerPriorityWeight(b.servername)
-          );
-        });
-
+      if (filteredDom.length > 0) {
         return {
-          url: domEntries[0].url,
+          url: filteredDom[0].item.url,
           status: "RESOLVED",
           cleanEmbedUrl,
+          isStreamwish: filteredDom[0].isStreamwish,
         };
       }
     }
@@ -378,7 +393,12 @@ async function resolveDirectStreamwishUrlFromEmbed69(
     const saltMatch = html.match(/POW_SALT\s*=\s*'([^']+)'/);
 
     if (!challengeMatch || !difficultyMatch || !saltMatch) {
-      return { url: null, status: "BLOCKED_OR_ERROR", cleanEmbedUrl };
+      return {
+        url: null,
+        status: "BLOCKED_OR_ERROR",
+        cleanEmbedUrl,
+        isStreamwish: false,
+      };
     }
 
     const aesKey = solveEmbed69AesKey(
@@ -387,38 +407,41 @@ async function resolveDirectStreamwishUrlFromEmbed69(
       saltMatch[1]
     );
     if (!aesKey) {
-      return { url: null, status: "BLOCKED_OR_ERROR", cleanEmbedUrl };
+      return {
+        url: null,
+        status: "BLOCKED_OR_ERROR",
+        cleanEmbedUrl,
+        isStreamwish: false,
+      };
     }
 
     const dataLinkMatch = html.match(
       /let\s+dataLink\s*=\s*(\[\{[\s\S]*?\}\])\s*;\s*let\s+currentLanguageServers/
     );
     if (!dataLinkMatch) {
-      return { url: null, status: "NOT_FOUND", cleanEmbedUrl };
+      return {
+        url: null,
+        status: "NOT_FOUND",
+        cleanEmbedUrl,
+        isStreamwish: false,
+      };
     }
 
     const dataLink = JSON.parse(dataLinkMatch[1]) as Embed69LanguageBlock[];
     if (!Array.isArray(dataLink) || dataLink.length === 0) {
-      return { url: null, status: "NOT_FOUND", cleanEmbedUrl };
+      return {
+        url: null,
+        status: "NOT_FOUND",
+        cleanEmbedUrl,
+        isStreamwish: false,
+      };
     }
 
-    // Ordenamos para elegir primero el idioma solicitado por el usuario (LAT -> ESP -> SUB)
-    dataLink.sort((a, b) => {
-      const getLangRank = (langRaw?: string) => {
-        const lang = (langRaw || "").toUpperCase();
-        if (requestedLang === "SUB") {
-          if (lang === "SUB" || lang === "VOSE") return 1;
-          if (lang === "LAT" || lang === "LATINO") return 2;
-          if (lang === "ESP" || lang === "CASTELLANO") return 3;
-          return 4;
-        }
-        if (lang === "LAT" || lang === "LATINO") return 1;
-        if (lang === "ESP" || lang === "CASTELLANO") return 2;
-        if (lang === "SUB" || lang === "VOSE") return 3;
-        return 4;
-      };
-      return getLangRank(a.video_language) - getLangRank(b.video_language);
-    });
+    const decryptedEntries: {
+      serverName: string;
+      url: string;
+      priority: number;
+    }[] = [];
 
     for (const block of dataLink) {
       if (
@@ -428,39 +451,70 @@ async function resolveDirectStreamwishUrlFromEmbed69(
         continue;
       }
 
-      const orderedEmbeds = [...block.sortedEmbeds].sort(
-        (a, b) =>
-          getServerPriorityWeight(a.servername) -
-          getServerPriorityWeight(b.servername)
-      );
-
-      for (const candidate of orderedEmbeds) {
+      const langRank = getLangRank(block.video_language || "");
+      for (const candidate of block.sortedEmbeds) {
         if (!candidate.link) continue;
         const decryptedUrl = decryptEmbed69Link(candidate.link, aesKey);
-        if (decryptedUrl && decryptedUrl.startsWith("http")) {
-          return {
-            url: normalizeSwUrl(decryptedUrl),
-            status: "RESOLVED",
-            cleanEmbedUrl,
-          };
+        if (
+          decryptedUrl &&
+          decryptedUrl.startsWith("http") &&
+          !/1fichier\.com/i.test(decryptedUrl)
+        ) {
+          const isSw = isStreamwish({
+            serverName: candidate.servername,
+            url: decryptedUrl,
+          });
+          const normalized = isSw
+            ? normalizeStreamwishEmbedUrl(decryptedUrl)
+            : decryptedUrl;
+          decryptedEntries.push({
+            serverName: candidate.servername || normalized,
+            url: normalized,
+            priority:
+              langRank * 100 +
+              getServerPriorityWeight(candidate.servername, normalized),
+          });
         }
       }
     }
 
-    return { url: null, status: "NOT_FOUND", cleanEmbedUrl };
+    const filteredDecrypted = filterAndPrioritizeMirrors(decryptedEntries, {
+      strictOnly: STRICT_STREAMWISH_ONLY,
+      fallbackIfEmpty: FALLBACK_IF_EMPTY,
+    });
+
+    if (filteredDecrypted.length > 0) {
+      return {
+        url: filteredDecrypted[0].item.url,
+        status: "RESOLVED",
+        cleanEmbedUrl,
+        isStreamwish: filteredDecrypted[0].isStreamwish,
+      };
+    }
+
+    return {
+      url: null,
+      status: "NOT_FOUND",
+      cleanEmbedUrl,
+      isStreamwish: false,
+    };
   } catch {
-    return { url: null, status: "BLOCKED_OR_ERROR", cleanEmbedUrl };
+    return {
+      url: null,
+      status: "BLOCKED_OR_ERROR",
+      cleanEmbedUrl,
+      isStreamwish: false,
+    };
   }
 }
 
 /**
- * Si Streamwish a través de Embed69 falla o está bloqueado por IP en Vercel,
- * intenta resolver al vuelo un servidor secundario directo (Streamwish/Dropload/Filemoon)
- * para el mismo IMDb ID e idioma.
+ * Resuelve fuentes desde PlayLatinSrc aplicando la misma política estricta
+ * de streamwishMatcher.
  */
 async function resolveFallbackFromPlayLatin(
   rawUrl: string
-): Promise<string | null> {
+): Promise<{ url: string; isStreamwish: boolean } | null> {
   try {
     const tvMatch = rawUrl.match(/(tt\d+)-(\d+)x(\d+)/i);
     const movieMatch = rawUrl.match(/(tt\d+)/i);
@@ -539,21 +593,24 @@ async function resolveFallbackFromPlayLatin(
 
     if (pool.length === 0) return null;
 
-    pool.sort((a, b) => {
-      const score = (srv?: string) => {
-        const name = (srv || "").toLowerCase();
-        if (name.includes("streamwish")) return 1;
-        if (name.includes("mixdrop")) return 2;
-        if (name.includes("vidhide")) return 3;
-        if (name.includes("filemoon")) return 4;
-        if (name.includes("dropload")) return 5;
-        if (name.includes("doodstream")) return 6;
-        return 7;
-      };
-      return score(a.server || a.name) - score(b.server || b.name);
+    const mappedPool = pool.map((s) => ({
+      serverName: s.server || s.name || s.url || "",
+      url: s.url || "",
+      priority: getServerPriorityWeight(s.server || s.name, s.url),
+    }));
+
+    const filtered = filterAndPrioritizeMirrors(mappedPool, {
+      strictOnly: STRICT_STREAMWISH_ONLY,
+      fallbackIfEmpty: FALLBACK_IF_EMPTY,
     });
 
-    return pool[0].url || null;
+    if (filtered.length === 0) return null;
+    return {
+      url: filtered[0].isStreamwish
+        ? normalizeStreamwishEmbedUrl(filtered[0].item.url)
+        : filtered[0].item.url,
+      isStreamwish: filtered[0].isStreamwish,
+    };
   } catch {
     return null;
   }
@@ -567,99 +624,112 @@ interface StreamwishDirectHlsInfo {
 }
 
 /**
- * Desempaqueta bloques obfuscados con Dean Edwards Packer (`eval(function(p,a,c,k,e,d)...)`)
- * de forma segura en memoria sin utilizar `eval`.
+ * Desempaqueta todos los bloques obfuscados con Dean Edwards Packer
+ * (`eval(function(p,a,c,k,e,d)...)`) de forma segura sin utilizar `eval`.
  */
-function unpackDeanEdwardsBlock(html: string): string | null {
-  const packerRegex =
-    /eval\(function\(p,a,c,k,e,[dr]\)\{[\s\S]*?\}\('([\s\S]*?)',\s*(\d+),\s*(\d+),\s*'([\s\S]*?)'\.split\('\|'\)(?:,\s*\d+,\s*\{\})?\)\)/;
-  const match = html.match(packerRegex);
-  if (!match) return null;
+function unpackDeanEdwardsBlocks(html: string): string {
+  const packerGlobalRegex =
+    /eval\(function\(p,a,c,k,e,[dr]\)\{[\s\S]*?\}\('([\s\S]*?)',\s*(\d+),\s*(\d+),\s*'([\s\S]*?)'\.split\('\|'\)(?:,\s*\d+,\s*\{\})?\)\)/g;
 
-  const payload = match[1].replace(/\\'/g, "'");
-  const radix = Number(match[2]);
-  const count = Number(match[3]);
-  const symtab = match[4].split("|");
+  const chunks: string[] = [];
+  let match: RegExpExecArray | null;
 
-  if (!radix || !count || symtab.length === 0) return null;
+  while ((match = packerGlobalRegex.exec(html)) !== null) {
+    try {
+      const payload = match[1].replace(/\\'/g, "'");
+      const radix = Number(match[2]);
+      const count = Number(match[3]);
+      const symtab = match[4].split("|");
 
-  const encodeBase = (num: number, base: number): string => {
-    const chars =
-      "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    if (base <= 36) {
-      return num.toString(base);
-    }
-    let result = "";
-    let n = num;
-    do {
-      result = chars[n % base] + result;
-      n = Math.floor(n / base);
-    } while (n > 0);
-    return result;
-  };
+      if (!radix || !count || symtab.length === 0) continue;
 
-  const lookup = new Map<string, string>();
-  for (let i = 0; i < count; i++) {
-    if (symtab[i]) {
-      lookup.set(encodeBase(i, radix), symtab[i]);
+      const encodeBase = (num: number, base: number): string => {
+        const chars =
+          "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        if (base <= 36) {
+          return num.toString(base);
+        }
+        let result = "";
+        let n = num;
+        do {
+          result = chars[n % base] + result;
+          n = Math.floor(n / base);
+        } while (n > 0);
+        return result;
+      };
+
+      const lookup = new Map<string, string>();
+      for (let i = 0; i < count; i++) {
+        if (symtab[i]) {
+          lookup.set(encodeBase(i, radix), symtab[i]);
+        }
+      }
+
+      chunks.push(
+        payload.replace(/\b[0-9a-zA-Z]+\b/g, (word) => {
+          return lookup.get(word) ?? word;
+        })
+      );
+    } catch {
+      // Continuar con el siguiente bloque
     }
   }
 
-  return payload.replace(/\b[0-9a-zA-Z]+\b/g, (word) => {
-    return lookup.get(word) ?? word;
-  });
+  return chunks.join("\n");
 }
 
 /**
- * Si el enlace pertenece a Streamwish (`hglink.to`, `audinifer.com`, `vibuxer.com`, `hanerix.com`),
- * extrae el stream HLS `.m3u8` directo (`hls4` / `hls2`).
+ * Extrae el stream HLS `.m3u8` directo para cualquier dominio espejo de Streamwish
+ * reconocido por streamwishMatcher.
  */
 async function extractStreamwishDirectHls(
   embedUrl: string
 ): Promise<StreamwishDirectHlsInfo | null> {
   try {
-    const codeMatch = embedUrl.match(/\/(?:e|embed)\/([a-zA-Z0-9_-]+)/);
+    const codeMatch = embedUrl.match(/\/(?:e|embed|f|d)\/([a-zA-Z0-9_-]+)/i);
     if (!codeMatch) return null;
 
     const isVidhideHost = /morencius\.com|vidhide/i.test(embedUrl);
-    const isStreamwishHost =
-      /hglink\.to|audinifer\.com|vibuxer\.com|hanerix\.com|streamwish|strwish|wishembed|awish|dwish|mwish|swdyu/i.test(
-        embedUrl
-      );
+    const isStreamwishHost = isStreamwishUrl(embedUrl);
     if (!isStreamwishHost && !isVidhideHost) return null;
 
     const fileCode = codeMatch[1];
     const probeTargets = isVidhideHost
-      ? [{ url: embedUrl, origin: new URL(embedUrl).origin }]
-      : [
+      ? [
           {
-            url: `https://audinifer.com/e/${fileCode}`,
-            origin: "https://audinifer.com",
+            url: embedUrl,
+            origin: new URL(embedUrl).origin,
+            referer: "https://embed69.org/",
           },
-          {
-            url: `https://vibuxer.com/e/${fileCode}`,
-            origin: "https://vibuxer.com",
-          },
-        ];
+        ]
+      : buildStreamwishExtractionTargets(embedUrl).map((t) => ({
+          url: t.fetchUrl,
+          origin: new URL(t.fetchUrl).origin,
+          referer: t.referer,
+        }));
 
     const probeOrigin = async (target: {
       url: string;
       origin: string;
+      referer: string;
     }): Promise<{ origin: string; unpacked: string } | null> => {
       try {
         const res = await fetch(target.url, {
           headers: {
             "User-Agent":
               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            Referer: isVidhideHost ? "https://embed69.org/" : "https://hglink.to/",
+            Referer: target.referer,
           },
           signal: AbortSignal.timeout(2500),
         });
         if (!res.ok) return null;
         const html = await res.text();
-        const unpacked = unpackDeanEdwardsBlock(html);
-        if (!unpacked) return null;
-        return { origin: target.origin, unpacked };
+        const unpacked = unpackDeanEdwardsBlocks(html);
+        const combined = unpacked ? `${html}\n${unpacked}` : html;
+        if (!/"hls4"|"hls2"|file\s*:\s*["'][^"']+\.m3u8/i.test(combined)) {
+          return null;
+        }
+        return { origin: target.origin, unpacked: combined };
       } catch {
         return null;
       }
@@ -676,18 +746,20 @@ async function extractStreamwishDirectHls(
     const { origin, unpacked } = hit;
     const hls4Match = unpacked.match(/"hls4"\s*:\s*"([^"]+)"/);
     const hls2Match = unpacked.match(/"hls2"\s*:\s*"([^"]+)"/);
-    const posterMatch = unpacked.match(/image\s*:\s*"([^"]+)"/);
-    const durationMatch = unpacked.match(/duration\s*:\s*"([0-9.]+)"/);
+    const fileMatch = unpacked.match(/file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i);
+    const posterMatch = unpacked.match(/image\s*:\s*["']([^"']+)["']/i);
+    const durationMatch = unpacked.match(/duration\s*:\s*["']?([0-9.]+)["']?/i);
     const durationSeconds = durationMatch
       ? Math.floor(Number(durationMatch[1]) || 0)
       : undefined;
     const posterUrl = posterMatch?.[1] || "";
 
-    if (hls4Match && hls4Match[1]) {
+    const masterCandidate = hls4Match?.[1] || fileMatch?.[1];
+    if (masterCandidate) {
       try {
-        const masterUrl = hls4Match[1].startsWith("http")
-          ? hls4Match[1]
-          : `${origin}${hls4Match[1]}`;
+        const masterUrl = masterCandidate.startsWith("http")
+          ? masterCandidate
+          : `${origin}${masterCandidate}`;
 
         const masterRes = await fetch(masterUrl, {
           headers: {
@@ -761,6 +833,31 @@ async function extractStreamwishDirectHls(
   } catch {
     return null;
   }
+}
+
+function buildStreamErrorHtml(mirrorId: string): NextResponse {
+  const failHtml = `<!DOCTYPE html>
+<html lang="es">
+<head><meta charset="utf-8" /><style>html,body{background:#000;margin:0;}</style></head>
+<body>
+<script>
+  try {
+    window.parent.postMessage(
+      { type: "PILOTO_STREAM_ERROR", mirrorId: ${JSON.stringify(mirrorId)} },
+      "*"
+    );
+  } catch (e) {}
+</script>
+</body>
+</html>`;
+
+  return new NextResponse(failHtml, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+    },
+  });
 }
 
 /**
@@ -864,57 +961,51 @@ export async function GET(
       return response;
     }
 
-    let finalEmbedUrl = payload.rawUrl;
-    let isSecondaryServer = false;
+    let finalEmbedUrl = isStreamwishUrl(payload.rawUrl)
+      ? normalizeStreamwishEmbedUrl(payload.rawUrl)
+      : payload.rawUrl;
+    let isSecondaryServer = Boolean(payload.isDirty);
 
     if (payload.rawUrl.includes("embed69.org/f/")) {
-      // 1. Intentamos iniciar extrayendo y desencriptando el servidor Streamwish directo
       const embed69Result = await resolveDirectStreamwishUrlFromEmbed69(
         payload.rawUrl
       );
 
       if (embed69Result.url) {
         finalEmbedUrl = embed69Result.url;
+        isSecondaryServer = !embed69Result.isStreamwish;
       } else {
-        // 2. Si Streamwish (vía Embed69) falla o está bloqueado por IP en Vercel,
-        // intentamos resolver un servidor secundario directo al vuelo (Dropload / PlayLatinSrc)
-        const fallbackDirectUrl = await resolveFallbackFromPlayLatin(
+        const fallbackSource = await resolveFallbackFromPlayLatin(
           payload.rawUrl
         );
 
-        if (fallbackDirectUrl) {
-          finalEmbedUrl = fallbackDirectUrl;
-          isSecondaryServer = true;
-        } else if (embed69Result.status === "NOT_FOUND") {
-          // 3A. Si Embed69 respondió explícitamente que el archivo no existe ("No folders found" / 404),
-          // notificamos al reproductor padre para saltar inmediatamente al siguiente mirror disponible.
-          const failHtml = `<!DOCTYPE html>
-<html lang="es">
-<head><meta charset="utf-8" /><style>html,body{background:#000;margin:0;}</style></head>
-<body>
-<script>
-  try {
-    window.parent.postMessage(
-      { type: "PILOTO_STREAM_ERROR", mirrorId: ${JSON.stringify(payload.mirrorId)} },
-      "*"
-    );
-  } catch (e) {}
-</script>
-</body>
-</html>`;
-          return new NextResponse(failHtml, {
-            status: 200,
-            headers: {
-              "Content-Type": "text/html; charset=utf-8",
-              "Cache-Control": "no-store, no-cache, must-revalidate",
-            },
-          });
+        if (fallbackSource) {
+          finalEmbedUrl = fallbackSource.url;
+          isSecondaryServer = !fallbackSource.isStreamwish;
+        } else if (
+          embed69Result.status === "NOT_FOUND" ||
+          (STRICT_STREAMWISH_ONLY && !FALLBACK_IF_EMPTY)
+        ) {
+          return buildStreamErrorHtml(payload.mirrorId);
         } else {
-          // 3B. Si la extracción server-side fue bloqueada por Cloudflare en la IP AWS de Vercel (403/timeout),
-          // renderizamos la URL limpia en el navegador del usuario (IP residencial) donde sí reproduce en Español Latino.
           finalEmbedUrl = embed69Result.cleanEmbedUrl;
+          isSecondaryServer = true;
         }
       }
+    }
+
+    const resolvedIsStreamwish = isStreamwish({
+      serverName: payload.serverName,
+      url: finalEmbedUrl,
+    });
+    const isDirtyIframe = !resolvedIsStreamwish || isMultiEmbedAggregatorUrl(finalEmbedUrl);
+
+    if (STRICT_STREAMWISH_ONLY && !FALLBACK_IF_EMPTY && isDirtyIframe) {
+      return buildStreamErrorHtml(payload.mirrorId);
+    }
+
+    if (isDirtyIframe) {
+      isSecondaryServer = true;
     }
 
     const resumeSeconds = Math.max(
@@ -927,7 +1018,13 @@ export async function GET(
       : urlWithResume;
     const escapedRawUrl = escapeHtmlAttribute(targetIframeUrl);
 
-    const streamwishHls = await extractStreamwishDirectHls(finalEmbedUrl);
+    const streamwishHls = resolvedIsStreamwish
+      ? await extractStreamwishDirectHls(finalEmbedUrl)
+      : null;
+
+    const sandboxAttr = isDirtyIframe
+      ? 'sandbox="allow-scripts allow-same-origin allow-presentation allow-forms"'
+      : "";
 
     const html = `<!DOCTYPE html>
 <html lang="es">
@@ -997,7 +1094,7 @@ export async function GET(
         ? `
       try {
         window.parent.postMessage(
-          { type: "PILOTO_SECONDARY_SERVER_ACTIVE", mirrorId: ${JSON.stringify(payload.mirrorId)} },
+          { type: "PILOTO_SECONDARY_SERVER_ACTIVE", mirrorId: ${JSON.stringify(payload.mirrorId)}, isDirty: true },
           "*"
         );
       } catch (e) {}`
@@ -1145,6 +1242,7 @@ export async function GET(
         : `
   <iframe
     src="${escapedRawUrl}"
+    ${sandboxAttr}
     allow="autoplay *; fullscreen *; picture-in-picture *; encrypted-media *"
     allowfullscreen
     webkitallowfullscreen="true"

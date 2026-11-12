@@ -13,6 +13,14 @@ import {
   HomeFeedDto,
 } from "../dto/CatalogFeedDto";
 import { Movie, MovieProps } from "@/domain/entities/Movie";
+import {
+  FALLBACK_IF_EMPTY,
+  STRICT_STREAMWISH_ONLY,
+  filterAndPrioritizeMirrors,
+  isExtractableCleanHost,
+  isMultiEmbedAggregatorUrl,
+  isStreamwish,
+} from "@/domain/utils/streamwishMatcher";
 
 export class CatalogService {
   constructor(
@@ -284,33 +292,38 @@ export class CatalogService {
     const playable = movie.getPlayableMirrors();
     if (playable.length === 0) return true;
 
-    const hasLegacyAggregator = playable.some(
-      (m) =>
-        m.rawUrl.includes("vidlink.pro") ||
-        m.rawUrl.includes("autoembed.cc") ||
-        m.rawUrl.includes("vidsrc.cc") ||
-        m.rawUrl.includes("multiembed.mov")
+    const hasLegacyAggregator = playable.some((m) =>
+      isMultiEmbedAggregatorUrl(m.rawUrl)
     );
     if (hasLegacyAggregator) return true;
 
-    // Si ya tiene al menos un enlace directo extraíble en Español Latino (Streamwish, Mixdrop, Vidhide, Filemoon),
-    // no lo sobreescribimos en producción. Si solo tiene dr0pstream.com o embed69.org, permitimos actualizarlo.
-    const hasResolvedExtractableLatino = playable.some(
+    // Solo evitamos re-sincronizar si ya existe al menos un mirror directo y real de Streamwish en Español Latino.
+    // Si solo tiene Mixdrop, Vidhide, Filemoon, Dropload o un Streamwish degradado, permitimos re-resolver.
+    const hasResolvedCleanStreamwishLatino = playable.some(
       (m) =>
         m.language === "Latino" &&
-        !m.rawUrl.includes("embed69.org") &&
-        !m.rawUrl.includes("vidsrc.me") &&
-        /hglink\.to|audinifer\.com|vibuxer\.com|streamwish|mxdrop\.to|mixdrop|morencius\.com|vidhide|filemoon/i.test(
-          m.rawUrl
-        )
+        isStreamwish({ serverName: m.serverName, url: m.rawUrl }) &&
+        !isMultiEmbedAggregatorUrl(m.rawUrl)
     );
-    if (hasResolvedExtractableLatino) return false;
+    if (hasResolvedCleanStreamwishLatino) return false;
 
     const hasDegradedStreamwish = movie.mirrors.some(
       (m) =>
-        m.serverName.toLowerCase().includes("streamwish") && !m.isPlayable()
+        isStreamwish({ serverName: m.serverName, url: m.rawUrl }) &&
+        !m.isPlayable()
     );
     if (hasDegradedStreamwish) return true;
+
+    // Si el fallback limpio está activo y ya tenemos mirrors directos extraíbles en BD
+    // (ej. Vidhide, Dropload, Mixdrop, Filemoon), evitamos re-consultar agregadores y pisarlos.
+    if (FALLBACK_IF_EMPTY) {
+      const hasDirectExtractableInDb = playable.some(
+        (m) =>
+          !isMultiEmbedAggregatorUrl(m.rawUrl) &&
+          isExtractableCleanHost({ serverName: m.serverName, url: m.rawUrl })
+      );
+      if (hasDirectExtractableInDb) return false;
+    }
 
     return true;
   }
@@ -321,30 +334,55 @@ export class CatalogService {
   ): CreateMirrorInput[] {
     if (!existingMovie) return freshMirrors;
 
-    const existingDirectByServer = new Map<string, string>();
+    const existingCleanStreamwishByServer = new Map<string, string>();
+    const existingExtractableMirrors: CreateMirrorInput[] = [];
+    const freshUrls = new Set(freshMirrors.map((fm) => fm.rawUrl.trim()));
+
     for (const m of existingMovie.mirrors) {
       if (
-        !m.rawUrl.includes("embed69.org") &&
-        !m.rawUrl.includes("vidsrc.me") &&
-        !m.rawUrl.includes("multiembed.mov") &&
-        !m.rawUrl.includes("dr0pstream.com")
+        isStreamwish({ serverName: m.serverName, url: m.rawUrl }) &&
+        !isMultiEmbedAggregatorUrl(m.rawUrl)
       ) {
-        existingDirectByServer.set(m.serverName, m.rawUrl);
+        existingCleanStreamwishByServer.set(m.serverName, m.rawUrl);
+      } else if (
+        m.isPlayable() &&
+        !isMultiEmbedAggregatorUrl(m.rawUrl) &&
+        isExtractableCleanHost({ serverName: m.serverName, url: m.rawUrl }) &&
+        !freshUrls.has(m.rawUrl.trim())
+      ) {
+        existingExtractableMirrors.push({
+          serverName: m.serverName,
+          language: m.language,
+          rawUrl: m.rawUrl,
+          format: m.format,
+          quality: m.quality,
+          priority: m.priority,
+          isStreamwish: false,
+          isDirty: true,
+        });
       }
     }
 
-    return freshMirrors.map((fm) => {
-      if (fm.rawUrl.includes("embed69.org")) {
-        const prevDirect = existingDirectByServer.get(fm.serverName);
+    const merged = freshMirrors.map((fm) => {
+      if (isMultiEmbedAggregatorUrl(fm.rawUrl)) {
+        const prevDirect = existingCleanStreamwishByServer.get(fm.serverName);
         if (prevDirect) {
           return {
             ...fm,
             rawUrl: prevDirect,
+            isStreamwish: true,
+            isDirty: false,
           };
         }
       }
       return fm;
     });
+
+    if (existingExtractableMirrors.length > 0 && FALLBACK_IF_EMPTY) {
+      return [...merged, ...existingExtractableMirrors];
+    }
+
+    return merged;
   }
 
   public async getMoviePlaybackData(
@@ -427,31 +465,43 @@ export class CatalogService {
     if (!movie) return null;
 
     const playableMirrors = movie.getPlayableMirrors();
+    const prioritizedMirrors = filterAndPrioritizeMirrors(playableMirrors, {
+      strictOnly: STRICT_STREAMWISH_ONLY,
+      fallbackIfEmpty: FALLBACK_IF_EMPTY,
+    });
+
     const ttlHours = Number(process.env.STREAM_TOKEN_TTL_HOURS || "4");
     const expiresAt = new Date(
       Date.now() + ttlHours * 3600 * 1000
     ).toISOString();
 
-    const streams: SignedMirrorStreamDto[] = playableMirrors.map((mirror) => {
-      const token = this.tokenCryptoService.encryptStreamToken({
-        mirrorId: mirror.id,
-        movieId: movie!.id,
-        rawUrl: mirror.rawUrl,
-        format: mirror.format,
-      });
+    const streams: SignedMirrorStreamDto[] = prioritizedMirrors.map(
+      ({ item: mirror, isStreamwish: sw, isDirty }, index) => {
+        const token = this.tokenCryptoService.encryptStreamToken({
+          mirrorId: mirror.id,
+          movieId: movie!.id,
+          rawUrl: mirror.rawUrl,
+          format: mirror.format,
+          serverName: mirror.serverName,
+          isStreamwish: sw,
+          isDirty,
+        });
 
-      return {
-        mirrorId: mirror.id,
-        serverName: mirror.serverName,
-        language: mirror.language,
-        format: mirror.format,
-        quality: mirror.quality,
-        priority: mirror.priority,
-        status: mirror.status,
-        streamUrl: `/api/stream/${encodeURIComponent(token)}`,
-        expiresAt,
-      };
-    });
+        return {
+          mirrorId: mirror.id,
+          serverName: mirror.serverName,
+          language: mirror.language,
+          format: mirror.format,
+          quality: mirror.quality,
+          priority: index + 1,
+          status: mirror.status,
+          streamUrl: `/api/stream/${encodeURIComponent(token)}`,
+          expiresAt,
+          isStreamwish: sw,
+          isDirty,
+        };
+      }
+    );
 
     return {
       id: movie.id,

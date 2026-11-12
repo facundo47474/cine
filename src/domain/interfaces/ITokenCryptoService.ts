@@ -5,6 +5,9 @@ export interface StreamTokenPayload {
   movieId: string;
   rawUrl: string;
   format: MirrorFormat;
+  serverName?: string;
+  isStreamwish?: boolean;
+  isDirty?: boolean;
   exp: number; // Timestamp en milisegundos
 }
 

@@ -11,6 +11,8 @@ export interface SignedMirrorStreamDto {
   status: MirrorStatus;
   streamUrl: string; // Apunta a /api/stream/[token] (nunca expone la rawUrl)
   expiresAt: string;
+  isStreamwish: boolean;
+  isDirty: boolean;
 }
 
 export interface MoviePlaybackDto {

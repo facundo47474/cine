@@ -14,6 +14,14 @@ import {
   CastMemberDto,
   EpisodePlaybackDto,
 } from "../dto/SeriesDto";
+import {
+  FALLBACK_IF_EMPTY,
+  STRICT_STREAMWISH_ONLY,
+  filterAndPrioritizeMirrors,
+  isExtractableCleanHost,
+  isMultiEmbedAggregatorUrl,
+  isStreamwish,
+} from "@/domain/utils/streamwishMatcher";
 
 export class SeriesService {
   constructor(
@@ -524,28 +532,31 @@ export class SeriesService {
       rawUrl: string;
       format: MirrorFormat;
       quality: string;
+      priority: number;
     }[] = [];
 
     // 1. Direct videoUrl si existe
     if (episode.videoUrl && episode.videoUrl.trim() !== "") {
+      const cleanVideoUrl = episode.videoUrl.trim();
+      const videoIsSw = isStreamwish({ url: cleanVideoUrl });
       candidateMirrors.push({
-        serverName: "Streamwish-Lat",
+        serverName: videoIsSw ? "Streamwish-Lat" : "Direct-Video-Lat",
         language: "Latino",
-        rawUrl: episode.videoUrl,
-        format: episode.videoUrl.includes(".m3u8") ? MirrorFormat.HLS : MirrorFormat.EMBED,
+        rawUrl: cleanVideoUrl,
+        format: cleanVideoUrl.includes(".m3u8") ? MirrorFormat.HLS : MirrorFormat.EMBED,
         quality: "1080p",
+        priority: videoIsSw ? 1 : 50,
       });
     }
 
-    // 2. Mirrors de BD
+    // 2. Mirrors de BD (resueltos si hay Streamwish directo o un fallback extraíble limpio con FALLBACK_IF_EMPTY activo)
     const existingPlayable = episode.getPlayableMirrors();
     const hasDirectResolvedInDb = existingPlayable.some(
       (m) =>
-        !m.rawUrl.includes("embed69.org") &&
-        !m.rawUrl.includes("vidsrc.me") &&
-        /hglink\.to|audinifer\.com|vibuxer\.com|streamwish|mxdrop\.to|mixdrop|morencius\.com|vidhide|filemoon/i.test(
-          m.rawUrl
-        )
+        !isMultiEmbedAggregatorUrl(m.rawUrl) &&
+        (isStreamwish({ serverName: m.serverName, url: m.rawUrl }) ||
+          (FALLBACK_IF_EMPTY &&
+            isExtractableCleanHost({ serverName: m.serverName, url: m.rawUrl })))
     );
 
     if (hasDirectResolvedInDb) {
@@ -556,6 +567,7 @@ export class SeriesService {
           rawUrl: mirror.rawUrl,
           format: mirror.format,
           quality: mirror.quality,
+          priority: mirror.priority,
         });
       }
     } else if (tmdbId && this.mirrorResolver) {
@@ -570,10 +582,11 @@ export class SeriesService {
 
       const newlyResolvedDirect = resolvedMirrors.some(
         (m) =>
-          !m.rawUrl.includes("embed69.org") && !m.rawUrl.includes("vidsrc.me")
+          isStreamwish({ serverName: m.serverName, url: m.rawUrl }) &&
+          !isMultiEmbedAggregatorUrl(m.rawUrl)
       );
 
-      if (newlyResolvedDirect || existingPlayable.length === 0) {
+      if (newlyResolvedDirect || (existingPlayable.length === 0 && resolvedMirrors.length > 0)) {
         try {
           await this.seriesRepository.saveEpisodeMirrors(
             episode.id,
@@ -591,6 +604,7 @@ export class SeriesService {
           rawUrl: m.rawUrl,
           format: m.format,
           quality: m.quality || "1080p",
+          priority: m.priority,
         });
       }
     } else if (tmdbId) {
@@ -602,18 +616,20 @@ export class SeriesService {
 
         candidateMirrors.push(
           {
-            serverName: "Streamwish-Lat",
+            serverName: "Embed69-Fallback-Lat",
             language: "Latino",
             rawUrl: `https://embed69.org/f/${embed69EpisodeSlug}?lang=LAT&prefer=streamwish`,
             format: MirrorFormat.EMBED,
             quality: "1080p",
+            priority: 70,
           },
           {
-            serverName: "Streamwish-Sub",
+            serverName: "Embed69-Fallback-Sub",
             language: "Inglés (Sub)",
             rawUrl: `https://embed69.org/f/${embed69EpisodeSlug}?lang=SUB&prefer=streamwish`,
             format: MirrorFormat.EMBED,
             quality: "1080p",
+            priority: 71,
           }
         );
       }
@@ -624,33 +640,46 @@ export class SeriesService {
         rawUrl: `https://vidsrc.me/embed/tv?tmdb=${tmdbId}&season=${seasonNum}&episode=${epNum}&ds_lang=es`,
         format: MirrorFormat.EMBED,
         quality: "1080p",
+        priority: 99,
       });
     }
+
+    const prioritizedMirrors = filterAndPrioritizeMirrors(candidateMirrors, {
+      strictOnly: STRICT_STREAMWISH_ONLY,
+      fallbackIfEmpty: FALLBACK_IF_EMPTY,
+    });
 
     const ttlHours = Number(process.env.STREAM_TOKEN_TTL_HOURS || "4");
     const expiresAt = new Date(Date.now() + ttlHours * 3600 * 1000).toISOString();
 
-    const signedStreams: SignedMirrorStreamDto[] = candidateMirrors.map((m, idx) => {
-      const mirrorId = `ep-${episode.id}-${idx + 1}`;
-      const token = this.tokenCryptoService.encryptStreamToken({
-        mirrorId,
-        movieId: series.id,
-        rawUrl: m.rawUrl,
-        format: m.format,
-      });
+    const signedStreams: SignedMirrorStreamDto[] = prioritizedMirrors.map(
+      ({ item: m, isStreamwish: sw, isDirty }, idx) => {
+        const mirrorId = `ep-${episode.id}-${idx + 1}`;
+        const token = this.tokenCryptoService.encryptStreamToken({
+          mirrorId,
+          movieId: series.id,
+          rawUrl: m.rawUrl,
+          format: m.format,
+          serverName: m.serverName,
+          isStreamwish: sw,
+          isDirty,
+        });
 
-      return {
-        mirrorId,
-        serverName: m.serverName,
-        language: m.language,
-        format: m.format,
-        quality: m.quality,
-        priority: idx + 1,
-        status: MirrorStatus.ACTIVE,
-        streamUrl: `/api/stream/${encodeURIComponent(token)}`,
-        expiresAt,
-      };
-    });
+        return {
+          mirrorId,
+          serverName: m.serverName,
+          language: m.language,
+          format: m.format,
+          quality: m.quality,
+          priority: idx + 1,
+          status: MirrorStatus.ACTIVE,
+          streamUrl: `/api/stream/${encodeURIComponent(token)}`,
+          expiresAt,
+          isStreamwish: sw,
+          isDirty,
+        };
+      }
+    );
 
     let savedProgressSeconds = 0;
     if (userId) {

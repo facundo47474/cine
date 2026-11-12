@@ -27,6 +27,12 @@ import SmartPlayer, {
   SmartAdblockHelperBar,
   SmartPlayerStatus,
 } from "@/components/video/SmartPlayer";
+import {
+  FALLBACK_IF_EMPTY,
+  STRICT_STREAMWISH_ONLY,
+  filterAndPrioritizeMirrors,
+  isStreamwish,
+} from "@/domain/utils/streamwishMatcher";
 
 const GOOGLE_CAST_SDK_URL =
   "https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1";
@@ -244,32 +250,41 @@ export default function SmartVideoPlayer({
   }, [durationMins]);
 
   const orderedStreams = useMemo(() => {
-    const getServerExtractRank = (serverName: string): number => {
-      const lower = (serverName || "").toLowerCase();
-      if (
-        lower.includes("streamwish") ||
-        lower.includes("mixdrop") ||
-        lower.includes("vidhide") ||
-        lower.includes("filemoon")
-      ) {
-        return 1;
+    const prioritized = filterAndPrioritizeMirrors(
+      streams.map((s) => ({
+        ...s,
+        isStreamwish:
+          typeof s.isStreamwish === "boolean"
+            ? s.isStreamwish
+            : isStreamwish({ serverName: s.serverName }),
+      })),
+      {
+        strictOnly: STRICT_STREAMWISH_ONLY,
+        fallbackIfEmpty: FALLBACK_IF_EMPTY,
       }
-      if (lower.includes("dropload")) return 2;
-      return 3;
-    };
+    ).map(({ item, isStreamwish: sw, isDirty }) => ({
+      ...item,
+      isStreamwish: sw,
+      isDirty,
+    }));
 
-    const sorted = [...streams].sort((a, b) => {
-      const rankDiff =
-        getServerExtractRank(a.serverName) - getServerExtractRank(b.serverName);
-      if (rankDiff !== 0) return rankDiff;
-      return a.priority - b.priority;
-    });
-    const matching = sorted.filter((s) => s.language === preferredLanguage);
-    const fallback = sorted.filter((s) => s.language !== preferredLanguage);
-    return [...matching, ...fallback];
+    const cleanStreams = prioritized.filter((s) => s.isStreamwish);
+    const dirtyStreams = prioritized.filter((s) => !s.isStreamwish);
+
+    const sortByLang = (list: typeof prioritized) => [
+      ...list.filter((s) => s.language === preferredLanguage),
+      ...list.filter((s) => s.language !== preferredLanguage),
+    ];
+
+    return [...sortByLang(cleanStreams), ...sortByLang(dirtyStreams)];
   }, [streams, preferredLanguage]);
 
-  const [activeIndex, setActiveIndex] = useState<number>(0);
+  const firstCleanIndex = useMemo(() => {
+    const idx = orderedStreams.findIndex((s) => s.isStreamwish);
+    return idx >= 0 ? idx : 0;
+  }, [orderedStreams]);
+
+  const [activeIndex, setActiveIndex] = useState<number>(firstCleanIndex);
   const [allMirrorsDown, setAllMirrorsDown] = useState<boolean>(
     orderedStreams.length === 0
   );
@@ -283,12 +298,13 @@ export default function SmartVideoPlayer({
     useState<SmartPlayerStatus>("loading");
 
   useEffect(() => {
-    setActiveIndex(0);
+    setActiveIndex(firstCleanIndex);
     setAllMirrorsDown(orderedStreams.length === 0);
     setShieldActive(true);
     setTunnelUsingSecondary(false);
     setSmartPlayerStatus("loading");
-  }, [orderedStreams, preferredLanguage]);
+    hasDirectTelemetryRef.current = false;
+  }, [orderedStreams, preferredLanguage, firstCleanIndex, movieId, episodeId]);
 
   useEffect(() => {
     setTunnelUsingSecondary(false);
@@ -342,8 +358,8 @@ export default function SmartVideoPlayer({
 
   const isPrimaryServerActive = Boolean(
     currentStream &&
-      activeIndex === 0 &&
-      currentStream.serverName.toLowerCase().includes("streamwish") &&
+      currentStream.isStreamwish &&
+      !currentStream.isDirty &&
       !tunnelUsingSecondary
   );
 
@@ -994,10 +1010,11 @@ export default function SmartVideoPlayer({
         </div>
       ) : currentStream.format === MirrorFormat.EMBED ? (
         <SmartPlayer
-          key={currentStream.mirrorId}
+          key={`${movieId || episodeId || "media"}-${currentStream.mirrorId}`}
           embedUrl={embedSrcWithResume}
           backupEmbedUrls={orderedStreams
             .slice(activeIndex + 1)
+            .filter((s) => (currentStream.isStreamwish ? s.isStreamwish : true))
             .map((s) => s.streamUrl)}
           title={
             isSeriesPlayer
@@ -1005,6 +1022,11 @@ export default function SmartVideoPlayer({
               : movieTitle
           }
           initialTimeSeconds={initialResumeSecRef.current}
+          isDirty={Boolean(
+            currentStream.isDirty ||
+              !currentStream.isStreamwish ||
+              tunnelUsingSecondary
+          )}
           hideInlineHelperBar={true}
           onStatusChange={setSmartPlayerStatus}
           videoElementRef={videoRef}

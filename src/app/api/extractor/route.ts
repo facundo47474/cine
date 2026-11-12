@@ -3,6 +3,18 @@ import dns from "dns";
 import { NextRequest, NextResponse } from "next/server";
 import { tokenCryptoService } from "@/infrastructure/container";
 import { prisma } from "@/infrastructure/database/prismaClient";
+import {
+  FALLBACK_IF_EMPTY,
+  STRICT_STREAMWISH_ONLY,
+  StreamwishExtractionTarget,
+  buildStreamwishExtractionTargets,
+  filterAndPrioritizeMirrors,
+  isExtractableCleanHost,
+  isMultiEmbedAggregatorUrl,
+  isStreamwish,
+  isStreamwishUrl,
+  normalizeStreamwishEmbedUrl,
+} from "@/domain/utils/streamwishMatcher";
 
 try {
   dns.setDefaultResultOrder("ipv4first");
@@ -37,6 +49,14 @@ interface PlayLatinSourceEntry {
 
 interface PlayLatinResolveResponse {
   sources?: PlayLatinSourceEntry[];
+}
+
+interface CandidateEmbedDescriptor {
+  url: string;
+  serverName: string;
+  priority: number;
+  isStreamwish: boolean;
+  isDirty: boolean;
 }
 
 /**
@@ -149,34 +169,26 @@ function decryptEmbed69Link(
   }
 }
 
-function getServerPriorityWeight(servername?: string): number {
-  const normalized = (servername || "").toLowerCase();
-  if (normalized.includes("streamwish")) return 1;
-  if (normalized.includes("mixdrop")) return 2;
-  if (normalized.includes("vidhide")) return 3;
+function getServerPriorityWeight(
+  servername?: string,
+  rawUrl?: string
+): number {
+  if (isStreamwish({ serverName: servername, url: rawUrl })) return 1;
+  const normalized = `${servername || ""} ${rawUrl || ""}`.toLowerCase();
+  if (normalized.includes("mixdrop") || normalized.includes("mxdrop")) return 2;
+  if (normalized.includes("vidhide") || normalized.includes("morencius")) return 3;
   if (normalized.includes("filemoon")) return 4;
   if (normalized.includes("voe")) return 5;
-  if (normalized.includes("dropload")) return 6;
-  if (normalized.includes("doodstream")) return 7;
+  if (normalized.includes("dropload") || normalized.includes("dr0pstream")) return 6;
+  if (normalized.includes("doodstream") || normalized.includes("dood")) return 7;
   if (normalized.includes("rapidvideo")) return 8;
   return 9;
-}
-
-function normalizeStreamwishEmbedUrl(rawUrl: string): string {
-  const trimmed = rawUrl.trim();
-  const swMatch = trimmed.match(
-    /^https?:\/\/(?:www\.)?streamwish\.(?:to|com|gg)\/e\/([a-zA-Z0-9_-]+)/i
-  );
-  if (swMatch?.[1]) {
-    return `https://hglink.to/e/${swMatch[1]}`;
-  }
-  return trimmed;
 }
 
 function parseDomEmbedsFromEmbed69Html(
   html: string,
   requestedLang: string
-): string[] {
+): { servername: string; url: string; weight: number }[] {
   if (!html.includes("data-url=")) return [];
 
   const langByCode = new Map<string, string>([
@@ -228,7 +240,9 @@ function parseDomEmbedsFromEmbed69Html(
     parsedItems.push({
       lang,
       servername,
-      url: normalizeStreamwishEmbedUrl(rawUrl),
+      url: isStreamwish({ serverName: servername, url: rawUrl })
+        ? normalizeStreamwishEmbedUrl(rawUrl)
+        : rawUrl,
     });
   }
 
@@ -248,28 +262,39 @@ function parseDomEmbedsFromEmbed69Html(
     const langDiff = getLangRank(a.lang) - getLangRank(b.lang);
     if (langDiff !== 0) return langDiff;
     return (
-      getServerPriorityWeight(a.servername) -
-      getServerPriorityWeight(b.servername)
+      getServerPriorityWeight(a.servername, a.url) -
+      getServerPriorityWeight(b.servername, b.url)
     );
   });
 
-  return parsedItems.map((i) => i.url);
+  return parsedItems.map((i, idx) => ({
+    servername: i.servername,
+    url: i.url,
+    weight: getServerPriorityWeight(i.servername, i.url) * 100 + idx,
+  }));
 }
 
 /**
- * Resuelve todos los enlaces de servidores candidatos desde Embed69 y PlayLatinSrc
- * ordenados por facilidad de extracción limpia (Streamwish -> Mixdrop -> Vidhide -> Filemoon -> otros).
+ * Desempaqueta agregadores multi-embed (Embed69 y PlayLatinSrc) aplicando
+ * STRICT_STREAMWISH_ONLY / FALLBACK_IF_EMPTY de forma determinista.
  */
 async function resolveEmbed69OrPlayLatinToDirectEmbeds(
   rawUrl: string
-): Promise<string[]> {
-  const resolvedUrls: string[] = [];
-  const addUnique = (url?: string | null) => {
+): Promise<CandidateEmbedDescriptor[]> {
+  const collected: { serverName: string; url: string; priority: number }[] = [];
+  const seenUrls = new Set<string>();
+
+  const addUnique = (url?: string | null, serverName?: string, priority?: number) => {
     if (!url) return;
-    const trimmed = normalizeStreamwishEmbedUrl(url);
-    if (trimmed.startsWith("http") && !resolvedUrls.includes(trimmed)) {
-      resolvedUrls.push(trimmed);
-    }
+    const isSw = isStreamwish({ serverName, url });
+    const trimmed = isSw ? normalizeStreamwishEmbedUrl(url) : url.trim();
+    if (!trimmed.startsWith("http") || seenUrls.has(trimmed)) return;
+    seenUrls.add(trimmed);
+    collected.push({
+      serverName: serverName || trimmed,
+      url: trimmed,
+      priority: priority ?? collected.length + 1,
+    });
   };
 
   try {
@@ -279,8 +304,10 @@ async function resolveEmbed69OrPlayLatinToDirectEmbeds(
     ).toUpperCase();
     const baseCleanUrl = `${parsedUrl.origin}${parsedUrl.pathname}`;
 
-    const resolveFromEmbed69 = async (): Promise<string[]> => {
-      const list: string[] = [];
+    const resolveFromEmbed69 = async (): Promise<
+      { serverName: string; url: string; priority: number }[]
+    > => {
+      const list: { serverName: string; url: string; priority: number }[] = [];
       if (!rawUrl.includes("embed69.org/f/")) return list;
       try {
         const candidateUrls = [baseCleanUrl];
@@ -327,9 +354,13 @@ async function resolveEmbed69OrPlayLatinToDirectEmbeds(
         const html = htmlList.find((h): h is string => Boolean(h));
 
         if (html) {
-          const domUrls = parseDomEmbedsFromEmbed69Html(html, requestedLang);
-          if (domUrls.length > 0) {
-            list.push(...domUrls);
+          const domItems = parseDomEmbedsFromEmbed69Html(html, requestedLang);
+          for (const item of domItems) {
+            list.push({
+              serverName: item.servername,
+              url: item.url,
+              priority: item.weight,
+            });
           }
 
           const cm = html.match(/POW_CHALLENGE\s*=\s*'([^']+)'/);
@@ -363,14 +394,26 @@ async function resolveEmbed69OrPlayLatinToDirectEmbeds(
                   if (!Array.isArray(block.sortedEmbeds)) continue;
                   const ordered = [...block.sortedEmbeds].sort(
                     (a, b) =>
-                      getServerPriorityWeight(a.servername) -
-                      getServerPriorityWeight(b.servername)
+                      getServerPriorityWeight(a.servername, a.link) -
+                      getServerPriorityWeight(b.servername, b.link)
                   );
-                  for (const entry of ordered) {
-                    if (!entry.link) continue;
+                  ordered.forEach((entry, idx) => {
+                    if (!entry.link) return;
                     const dec = decryptEmbed69Link(entry.link, aesKey);
-                    if (dec) list.push(normalizeStreamwishEmbedUrl(dec));
-                  }
+                    if (dec) {
+                      const clean = isStreamwish({
+                        serverName: entry.servername,
+                        url: dec,
+                      });
+                      list.push({
+                        serverName: entry.servername || dec,
+                        url: clean ? normalizeStreamwishEmbedUrl(dec) : dec,
+                        priority:
+                          getServerPriorityWeight(entry.servername, dec) * 100 +
+                          idx,
+                      });
+                    }
+                  });
                 }
               }
             }
@@ -382,8 +425,10 @@ async function resolveEmbed69OrPlayLatinToDirectEmbeds(
       return list;
     };
 
-    const resolveFromPlayLatin = async (): Promise<string[]> => {
-      const list: string[] = [];
+    const resolveFromPlayLatin = async (): Promise<
+      { serverName: string; url: string; priority: number }[]
+    > => {
+      const list: { serverName: string; url: string; priority: number }[] = [];
       try {
         const tvMatch = rawUrl.match(/(tt\d+)-(\d+)x(\d+)/i);
         const movieMatch = rawUrl.match(/(tt\d+)/i);
@@ -449,13 +494,22 @@ async function resolveEmbed69OrPlayLatinToDirectEmbeds(
           ...(langFiltered.length > 0 ? langFiltered : validSources),
         ].sort(
           (a, b) =>
-            getServerPriorityWeight(a.server || a.name) -
-            getServerPriorityWeight(b.server || b.name)
+            getServerPriorityWeight(a.server || a.name, a.url) -
+            getServerPriorityWeight(b.server || b.name, b.url)
         );
 
-        for (const s of orderedSources) {
-          if (s.url) list.push(s.url);
-        }
+        orderedSources.forEach((s, idx) => {
+          if (s.url) {
+            list.push({
+              serverName: s.server || s.name || s.url,
+              url: s.url,
+              priority:
+                getServerPriorityWeight(s.server || s.name, s.url) * 100 +
+                50 +
+                idx,
+            });
+          }
+        });
       } catch {
         // Silencioso
       }
@@ -467,13 +521,28 @@ async function resolveEmbed69OrPlayLatinToDirectEmbeds(
       resolveFromPlayLatin(),
     ]);
 
-    for (const u of embed69List) addUnique(u);
-    for (const u of playLatinList) addUnique(u);
+    for (const item of embed69List) {
+      addUnique(item.url, item.serverName, item.priority);
+    }
+    for (const item of playLatinList) {
+      addUnique(item.url, item.serverName, item.priority);
+    }
   } catch {
     // Continuar con los candidatos ya recolectados
   }
 
-  return resolvedUrls;
+  const prioritized = filterAndPrioritizeMirrors(collected, {
+    strictOnly: STRICT_STREAMWISH_ONLY,
+    fallbackIfEmpty: FALLBACK_IF_EMPTY,
+  });
+
+  return prioritized.map(({ item, isStreamwish: sw, isDirty }) => ({
+    url: item.url,
+    serverName: item.serverName,
+    priority: item.priority,
+    isStreamwish: sw,
+    isDirty,
+  }));
 }
 
 interface ExtractedStreamCandidate {
@@ -485,7 +554,7 @@ interface ExtractedStreamCandidate {
 
 /**
  * Extrae todas las URLs de stream candidatas (.m3u8 o .mp4) analizando el HTML original
- * y los bloques desempaquetados (soporta Streamwish, Mixdrop, Vidhide, Filemoon, Dropload, Supervideo).
+ * y los bloques desempaquetados.
  */
 function extractCandidatesFromText(
   combinedText: string,
@@ -543,7 +612,6 @@ function extractCandidatesFromText(
     });
   };
 
-  // 1. Claves JSON y variables prioritarias (Streamwish hls4/hls2/hls3, Mixdrop MDCore.wurl, Vidhide, Filemoon, JWPlayer)
   const jsonKeyRegexes: { regex: RegExp; forcedType?: "hls" | "mp4" }[] = [
     { regex: /"hls4"\s*:\s*"([^"]+)"/i, forcedType: "hls" },
     { regex: /"hls2"\s*:\s*"([^"]+)"/i, forcedType: "hls" },
@@ -569,7 +637,6 @@ function extractCandidatesFromText(
     }
   }
 
-  // 2. Búsqueda general por Expresiones Regulares de enlaces .m3u8
   const m3u8Regex = /((?:https?:)?\/\/[^\s"'<>\\]+?\.m3u8[^\s"'<>\\]*)/gi;
   const m3u8Matches = combinedText.match(m3u8Regex);
   if (m3u8Matches) {
@@ -578,7 +645,6 @@ function extractCandidatesFromText(
     }
   }
 
-  // 3. Búsqueda general por Expresiones Regulares de enlaces .mp4
   const mp4Regex = /((?:https?:)?\/\/[^\s"'<>\\]+?\.mp4[^\s"'<>\\]*)/gi;
   const mp4Matches = combinedText.match(mp4Regex);
   if (mp4Matches) {
@@ -590,10 +656,6 @@ function extractCandidatesFromText(
   return candidates;
 }
 
-/**
- * Verifica rápidamente si un manifiesto HLS responde con #EXTM3U válido para descartar
- * nodos CDN caídos (ej. 504 Gateway Time-out en premilkyway.com) y pasar al respaldo (hls4 / hls3 / Mixdrop).
- */
 async function verifyStreamCandidateAlive(
   candidate: ExtractedStreamCandidate,
   referer: string
@@ -619,9 +681,17 @@ async function verifyStreamCandidateAlive(
   }
 }
 
+interface ProbeHitResult extends ExtractedStreamCandidate {
+  referer: string;
+  sourceEmbedUrl: string;
+  isStreamwish: boolean;
+  isDirty: boolean;
+}
+
 /**
  * PASO 2: Endpoint Extractor (/api/extractor?url=<EMBED_URL>)
- * Obtiene la URL cruda .m3u8 o .mp4 desde el embed original o desde un token de stream firmado.
+ * Prioriza de forma estricta y determinista todos los dominios espejo de Streamwish
+ * antes de evaluar cualquier servidor alternativo en modo contingencia.
  */
 export async function GET(request: NextRequest) {
   const inputUrl = request.nextUrl.searchParams.get("url")?.trim() || "";
@@ -631,6 +701,8 @@ export async function GET(request: NextRequest) {
       {
         success: false,
         fallbackUrl: "",
+        isStreamwish: false,
+        isDirty: false,
         reason: "Parámetro 'url' requerido.",
       },
       { status: 200 }
@@ -642,9 +714,9 @@ export async function GET(request: NextRequest) {
   let decryptedMirrorId: string | null = null;
   let decryptedMovieId: string | null = null;
   let originalRawUrl: string | null = null;
+  let tokenServerName: string | undefined;
 
   try {
-    // Soportar URLs firmadas internas (/api/stream/[token]) desencriptando el token automáticamente
     if (
       inputUrl.startsWith("/api/stream/") ||
       inputUrl.includes("/api/stream/")
@@ -658,12 +730,37 @@ export async function GET(request: NextRequest) {
         originalRawUrl = payload.rawUrl;
         decryptedMirrorId = payload.mirrorId;
         decryptedMovieId = payload.movieId;
+        tokenServerName = payload.serverName;
         fallbackIframeUrl = inputUrl;
       }
     }
 
     const parsedInitial = new URL(targetEmbedUrl);
     const initialOrigin = parsedInitial.origin;
+    const initialIsSw = isStreamwish({
+      serverName: tokenServerName,
+      url: targetEmbedUrl,
+    });
+
+    if (
+      STRICT_STREAMWISH_ONLY &&
+      !FALLBACK_IF_EMPTY &&
+      !initialIsSw &&
+      !isMultiEmbedAggregatorUrl(targetEmbedUrl) &&
+      !/\.m3u8(\?|$)|\.mp4(\?|$)/i.test(parsedInitial.pathname)
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          fallbackUrl: "",
+          isStreamwish: false,
+          isDirty: true,
+          reason:
+            "Bloqueado por STRICT_STREAMWISH_ONLY: el servidor de origen no pertenece a Streamwish.",
+        },
+        { status: 200 }
+      );
+    }
 
     // 1. Si ya es un enlace directo .m3u8 o .mp4, devolverlo directamente como exitoso
     if (/\.m3u8(\?|$)/i.test(parsedInitial.pathname)) {
@@ -672,6 +769,8 @@ export async function GET(request: NextRequest) {
         streamUrl: targetEmbedUrl,
         type: "hls",
         referer: initialOrigin,
+        isStreamwish: initialIsSw,
+        isDirty: !initialIsSw,
       });
     }
 
@@ -681,12 +780,25 @@ export async function GET(request: NextRequest) {
         streamUrl: targetEmbedUrl,
         type: "mp4",
         referer: initialOrigin,
+        isStreamwish: initialIsSw,
+        isDirty: !initialIsSw,
       });
     }
 
-    // Si el target es un contenedor Embed69 (o si es un mirror antiguo dr0pstream/doodstream con hermano embed69 en BD),
-    // obtenemos todos los embeds directos candidatos (Streamwish, Mixdrop, Vidhide, Filemoon)
-    let embedUrlsToProbe: string[] = [targetEmbedUrl];
+    const rawCandidates: {
+      url: string;
+      serverName: string;
+      priority: number;
+    }[] = [
+      {
+        url: isStreamwishUrl(targetEmbedUrl)
+          ? normalizeStreamwishEmbedUrl(targetEmbedUrl)
+          : targetEmbedUrl,
+        serverName: tokenServerName || targetEmbedUrl,
+        priority: isStreamwishUrl(targetEmbedUrl) ? 1 : 50,
+      },
+    ];
+
     let embed69LookupUrl: string | null = targetEmbedUrl.includes("embed69.org/f/")
       ? targetEmbedUrl
       : null;
@@ -708,14 +820,17 @@ export async function GET(request: NextRequest) {
         for (const sib of siblings) {
           if (!sib.rawUrl || sib.rawUrl === targetEmbedUrl) continue;
           if (sib.rawUrl.includes("embed69.org/f/")) {
-            if (!embed69LookupUrl && /dr0pstream\.com|dropload|doodstream/i.test(targetEmbedUrl)) {
+            if (!embed69LookupUrl && !isStreamwishUrl(targetEmbedUrl)) {
               embed69LookupUrl = sib.rawUrl;
             }
-          } else if (
-            !sib.rawUrl.includes("vidsrc.me") &&
-            !embedUrlsToProbe.includes(sib.rawUrl)
-          ) {
-            embedUrlsToProbe.push(sib.rawUrl);
+          } else if (!sib.rawUrl.includes("vidsrc.me")) {
+            rawCandidates.push({
+              url: isStreamwishUrl(sib.rawUrl)
+                ? normalizeStreamwishEmbedUrl(sib.rawUrl)
+                : sib.rawUrl,
+              serverName: sib.serverName,
+              priority: sib.priority,
+            });
           }
         }
       } catch {
@@ -723,72 +838,54 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    let prioritizedDescriptors: CandidateEmbedDescriptor[] = [];
+
     if (embed69LookupUrl) {
-      const resolvedEmbeds =
+      prioritizedDescriptors =
         await resolveEmbed69OrPlayLatinToDirectEmbeds(embed69LookupUrl);
-      if (resolvedEmbeds.length > 0) {
-        embedUrlsToProbe = resolvedEmbeds;
-        if (!inputUrl.includes("/api/stream/")) {
-          fallbackIframeUrl = resolvedEmbeds[0];
-        }
+      if (prioritizedDescriptors.length > 0 && !inputUrl.includes("/api/stream/")) {
+        fallbackIframeUrl = prioritizedDescriptors[0].url;
       }
     }
 
-    // Construimos la lista de endpoints candidatos a inspeccionar
-    const candidateFetchTargets: {
-      fetchUrl: string;
-      referer: string;
-      sourceEmbedUrl: string;
-    }[] = [];
-    const seenFetchUrls = new Set<string>();
-    const addFetchTarget = (
-      fetchUrl: string,
-      referer: string,
-      sourceEmbedUrl: string
-    ) => {
-      if (!seenFetchUrls.has(fetchUrl)) {
-        seenFetchUrls.add(fetchUrl);
-        candidateFetchTargets.push({ fetchUrl, referer, sourceEmbedUrl });
-      }
-    };
+    if (prioritizedDescriptors.length === 0) {
+      const nonAggregatorCandidates = rawCandidates.filter(
+        (c) => !isMultiEmbedAggregatorUrl(c.url)
+      );
+      const filtered = filterAndPrioritizeMirrors(nonAggregatorCandidates, {
+        strictOnly: STRICT_STREAMWISH_ONLY,
+        fallbackIfEmpty: FALLBACK_IF_EMPTY,
+      });
 
-    for (const candidateEmbed of embedUrlsToProbe) {
-      let candidateOrigin = initialOrigin;
-      try {
-        candidateOrigin = new URL(candidateEmbed).origin;
-      } catch {
-        // Usar initialOrigin
-      }
-
-      const codeMatch = candidateEmbed.match(/\/(?:e|embed)\/([a-zA-Z0-9_-]+)/);
-      const isStreamwishFamily =
-        /hglink\.to|audinifer\.com|vibuxer\.com|hanerix\.com|streamwish|strwish|wishembed|awish|dwish|mwish|swdyu/i.test(
-          candidateEmbed
-        );
-
-      if (isStreamwishFamily && codeMatch?.[1]) {
-        const fileCode = codeMatch[1];
-        const canonicalSwEmbed = `https://hglink.to/e/${fileCode}`;
-        addFetchTarget(
-          `https://audinifer.com/e/${fileCode}`,
-          "https://hglink.to/",
-          canonicalSwEmbed
-        );
-        addFetchTarget(
-          `https://vibuxer.com/e/${fileCode}`,
-          "https://hglink.to/",
-          canonicalSwEmbed
-        );
-      }
-
-      addFetchTarget(candidateEmbed, `${candidateOrigin}/`, candidateEmbed);
+      prioritizedDescriptors = filtered.map(
+        ({ item, isStreamwish: sw, isDirty }) => ({
+          url: item.url,
+          serverName: item.serverName,
+          priority: item.priority,
+          isStreamwish: sw,
+          isDirty,
+        })
+      );
     }
 
-    const probeTarget = async (target: {
-      fetchUrl: string;
-      referer: string;
-      sourceEmbedUrl: string;
-    }) => {
+    if (prioritizedDescriptors.length === 0) {
+      return NextResponse.json(
+        {
+          success: false,
+          fallbackUrl: STRICT_STREAMWISH_ONLY ? "" : fallbackIframeUrl,
+          isStreamwish: false,
+          isDirty: true,
+          reason:
+            "No se encontraron servidores Streamwish disponibles bajo el modo estricto.",
+        },
+        { status: 200 }
+      );
+    }
+
+    const probeTarget = async (
+      target: StreamwishExtractionTarget,
+      meta: { isStreamwish: boolean; isDirty: boolean }
+    ): Promise<ProbeHitResult | null> => {
       try {
         const res = await fetch(target.fetchUrl, {
           method: "GET",
@@ -830,6 +927,8 @@ export async function GET(request: NextRequest) {
             ...firstAliveCandidate,
             referer: streamReferer,
             sourceEmbedUrl: target.sourceEmbedUrl,
+            isStreamwish: meta.isStreamwish,
+            isDirty: meta.isDirty,
           };
         }
 
@@ -839,22 +938,90 @@ export async function GET(request: NextRequest) {
       }
     };
 
-    const probeResults = await Promise.all(
-      candidateFetchTargets.map((t) => probeTarget(t))
+    const runPhaseForDescriptors = async (
+      descriptors: CandidateEmbedDescriptor[]
+    ): Promise<ProbeHitResult | null> => {
+      if (descriptors.length === 0) return null;
+
+      const targetsWithMeta: {
+        target: StreamwishExtractionTarget;
+        isStreamwish: boolean;
+        isDirty: boolean;
+      }[] = [];
+      const seenFetchUrls = new Set<string>();
+
+      for (const desc of descriptors) {
+        const targets = desc.isStreamwish
+          ? buildStreamwishExtractionTargets(desc.url)
+          : [
+              {
+                fetchUrl: desc.url,
+                referer: `${new URL(desc.url).origin}/`,
+                sourceEmbedUrl: desc.url,
+              },
+            ];
+
+        for (const t of targets) {
+          if (!seenFetchUrls.has(t.fetchUrl)) {
+            seenFetchUrls.add(t.fetchUrl);
+            targetsWithMeta.push({
+              target: t,
+              isStreamwish: desc.isStreamwish,
+              isDirty: desc.isDirty,
+            });
+          }
+        }
+      }
+
+      const results = await Promise.all(
+        targetsWithMeta.map((entry) =>
+          probeTarget(entry.target, {
+            isStreamwish: entry.isStreamwish,
+            isDirty: entry.isDirty,
+          })
+        )
+      );
+
+      return results.find((r): r is ProbeHitResult => Boolean(r)) || null;
+    };
+
+    // FASE 1 DETERMINISTA: Evaluar TODOS los targets de Streamwish en paralelo primero.
+    const streamwishDescriptors = prioritizedDescriptors.filter(
+      (d) => d.isStreamwish
     );
-    const hit = probeResults.find((r) => Boolean(r));
+    let hit = await runPhaseForDescriptors(streamwishDescriptors);
+
+    // FASE 2 CONTINGENCIA: Solo si Streamwish falló por completo y está habilitado el fallback.
+    // Se prueban primero los hosts extraíbles sin anuncios (Vidhide, Dropload, Mixdrop, Filemoon).
+    if (!hit && (!STRICT_STREAMWISH_ONLY || FALLBACK_IF_EMPTY)) {
+      const dirtyDescriptors = prioritizedDescriptors.filter(
+        (d) => !d.isStreamwish
+      );
+      const extractableDirty = dirtyDescriptors.filter((d) =>
+        isExtractableCleanHost({ serverName: d.serverName, url: d.url })
+      );
+      if (extractableDirty.length > 0) {
+        hit = await runPhaseForDescriptors(extractableDirty);
+      }
+      if (!hit) {
+        const remainingDirty = dirtyDescriptors.filter(
+          (d) => !isExtractableCleanHost({ serverName: d.serverName, url: d.url })
+        );
+        hit = await runPhaseForDescriptors(remainingDirty);
+      }
+    }
 
     if (hit) {
-      // Auto-reparación en BD: si el mirror original estaba guardado como "el barrio" (embed69.org o dr0pstream.com)
-      // y acabamos de resolver y verificar la "dirección exacta" (hglink.to, mxdrop.to, morencius.com),
-      // actualizamos el registro en BD en segundo plano para que quede guardado permanentemente.
+      // Auto-reparación en BD únicamente cuando el mirror resuelto es un Streamwish verificado.
       if (
         decryptedMirrorId &&
         originalRawUrl &&
         hit.sourceEmbedUrl &&
         hit.sourceEmbedUrl !== originalRawUrl &&
-        /embed69\.org|dr0pstream\.com|doodstream/i.test(originalRawUrl) &&
-        !hit.sourceEmbedUrl.includes("embed69.org")
+        hit.isStreamwish &&
+        isStreamwishUrl(hit.sourceEmbedUrl) &&
+        (isMultiEmbedAggregatorUrl(originalRawUrl) ||
+          /dr0pstream\.com|doodstream/i.test(originalRawUrl))
       ) {
         void (async () => {
           try {
@@ -862,12 +1029,18 @@ export async function GET(request: NextRequest) {
               const epId = decryptedMirrorId.slice(3).replace(/-\d+$/, "");
               await prisma.episodeMirror.updateMany({
                 where: { episodeId: epId, rawUrl: originalRawUrl },
-                data: { rawUrl: hit.sourceEmbedUrl },
+                data: {
+                  rawUrl: hit.sourceEmbedUrl,
+                  serverName: "Streamwish-Lat",
+                },
               });
             } else {
               await prisma.mirrorLink.updateMany({
                 where: { id: decryptedMirrorId },
-                data: { rawUrl: hit.sourceEmbedUrl },
+                data: {
+                  rawUrl: hit.sourceEmbedUrl,
+                  serverName: "Streamwish-Lat",
+                },
               });
             }
           } catch {
@@ -883,13 +1056,18 @@ export async function GET(request: NextRequest) {
         referer: hit.referer,
         durationSeconds: hit.durationSeconds,
         posterUrl: hit.posterUrl,
+        isStreamwish: hit.isStreamwish,
+        isDirty: hit.isDirty,
       });
     }
 
+    const firstDescriptor = prioritizedDescriptors[0];
     return NextResponse.json(
       {
         success: false,
         fallbackUrl: fallbackIframeUrl,
+        isStreamwish: firstDescriptor?.isStreamwish ?? initialIsSw,
+        isDirty: firstDescriptor?.isDirty ?? !initialIsSw,
         reason:
           "No se encontró un manifiesto .m3u8 o archivo .mp4 directo o el servidor bloqueó la IP.",
       },
@@ -900,6 +1078,8 @@ export async function GET(request: NextRequest) {
       {
         success: false,
         fallbackUrl: fallbackIframeUrl,
+        isStreamwish: false,
+        isDirty: true,
         reason:
           error instanceof Error
             ? error.message
@@ -909,4 +1089,3 @@ export async function GET(request: NextRequest) {
     );
   }
 }
-
