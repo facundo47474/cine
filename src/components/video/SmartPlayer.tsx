@@ -26,6 +26,14 @@ export interface ExtractorResponseData {
   isDirty?: boolean;
 }
 
+export interface ExtractedNativeStream {
+  streamUrl: string;
+  proxiedUrl: string;
+  type: "hls" | "mp4";
+  referer?: string;
+  posterUrl?: string;
+}
+
 export interface SmartPlayerProps {
   embedUrl: string;
   backupEmbedUrls?: string[];
@@ -38,6 +46,7 @@ export interface SmartPlayerProps {
   onEnded?: () => void;
   onFatalError?: () => void;
   onStatusChange?: (status: SmartPlayerStatus) => void;
+  onNativeStreamReady?: (stream: ExtractedNativeStream | null) => void;
   hideInlineHelperBar?: boolean;
   videoElementRef?: React.MutableRefObject<HTMLVideoElement | null>;
   iframeElementRef?: React.MutableRefObject<HTMLIFrameElement | null>;
@@ -315,6 +324,7 @@ export default function SmartPlayer({
   onEnded,
   onFatalError,
   onStatusChange,
+  onNativeStreamReady,
   hideInlineHelperBar = false,
   videoElementRef,
   iframeElementRef,
@@ -334,6 +344,7 @@ export default function SmartPlayer({
   const onDurationChangeRef = useRef(onDurationChange);
   const onStatusChangeRef = useRef(onStatusChange);
   const onFatalErrorRef = useRef(onFatalError);
+  const onNativeStreamReadyRef = useRef(onNativeStreamReady);
 
   useEffect(() => {
     initialTimeSecondsRef.current = initialTimeSeconds;
@@ -354,6 +365,10 @@ export default function SmartPlayer({
   useEffect(() => {
     onFatalErrorRef.current = onFatalError;
   }, [onFatalError]);
+
+  useEffect(() => {
+    onNativeStreamReadyRef.current = onNativeStreamReady;
+  }, [onNativeStreamReady]);
 
   const updateStatus = useCallback((nextStatus: SmartPlayerStatus) => {
     setStatus(nextStatus);
@@ -394,6 +409,7 @@ export default function SmartPlayer({
   // Fallback inmediato sin bloqueos hacia el <iframe>
   const switchToImmediateIframe = useCallback(() => {
     destroyHlsInstance();
+    onNativeStreamReadyRef.current?.(null);
     updateStatus("playing_iframe");
   }, [destroyHlsInstance, updateStatus]);
 
@@ -434,6 +450,7 @@ export default function SmartPlayer({
     setShieldActive(true);
     updateStatus("loading");
     setStreamData(null);
+    onNativeStreamReadyRef.current?.(null);
 
     const runExtraction = async () => {
       const candidateUrls = [
@@ -460,6 +477,15 @@ export default function SmartPlayer({
 
           if (data.success && data.streamUrl) {
             setStreamData(data);
+            onNativeStreamReadyRef.current?.({
+              streamUrl: data.streamUrl,
+              proxiedUrl: `/api/stream-proxy?url=${encodeURIComponent(
+                data.streamUrl
+              )}&referer=${encodeURIComponent(data.referer || "")}`,
+              type: data.type || "hls",
+              referer: data.referer,
+              posterUrl: data.posterUrl,
+            });
             if (data.durationSeconds && data.durationSeconds > 60) {
               onDurationChangeRef.current?.(data.durationSeconds);
             }
@@ -637,6 +663,11 @@ export default function SmartPlayer({
           ref={setVideoRefs}
           controls
           playsInline
+          disableRemotePlayback={Boolean(
+            streamData?.type === "hls" &&
+              typeof window !== "undefined" &&
+              Hls.isSupported()
+          )}
           x-webkit-airplay="allow"
           poster={streamData?.posterUrl}
           className="w-full h-full bg-black object-contain"

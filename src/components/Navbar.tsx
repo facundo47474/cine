@@ -20,6 +20,7 @@ export default function Navbar({
 }: NavbarProps) {
   const [showSearch, setShowSearch] = useState(false);
   const { data: session } = useSession();
+  const isSearchExpanded = Boolean(onSearchChange && (showSearch || searchQuery));
 
   const handleNavFilter = (type: "movie" | "tv" | undefined) => {
     if (onSelectMediaType) {
@@ -36,7 +37,11 @@ export default function Navbar({
   return (
     <header className="fixed top-0 left-0 right-0 z-50 bg-gradient-to-b from-black/95 via-black/80 to-transparent backdrop-blur-md">
       <div className="max-w-7xl mx-auto px-3 sm:px-8 h-14 sm:h-16 flex items-center justify-between gap-2 sm:gap-4">
-        <div className="flex items-center gap-4 sm:gap-8 min-w-0">
+        <div
+          className={`${
+            isSearchExpanded ? "hidden sm:flex" : "flex"
+          } items-center gap-4 sm:gap-8 min-w-0`}
+        >
           <Link
             className="flex items-center gap-2 group flex-shrink-0"
             href="/"
@@ -47,11 +52,7 @@ export default function Navbar({
             <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg bg-netflix-red flex items-center justify-center shadow-lg shadow-red-900/40">
               <Film className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
             </div>
-            <span
-              className={`${
-                showSearch ? "hidden sm:inline" : "inline"
-              } text-xl sm:text-2xl font-black tracking-tighter text-netflix-red group-hover:text-red-500 transition`}
-            >
+            <span className="inline text-xl sm:text-2xl font-black tracking-tighter text-netflix-red group-hover:text-red-500 transition">
               PILOTO
             </span>
           </Link>
@@ -130,28 +131,32 @@ export default function Navbar({
           </nav>
         </div>
 
-        <div className="flex items-center gap-2 sm:gap-3 flex-1 sm:flex-initial justify-end">
-          {onSearchChange && (showSearch || searchQuery) ? (
-            <div className="relative flex items-center flex-1 sm:flex-initial max-w-xs sm:max-w-none">
-              <Search className="w-4 h-4 text-zinc-400 absolute left-3 pointer-events-none" />
+        <div className="flex items-center gap-2 sm:gap-3 flex-1 sm:flex-initial justify-end min-w-0">
+          {isSearchExpanded ? (
+            <div className="relative flex items-center flex-1 sm:flex-initial w-full sm:w-72 min-w-0">
+              <Search className="w-4 h-4 text-zinc-400 absolute left-3.5 pointer-events-none" />
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => onSearchChange?.(e.target.value)}
                 placeholder="Buscar película o serie..."
+                aria-label="Buscar película o serie"
                 autoFocus
                 onBlur={() => {
                   if (!searchQuery) setShowSearch(false);
                 }}
-                className="w-full sm:w-72 bg-black/90 border border-white/25 rounded-full pl-9 pr-8 py-1.5 text-xs sm:text-sm text-white placeholder-zinc-400 focus:outline-none focus:border-netflix-red transition"
+                className="w-full min-w-0 bg-black/90 border border-white/25 rounded-full pl-10 pr-10 py-1.5 text-base sm:text-sm text-white placeholder-zinc-400 focus:outline-none focus:border-netflix-red transition"
               />
               <button
                 type="button"
+                onMouseDown={(e) => e.preventDefault()}
                 onClick={() => {
                   onSearchChange?.("");
                   setShowSearch(false);
                 }}
-                className="absolute right-2.5 text-zinc-400 hover:text-white p-0.5"
+                aria-label="Cerrar búsqueda"
+                title="Cerrar búsqueda"
+                className="absolute right-2.5 text-zinc-400 hover:text-white p-1 rounded-full hover:bg-white/10 transition"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -163,6 +168,7 @@ export default function Navbar({
                 onClick={() => setShowSearch(true)}
                 className="p-2 rounded-full text-zinc-300 hover:text-white hover:bg-white/10 transition"
                 title="Buscar"
+                aria-label="Buscar"
               >
                 <Search className="w-4 h-4 sm:w-5 sm:h-5" />
               </button>
@@ -170,7 +176,11 @@ export default function Navbar({
           )}
 
           {session ? (
-            <div className="flex items-center gap-2 sm:gap-3 pl-1 sm:pl-2">
+            <div
+              className={`${
+                isSearchExpanded ? "hidden sm:flex" : "flex"
+              } items-center gap-2 sm:gap-3 pl-1 sm:pl-2 flex-shrink-0`}
+            >
               <div className="flex items-center gap-2">
                 {session.user?.image ? (
                   // eslint-disable-next-line @next/next/no-img-element
@@ -207,7 +217,9 @@ export default function Navbar({
           ) : (
             <Link
               href="/login"
-              className="inline-flex items-center gap-1.5 px-3 sm:px-4 py-1.5 rounded-md bg-netflix-red text-white text-xs sm:text-sm font-bold hover:bg-red-700 transition shadow"
+              className={`${
+                isSearchExpanded ? "hidden sm:inline-flex" : "inline-flex"
+              } items-center gap-1.5 px-3 sm:px-4 py-1.5 rounded-md bg-netflix-red text-white text-xs sm:text-sm font-bold hover:bg-red-700 transition shadow flex-shrink-0`}
             >
               <UserIcon className="w-3.5 h-3.5" />
               <span>Ingresar</span>

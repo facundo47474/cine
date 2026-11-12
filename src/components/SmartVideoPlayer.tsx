@@ -24,6 +24,7 @@ import { SignedMirrorStreamDto } from "@/application/dto/PlaybackStreamDto";
 import { MirrorFormat } from "@/domain/enums/MirrorFormat";
 import { PresentationConnection } from "@/types/cast";
 import SmartPlayer, {
+  ExtractedNativeStream,
   SmartAdblockHelperBar,
   SmartPlayerStatus,
 } from "@/components/video/SmartPlayer";
@@ -292,6 +293,9 @@ export default function SmartVideoPlayer({
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [isCasting, setIsCasting] = useState<boolean>(false);
   const [castDeviceName, setCastDeviceName] = useState<string | null>(null);
+  const [castNotice, setCastNotice] = useState<string | null>(null);
+  const [extractedNativeStream, setExtractedNativeStream] =
+    useState<ExtractedNativeStream | null>(null);
   const [tunnelUsingSecondary, setTunnelUsingSecondary] =
     useState<boolean>(false);
   const [smartPlayerStatus, setSmartPlayerStatus] =
@@ -303,13 +307,23 @@ export default function SmartVideoPlayer({
     setShieldActive(true);
     setTunnelUsingSecondary(false);
     setSmartPlayerStatus("loading");
+    setExtractedNativeStream(null);
+    setCastNotice(null);
     hasDirectTelemetryRef.current = false;
   }, [orderedStreams, preferredLanguage, firstCleanIndex, movieId, episodeId]);
 
   useEffect(() => {
     setTunnelUsingSecondary(false);
     setSmartPlayerStatus("loading");
+    setExtractedNativeStream(null);
+    setCastNotice(null);
   }, [activeIndex]);
+
+  useEffect(() => {
+    if (!castNotice) return;
+    const timer = setTimeout(() => setCastNotice(null), 5000);
+    return () => clearTimeout(timer);
+  }, [castNotice]);
 
   const currentStream: SignedMirrorStreamDto | undefined =
     orderedStreams[activeIndex];
@@ -430,10 +444,12 @@ export default function SmartVideoPlayer({
   }, []);
 
   /**
-   * Flujo de Transmisión Nativa de 1 Clic (Google Cast SDK + W3C PresentationRequest + AirPlay + RemotePlayback)
-   * compatible tanto con Películas como con Episodios de Series.
+   * Flujo de Transmisión de SOLO el video/reproductor (AirPlay + Google Cast MediaInfo + RemotePlayback).
+   * Evita iniciar sesiones vacías o mirroring de toda la pantalla/pestaña.
    */
   const handleCastClick = useCallback(async () => {
+    setCastNotice(null);
+
     if (isCasting) {
       try {
         window.cast?.framework?.CastContext.getInstance().endCurrentSession(true);
@@ -458,40 +474,56 @@ export default function SmartVideoPlayer({
       ? `${seriesTitle} - T${seasonNumber || 1}:E${episodeNumber || 1} ${episodeTitle || movieTitle}`
       : movieTitle;
 
-    // Caso B: Apple AirPlay nativo en Safari / iOS / macOS
+    // 1. Apple AirPlay nativo sobre <video> en Safari / iOS / macOS
     if (videoEl && typeof videoEl.webkitShowPlaybackTargetPicker === "function") {
       try {
         videoEl.webkitShowPlaybackTargetPicker();
         return;
       } catch {
-        // Continúa con la cascada si falla AirPlay
+        // Continúa con Google Cast o RemotePlayback
       }
     }
 
-    // Caso C: Stream Directo MP4/HLS con Google Cast SDK
-    if (
-      currentStream.format !== MirrorFormat.EMBED &&
-      window.cast?.framework &&
-      window.chrome?.cast
-    ) {
+    // 2. Google Cast SDK directo con la URL real del video (.m3u8 o .mp4), jamás tab/screen mirroring
+    let directMediaUrl: string | null = null;
+    let directContentType = "application/x-mpegurl";
+
+    if (extractedNativeStream) {
+      const isLocalDev =
+        /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname) ||
+        window.location.protocol !== "https:";
+      directMediaUrl =
+        !isLocalDev || !/^https:\/\//i.test(extractedNativeStream.streamUrl)
+          ? new URL(
+              extractedNativeStream.proxiedUrl,
+              window.location.origin
+            ).toString()
+          : extractedNativeStream.streamUrl;
+      directContentType =
+        extractedNativeStream.type === "mp4"
+          ? "video/mp4"
+          : "application/x-mpegurl";
+    } else if (currentStream.format !== MirrorFormat.EMBED) {
+      directMediaUrl = new URL(
+        currentStream.streamUrl,
+        window.location.origin
+      ).toString();
+      directContentType =
+        currentStream.format === MirrorFormat.HLS
+          ? "application/x-mpegurl"
+          : "video/mp4";
+    }
+
+    if (directMediaUrl && window.cast?.framework && window.chrome?.cast) {
+      const castContext = window.cast.framework.CastContext.getInstance();
       try {
-        const castContext = window.cast.framework.CastContext.getInstance();
         await castContext.requestSession();
         const session = castContext.getCurrentSession();
 
         if (session) {
-          const absoluteStreamUrl = new URL(
-            currentStream.streamUrl,
-            window.location.origin
-          ).toString();
-          const contentType =
-            currentStream.format === MirrorFormat.HLS
-              ? "application/x-mpegurl"
-              : "video/mp4";
-
           const mediaInfo = new window.chrome.cast.media.MediaInfo(
-            absoluteStreamUrl,
-            contentType
+            directMediaUrl,
+            directContentType
           );
           const metadata = new window.chrome.cast.media.GenericMediaMetadata();
           metadata.title = castDisplayTitle;
@@ -501,7 +533,8 @@ export default function SmartVideoPlayer({
             mediaInfo
           );
           loadRequest.autoplay = true;
-          loadRequest.currentTime = currentProgressRef.current || lastSavedSecRef.current || 0;
+          loadRequest.currentTime =
+            currentProgressRef.current || lastSavedSecRef.current || 0;
 
           await session.loadMedia(loadRequest);
           videoEl?.pause();
@@ -511,71 +544,47 @@ export default function SmartVideoPlayer({
           setIsCasting(true);
           return;
         }
-      } catch {
-        // Si el usuario cancela o el receptor requiere PresentationRequest, continuamos
-      }
-    }
-
-    // Caso D: Stream EMBED o Universal vía W3C PresentationRequest Nativo
-    const tvUrl = new URL(currentStream.streamUrl, window.location.origin);
-    tvUrl.searchParams.set("tv", "1");
-    if (currentProgressRef.current > 5) {
-      tvUrl.searchParams.set("t", String(Math.floor(currentProgressRef.current)));
-    }
-
-    if (typeof window.PresentationRequest === "function") {
-      try {
-        const presentationRequest = new window.PresentationRequest([
-          tvUrl.toString(),
-        ]);
-        const connection = await presentationRequest.start();
-
-        presentationConnectionRef.current = connection;
-        setCastDeviceName("tu Smart TV");
-        setIsCasting(true);
-
-        const handleDisconnect = () => {
-          presentationConnectionRef.current = null;
-          setIsCasting(false);
-          setCastDeviceName(null);
-        };
-
-        connection.addEventListener("close", handleDisconnect);
-        connection.addEventListener("terminate", handleDisconnect);
-        return;
-      } catch {
-        // Si el navegador no completó PresentationRequest, intentamos CastContext o RemotePlayback
-      }
-    }
-
-    if (window.cast?.framework) {
-      try {
-        const castContext = window.cast.framework.CastContext.getInstance();
-        await castContext.requestSession();
-        const session = castContext.getCurrentSession();
-        if (session) {
-          setCastDeviceName(
-            session.getCastDevice()?.friendlyName || "tu Smart TV"
-          );
-          setIsCasting(true);
+      } catch (err) {
+        // Si se abrió sesión pero falló loadMedia, la cerramos para NO duplicar ni transmitir pantalla completa
+        try {
+          if (castContext.getCurrentSession()) {
+            castContext.endCurrentSession(true);
+          }
+        } catch {
+          // Silencioso
+        }
+        const errCode =
+          typeof err === "string"
+            ? err
+            : (err as { code?: string; name?: string } | null)?.code ||
+              (err as { code?: string; name?: string } | null)?.name ||
+              "";
+        if (errCode === "cancel" || errCode === "AbortError") {
           return;
         }
-      } catch {
-        // Silencioso si el usuario cierra el selector nativo
       }
     }
 
-    // Caso E: Remote Playback API nativa en <video> o en el <video id="pilotoVideo"> dentro del túnel
-    if (videoEl?.remote?.prompt) {
+    // 3. Remote Playback API nativo sobre <video> directo (no-blob: MP4 o HLS nativo)
+    if (
+      videoEl?.remote?.prompt &&
+      !videoEl.currentSrc?.startsWith("blob:")
+    ) {
       try {
         await videoEl.remote.prompt();
         return;
-      } catch {
-        // Silencioso
+      } catch (err) {
+        const name = (err as { name?: string } | null)?.name;
+        if (name === "AbortError") return;
       }
     }
 
-    if (iframeRef.current?.contentWindow) {
+    // 4. Túnel interno /api/stream/[token] con video HLS nativo (#pilotoVideo)
+    if (
+      smartPlayerStatus === "playing_iframe" &&
+      currentStream.streamUrl.includes("/api/stream/") &&
+      iframeRef.current?.contentWindow
+    ) {
       try {
         iframeRef.current.contentWindow.postMessage(
           { type: "PILOTO_TRIGGER_REMOTE_PLAYBACK" },
@@ -585,9 +594,17 @@ export default function SmartVideoPlayer({
         // Silencioso
       }
     }
+
+    setCastNotice(
+      extractedNativeStream
+        ? "No se encontró un Chromecast o receptor AirPlay disponible desde este navegador."
+        : "Este servidor en modo iframe no permite enviar solo el video; probá otro servidor."
+    );
   }, [
     isCasting,
     currentStream,
+    extractedNativeStream,
+    smartPlayerStatus,
     movieTitle,
     seriesTitle,
     seasonNumber,
@@ -1029,6 +1046,7 @@ export default function SmartVideoPlayer({
           )}
           hideInlineHelperBar={true}
           onStatusChange={setSmartPlayerStatus}
+          onNativeStreamReady={setExtractedNativeStream}
           videoElementRef={videoRef}
           iframeElementRef={iframeRef}
           onPlay={() => {
@@ -1262,8 +1280,23 @@ export default function SmartVideoPlayer({
         </div>
       )}
 
-      {/* Controles flotantes superiores: Drawer de Episodios + Transmitir a TV + Pantalla Completa */}
-      <div className="absolute top-3 right-3 z-20 flex items-center gap-2 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+      {castNotice && (
+        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-30 max-w-[90%] flex items-center gap-2 rounded-lg bg-zinc-950/95 border border-white/15 px-3 py-2 text-xs font-medium text-zinc-200 shadow-xl backdrop-blur-md">
+          <Cast className="w-3.5 h-3.5 text-netflix-red flex-shrink-0" />
+          <span className="truncate sm:whitespace-normal">{castNotice}</span>
+          <button
+            type="button"
+            onClick={() => setCastNotice(null)}
+            aria-label="Cerrar aviso"
+            className="text-zinc-400 hover:text-white p-0.5"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Controles flotantes superiores integrados en el reproductor: Drawer de Episodios + Transmitir a TV + Pantalla Completa */}
+      <div className="absolute top-3 right-3 z-20 flex items-center gap-2 opacity-95 sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
         {allSeasons && allSeasons.length > 0 && (
           <button
             type="button"
