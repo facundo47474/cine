@@ -11,15 +11,22 @@ interface MovieRowProps {
   movies: CatalogCardDto[];
 }
 
+/**
+ * Carrusel horizontal deslizable estilo Netflix para mostrar una colección temática de películas o series (`MovieRow`).
+ */
 export default function MovieRow({ title, subtitle, movies }: MovieRowProps) {
   const rowRef = useRef<HTMLDivElement | null>(null);
 
   if (!movies || movies.length === 0) return null;
 
+  /**
+   * Desplaza suavemente el contenedor horizontal un 75% de su ancho visible.
+   */
   const scrollRow = (direction: "left" | "right") => {
     if (!rowRef.current) return;
     const { scrollLeft, clientWidth } = rowRef.current;
-    const offset = direction === "left" ? -clientWidth * 0.75 : clientWidth * 0.75;
+    const offset =
+      direction === "left" ? -clientWidth * 0.75 : clientWidth * 0.75;
     rowRef.current.scrollTo({ left: scrollLeft + offset, behavior: "smooth" });
   };
 

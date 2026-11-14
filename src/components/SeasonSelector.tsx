@@ -11,14 +11,23 @@ interface SeasonSelectorProps {
   isLoading?: boolean;
 }
 
-function formatSeasonLabel(title: string | undefined, seasonNumber: number): string {
-  const clean = (title || "").trim();
-  if (!clean || /^season\s+\d+$/i.test(clean)) {
+/**
+ * Normaliza la etiqueta de una temporada traduciendo títulos genéricos `"Season X"` a `"Temporada X"`.
+ */
+function formatSeasonLabel(
+  title: string | undefined,
+  seasonNumber: number
+): string {
+  const cleanTitle = (title || "").trim();
+  if (!cleanTitle || /^season\s+\d+$/i.test(cleanTitle)) {
     return `Temporada ${seasonNumber}`;
   }
-  return clean;
+  return cleanTitle;
 }
 
+/**
+ * Selector desplegable de temporadas para la vista de detalle de una serie (`SeasonSelector`).
+ */
 export default function SeasonSelector({
   seasons,
   selectedSeasonNumber,
@@ -43,13 +52,13 @@ export default function SeasonSelector({
           disabled={isLoading}
           className="appearance-none bg-zinc-900 border border-zinc-700 hover:border-zinc-500 text-white text-sm font-semibold py-2 pl-4 pr-10 rounded-md focus:outline-none focus:ring-2 focus:ring-netflix-red transition cursor-pointer disabled:opacity-50"
         >
-          {seasons.map((s) => (
+          {seasons.map((season) => (
             <option
-              key={s.id || s.seasonNumber}
-              value={s.seasonNumber}
+              key={season.id || season.seasonNumber}
+              value={season.seasonNumber}
               className="bg-zinc-900 text-white"
             >
-              {formatSeasonLabel(s.title, s.seasonNumber)}
+              {formatSeasonLabel(season.title, season.seasonNumber)}
             </option>
           ))}
         </select>
@@ -58,4 +67,3 @@ export default function SeasonSelector({
     </div>
   );
 }
-

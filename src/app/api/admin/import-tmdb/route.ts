@@ -4,6 +4,21 @@ import { MirrorFormat } from "@/domain/enums/MirrorFormat";
 
 export const dynamic = "force-dynamic";
 
+interface RawMirrorInputPayload {
+  serverName?: string;
+  language?: string;
+  rawUrl: string;
+  format?: string;
+  quality?: string;
+  priority?: number;
+}
+
+/**
+ * Endpoint Administrativo de Ingesta (`POST /api/admin/import-tmdb`).
+ *
+ * Permite agregar una película al catálogo local ya sea sincronizando metadatos desde TMDB
+ * por su `tmdbId` o cargando manualmente sus campos descriptivos y lista de mirrors.
+ */
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -17,29 +32,18 @@ export async function POST(request: NextRequest) {
     }
 
     const formattedMirrors = mirrors.map(
-      (
-        m: {
-          serverName?: string;
-          language?: string;
-          rawUrl: string;
-          format?: string;
-          quality?: string;
-          priority?: number;
-        },
-        index: number
-      ) => ({
-        serverName: m.serverName || `Servidor #${index + 1}`,
-        language: m.language || "Latino",
-        rawUrl: m.rawUrl,
-        format: (m.format as MirrorFormat) || MirrorFormat.MP4,
-        quality: m.quality || "1080p",
-        priority: m.priority ?? index + 1,
+      (mirror: RawMirrorInputPayload, index: number) => ({
+        serverName: mirror.serverName || `Servidor #${index + 1}`,
+        language: mirror.language || "Latino",
+        rawUrl: mirror.rawUrl,
+        format: (mirror.format as MirrorFormat) || MirrorFormat.MP4,
+        quality: mirror.quality || "1080p",
+        priority: mirror.priority ?? index + 1,
       })
     );
 
-    // Si el usuario envía datos manuales sin necesidad de consultar TMDB
     if (manualMovie && manualMovie.title) {
-      const saved = await movieRepository.upsertMovieWithMirrors({
+      const savedMovie = await movieRepository.upsertMovieWithMirrors({
         tmdbId: tmdbId ? Number(tmdbId) : null,
         title: manualMovie.title,
         originalTitle: manualMovie.originalTitle || manualMovie.title,
@@ -49,7 +53,8 @@ export async function POST(request: NextRequest) {
           manualMovie.posterUrl ||
           "https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=800&auto=format&fit=crop&q=80",
         backdropUrl: manualMovie.backdropUrl || null,
-        releaseYear: Number(manualMovie.releaseYear) || new Date().getFullYear(),
+        releaseYear:
+          Number(manualMovie.releaseYear) || new Date().getFullYear(),
         durationMins: Number(manualMovie.durationMins) || 115,
         rating: Number(manualMovie.rating) || 7.5,
         qualityBadge: qualityBadge || "HD",
@@ -57,7 +62,7 @@ export async function POST(request: NextRequest) {
         mirrors: formattedMirrors,
       });
 
-      return NextResponse.json({ ok: true, movie: saved.toObject() });
+      return NextResponse.json({ ok: true, movie: savedMovie.toObject() });
     }
 
     if (!tmdbId || isNaN(Number(tmdbId))) {
@@ -67,13 +72,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const imported = await tmdbImportService.importMovieByTmdbId({
+    const importedMovie = await tmdbImportService.importMovieByTmdbId({
       tmdbId: Number(tmdbId),
       qualityBadge: qualityBadge || "HD",
       mirrors: formattedMirrors,
     });
 
-    return NextResponse.json({ ok: true, movie: imported });
+    return NextResponse.json({ ok: true, movie: importedMovie });
   } catch (error) {
     console.error("[POST /api/admin/import-tmdb] Error:", error);
     return NextResponse.json(

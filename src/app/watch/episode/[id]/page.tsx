@@ -16,6 +16,12 @@ import {
 import SmartVideoPlayer from "@/components/SmartVideoPlayer";
 import { EpisodePlaybackDto } from "@/application/dto/SeriesDto";
 
+/**
+ * Página de reproducción dedicada para capítulos de Series de TV (`/watch/episode/[id]`).
+ *
+ * Incluye selector de idioma (Audio Latino / Inglés Subtitulado), disparo de Chromecast/AirPlay,
+ * navegación rápida al capítulo anterior/siguiente y explorador de episodios de la temporada actual.
+ */
 export default function WatchEpisodePage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -29,15 +35,21 @@ export default function WatchEpisodePage() {
   >("Latino");
   const [detectedDurationSec, setDetectedDurationSec] = useState<number>(0);
 
+  /**
+   * Carga los datos de reproducción y enlaces firmados del episodio actual.
+   */
   const loadPlayback = useCallback(async () => {
     setLoading(true);
     setDetectedDurationSec(0);
     try {
-      const res = await fetch(`/api/series/episode/${episodeId}/playback`, {
-        cache: "no-store",
-      });
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
+      const response = await fetch(
+        `/api/series/episode/${episodeId}/playback`,
+        {
+          cache: "no-store",
+        }
+      );
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
         throw new Error(data.error || "No se pudo cargar el episodio.");
       }
       setPlayback(data.playback);
@@ -51,21 +63,38 @@ export default function WatchEpisodePage() {
   }, [episodeId]);
 
   useEffect(() => {
-    loadPlayback();
+    void loadPlayback();
   }, [loadPlayback]);
 
-  const hasLatino = playback?.streams.some((s) => s.language === "Latino");
-  const hasEnglish = playback?.streams.some(
-    (s) => s.language === "Inglés (Sub)"
-  );
+  const hasLatino =
+    playback?.streams.some((stream) => stream.language === "Latino") ?? false;
+  const hasEnglish =
+    playback?.streams.some((stream) => stream.language === "Inglés (Sub)") ??
+    false;
 
+  /**
+   * Sincroniza automáticamente el idioma activo cuando el episodio solo cuenta con pistas en inglés
+   * o vuelve a tener pistas en español latino al cambiar de capítulo.
+   */
+  useEffect(() => {
+    if (!playback) return;
+    if (!hasLatino && hasEnglish) {
+      setSelectedLanguage("Inglés (Sub)");
+    } else if (hasLatino) {
+      setSelectedLanguage("Latino");
+    }
+  }, [playback, hasLatino, hasEnglish]);
+
+  /**
+   * Dispara el evento global para abrir el selector nativo de Chromecast / AirPlay del reproductor.
+   */
   const handleNativeCastTrigger = useCallback(() => {
     window.dispatchEvent(new CustomEvent("piloto:trigger-cast"));
   }, []);
 
   return (
     <div className="min-h-screen bg-[#141414] text-white flex flex-col">
-      {/* Barra de navegación superior con retroceso */}
+      {/* Barra de navegación superior con retroceso a la ficha de la serie */}
       <header className="fixed top-0 inset-x-0 z-50 bg-black/90 backdrop-blur-md border-b border-white/10 px-4 sm:px-8 h-14 flex items-center justify-between">
         <Link
           href={playback ? `/series/${playback.seriesId}` : "/"}
@@ -73,7 +102,9 @@ export default function WatchEpisodePage() {
         >
           <ArrowLeft className="w-4 h-4 group-hover:-translate-x-1 transition-transform" />
           <span>
-            {playback ? `Volver a ${playback.seriesTitle}` : "Volver al catálogo"}
+            {playback
+              ? `Volver a ${playback.seriesTitle}`
+              : "Volver al catálogo"}
           </span>
         </Link>
 
@@ -111,9 +142,12 @@ export default function WatchEpisodePage() {
           </div>
         ) : (
           <>
-            {/* Reproductor Inteligente de Video con funciones completas de TV Series */}
+            {/* Reproductor Inteligente de Video con funciones de TV Series */}
             <SmartVideoPlayer
-              durationMins={Math.max(1, Math.round(playback.durationSeconds / 60))}
+              durationMins={Math.max(
+                1,
+                Math.round(playback.durationSeconds / 60)
+              )}
               initialProgressSeconds={playback.savedProgressSeconds}
               movieTitle={playback.episodeTitle}
               preferredLanguage={selectedLanguage}
@@ -129,8 +163,12 @@ export default function WatchEpisodePage() {
               nextEpisode={playback.nextEpisode}
               previousEpisode={playback.previousEpisode}
               allSeasons={playback.allSeasons}
-              onEpisodeSelect={(newEpId) => router.push(`/watch/episode/${newEpId}`)}
-              onDurationChange={(durSec) => setDetectedDurationSec(durSec)}
+              onEpisodeSelect={(newEpisodeId) =>
+                router.push(`/watch/episode/${newEpisodeId}`)
+              }
+              onDurationChange={(durationSeconds) =>
+                setDetectedDurationSec(durationSeconds)
+              }
             />
 
             {/* Metadatos del episodio y selector de idioma */}
@@ -257,14 +295,14 @@ export default function WatchEpisodePage() {
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                 {(
                   playback.allSeasons.find(
-                    (s) => s.seasonNumber === playback.seasonNumber
+                    (season) => season.seasonNumber === playback.seasonNumber
                   )?.episodes || []
-                ).map((ep) => {
-                  const isCurrent = ep.id === playback.episodeId;
+                ).map((episodeItem) => {
+                  const isCurrent = episodeItem.id === playback.episodeId;
                   return (
                     <Link
-                      key={ep.id}
-                      href={`/watch/episode/${ep.id}`}
+                      key={episodeItem.id}
+                      href={`/watch/episode/${episodeItem.id}`}
                       className={`group flex items-center gap-3 p-2.5 rounded-xl border transition ${
                         isCurrent
                           ? "bg-netflix-red/10 border-netflix-red/60 text-white"
@@ -272,16 +310,16 @@ export default function WatchEpisodePage() {
                       }`}
                     >
                       <div className="relative aspect-video w-24 rounded-lg overflow-hidden bg-zinc-800 flex-shrink-0">
-                        {ep.thumbnailUrl ? (
+                        {episodeItem.thumbnailUrl ? (
                           // eslint-disable-next-line @next/next/no-img-element
                           <img
-                            src={ep.thumbnailUrl}
-                            alt={ep.title}
+                            src={episodeItem.thumbnailUrl}
+                            alt={episodeItem.title}
                             className="w-full h-full object-cover group-hover:scale-105 transition"
                           />
                         ) : (
                           <div className="w-full h-full flex items-center justify-center font-bold text-zinc-500 text-xs">
-                            {ep.episodeNumber}
+                            {episodeItem.episodeNumber}
                           </div>
                         )}
                         <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
@@ -290,10 +328,10 @@ export default function WatchEpisodePage() {
                       </div>
                       <div className="flex-1 min-w-0 space-y-0.5">
                         <p className="text-xs font-bold truncate">
-                          {ep.episodeNumber}. {ep.title}
+                          {episodeItem.episodeNumber}. {episodeItem.title}
                         </p>
                         <p className="text-[11px] text-zinc-500">
-                          {ep.duration} min
+                          {episodeItem.duration} min
                         </p>
                       </div>
                     </Link>
@@ -307,4 +345,3 @@ export default function WatchEpisodePage() {
     </div>
   );
 }
-

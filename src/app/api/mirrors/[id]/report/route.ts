@@ -4,8 +4,8 @@ import { healthCheckerService } from "@/infrastructure/container";
 export const dynamic = "force-dynamic";
 
 /**
- * Endpoint invocado automáticamente por el reproductor cuando un Mirror falla al cargar.
- * Dispara una verificación HTTP HEAD inmediata sobre ese mirror y actualiza la disponibilidad.
+ * Endpoint invocado automáticamente por el reproductor cuando un Mirror falla al cargar (`POST /api/mirrors/[id]/report`).
+ * Dispara una verificación HTTP HEAD inmediata sobre ese mirror y recalcula la disponibilidad de la película.
  */
 export async function POST(
   _request: NextRequest,

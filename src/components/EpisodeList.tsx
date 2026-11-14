@@ -13,6 +13,9 @@ interface EpisodeListProps {
   fallbackBackdrop?: string | null;
 }
 
+/**
+ * Lista interactiva de capítulos de una serie con selector dinámico de temporadas (`EpisodeList`).
+ */
 export default function EpisodeList({
   seriesId,
   seasons,
@@ -25,12 +28,18 @@ export default function EpisodeList({
   const [episodes, setEpisodes] = useState<EpisodeDto[]>(initialEpisodes);
   const [isPending, startTransition] = useTransition();
 
+  /**
+   * Cambia la temporada activa y solicita sus episodios al servidor mediante Server Action.
+   */
   const handleSelectSeason = (seasonNumber: number) => {
     setSelectedSeasonNumber(seasonNumber);
     startTransition(async () => {
       try {
-        const fetched = await getSeasonEpisodesAction(seriesId, seasonNumber);
-        setEpisodes(fetched);
+        const fetchedEpisodes = await getSeasonEpisodesAction(
+          seriesId,
+          seasonNumber
+        );
+        setEpisodes(fetchedEpisodes);
       } catch (error) {
         console.error("Error al cargar episodios:", error);
       }
@@ -39,7 +48,6 @@ export default function EpisodeList({
 
   return (
     <section className="space-y-4">
-      {/* Selector de temporada */}
       <SeasonSelector
         seasons={seasons}
         selectedSeasonNumber={selectedSeasonNumber}
@@ -47,17 +55,16 @@ export default function EpisodeList({
         isLoading={isPending}
       />
 
-      {/* Lista de episodios */}
       {episodes.length === 0 ? (
         <div className="py-12 text-center text-zinc-500">
           No hay episodios cargados para esta temporada.
         </div>
       ) : (
         <div className="divide-y divide-zinc-800/80">
-          {episodes.map((ep) => (
+          {episodes.map((episode) => (
             <EpisodeCard
-              key={ep.id}
-              episode={ep}
+              key={episode.id}
+              episode={episode}
               fallbackBackdrop={fallbackBackdrop}
             />
           ))}
@@ -66,4 +73,3 @@ export default function EpisodeList({
     </section>
   );
 }
-

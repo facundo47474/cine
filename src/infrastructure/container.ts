@@ -16,6 +16,7 @@ import { SeriesService } from "@/application/services/SeriesService";
 
 /**
  * Composition Root (Contenedor de Inyección de Dependencias v2.0).
+ *
  * Conecta las implementaciones concretas de Infraestructura con los Servicios de Aplicación
  * respetando el Principio de Inversión de Dependencias (DIP - SOLID).
  */
@@ -25,9 +26,9 @@ const watchHistoryRepository = new PrismaWatchHistoryRepository(prisma);
 const seriesRepository = new PrismaSeriesRepository(prisma);
 
 const cacheService = new MemoryCacheService(500);
-const mirrorResolver = new AutoEmbedMirrorResolver();
-const linkProber = new HttpHeadLinkProber(7000);
 const tmdbGateway = new TmdbApiGateway(cacheService);
+const mirrorResolver = new AutoEmbedMirrorResolver(tmdbGateway);
+const linkProber = new HttpHeadLinkProber(7000);
 const tokenCryptoService = new TokenCryptoService();
 
 export const catalogService = new CatalogService(

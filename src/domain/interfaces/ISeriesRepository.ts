@@ -1,6 +1,7 @@
 import { Movie } from "../entities/Movie";
 import { Season } from "../entities/Season";
 import { Episode } from "../entities/Episode";
+import { EpisodeMirror } from "../entities/EpisodeMirror";
 import { CreateMirrorInput } from "./IMovieRepository";
 
 export interface UpsertEpisodeInput {
@@ -44,6 +45,9 @@ export interface EpisodeHierarchy {
   allSeasons: Season[];
 }
 
+/**
+ * Contrato de repositorio de dominio para la gestión de Series de TV, Temporadas, Episodios y sus Mirrors.
+ */
 export interface ISeriesRepository {
   findSeriesById(id: string): Promise<Movie | null>;
   findSeriesByTmdbId(tmdbId: number): Promise<Movie | null>;
@@ -53,6 +57,6 @@ export interface ISeriesRepository {
   findEpisodeHierarchy(episodeId: string): Promise<EpisodeHierarchy | null>;
   findSeriesDetails(idOrTmdbId: string): Promise<{ series: Movie; seasons: Season[] } | null>;
   upsertSeries(data: UpsertSeriesInput): Promise<{ series: Movie; seasons: Season[] }>;
-  saveEpisodeMirrors(episodeId: string, mirrors: CreateMirrorInput[]): Promise<void>;
+  saveEpisodeMirrors(episodeId: string, mirrors: CreateMirrorInput[]): Promise<EpisodeMirror[]>;
   findAvailableSeries(searchQuery?: string, genre?: string): Promise<Movie[]>;
 }

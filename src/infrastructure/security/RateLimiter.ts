@@ -10,13 +10,18 @@ export interface RateLimitResult {
 }
 
 /**
- * Limitador de peticiones en memoria ligero y compatible con entornos Serverless
- * para proteger endpoints de API y evitar saturación o scraping.
+ * Limitador de peticiones en memoria ligero y compatible con entornos Serverless (`RateLimiter`)
+ * para proteger endpoints de API frente a abuso o scraping automatizado.
  */
 export class RateLimiter {
   private readonly store = new Map<string, RateLimitEntry>();
   private readonly maxKeys = 2000;
 
+  /**
+   * Purga las entradas expiradas cuando el mapa supera el umbral máximo de claves (`maxKeys`).
+   *
+   * @param now Timestamp actual en milisegundos.
+   */
   private cleanupExpired(now: number): void {
     if (this.store.size <= this.maxKeys) return;
 
@@ -31,6 +36,14 @@ export class RateLimiter {
     }
   }
 
+  /**
+   * Verifica y registra una petición entrante bajo una ventana fija de tiempo (`windowMs`).
+   *
+   * @param key Identificador único del cliente y recurso (ej. `"movies:192.0.2.1"`).
+   * @param maxRequests Número máximo de peticiones permitidas dentro de la ventana.
+   * @param windowMs Duración de la ventana en milisegundos.
+   * @returns Estado del límite (`allowed`, `remaining`, `retryAfterSeconds`).
+   */
   public checkLimit(
     key: string,
     maxRequests: number,
@@ -76,6 +89,12 @@ export class RateLimiter {
 
 export const apiRateLimiter = new RateLimiter();
 
+/**
+ * Extrae la dirección IP real del cliente desde las cabeceras de proxy inverso (`x-forwarded-for` o `x-real-ip`).
+ *
+ * @param request Objeto `Request` entrante.
+ * @returns Dirección IP del cliente o `"unknown-ip"`.
+ */
 export function getClientIp(request: Request): string {
   const forwardedFor = request.headers.get("x-forwarded-for");
   if (forwardedFor) {
@@ -88,4 +107,3 @@ export function getClientIp(request: Request): string {
 
   return "unknown-ip";
 }
-

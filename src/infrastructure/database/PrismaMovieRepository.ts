@@ -1,54 +1,26 @@
-import { PrismaClient, MirrorLink as PrismaMirror, Movie as PrismaMovie } from "@prisma/client";
+import { MediaType, PrismaClient } from "@prisma/client";
 import {
   IMovieRepository,
   UpsertMovieInput,
 } from "@/domain/interfaces/IMovieRepository";
 import { Movie } from "@/domain/entities/Movie";
-import { MirrorLink } from "@/domain/entities/MirrorLink";
-import { MirrorFormat } from "@/domain/enums/MirrorFormat";
 import { MirrorStatus } from "@/domain/enums/MirrorStatus";
+import { mapPrismaMovieToDomain } from "./mappers/PrismaDomainMappers";
 
+/**
+ * Repositorio concreto de Películas (`Movie`) sobre PostgreSQL utilizando Prisma ORM.
+ */
 export class PrismaMovieRepository implements IMovieRepository {
   constructor(private readonly db: PrismaClient) {}
 
-  private mapMirrorToDomain(row: PrismaMirror): MirrorLink {
-    return new MirrorLink({
-      id: row.id,
-      movieId: row.movieId,
-      serverName: row.serverName,
-      language: row.language,
-      rawUrl: row.rawUrl,
-      format: row.format as MirrorFormat,
-      quality: row.quality,
-      priority: row.priority,
-      status: row.status as MirrorStatus,
-      consecutiveFailures: row.consecutiveFailures,
-      lastCheckedAt: row.lastCheckedAt,
-    });
-  }
-
-  private mapMovieToDomain(
-    row: PrismaMovie & { mirrors?: PrismaMirror[] }
-  ): Movie {
-    return new Movie({
-      id: row.id,
-      tmdbId: row.tmdbId,
-      mediaType: row.mediaType,
-      title: row.title,
-      originalTitle: row.originalTitle,
-      synopsis: row.synopsis,
-      posterUrl: row.posterUrl,
-      backdropUrl: row.backdropUrl,
-      releaseYear: row.releaseYear,
-      durationMins: row.durationMins,
-      rating: row.rating,
-      qualityBadge: row.qualityBadge,
-      genres: row.genres,
-      isAvailable: row.isAvailable,
-      mirrors: row.mirrors ? row.mirrors.map((m) => this.mapMirrorToDomain(m)) : [],
-    });
-  }
-
+  /**
+   * Busca todos los títulos disponibles en el catálogo local, permitiendo filtrar opcionalmente
+   * por texto libre (título, título original o sinopsis) y por género.
+   *
+   * @param searchQuery Texto opcional de búsqueda insensible a mayúsculas.
+   * @param genre Nombre del género opcional a filtrar.
+   * @returns Lista de entidades `Movie` con sus `mirrors` ordenados por prioridad.
+   */
   public async findAvailableCatalog(
     searchQuery?: string,
     genre?: string
@@ -60,7 +32,12 @@ export class PrismaMovieRepository implements IMovieRepository {
           ? {
               OR: [
                 { title: { contains: searchQuery, mode: "insensitive" } },
-                { originalTitle: { contains: searchQuery, mode: "insensitive" } },
+                {
+                  originalTitle: {
+                    contains: searchQuery,
+                    mode: "insensitive",
+                  },
+                },
                 { synopsis: { contains: searchQuery, mode: "insensitive" } },
               ],
             }
@@ -75,9 +52,15 @@ export class PrismaMovieRepository implements IMovieRepository {
       orderBy: [{ releaseYear: "desc" }, { createdAt: "desc" }],
     });
 
-    return rows.map((row) => this.mapMovieToDomain(row));
+    return rows.map((row) => mapPrismaMovieToDomain(row));
   }
 
+  /**
+   * Obtiene una película por su UUID local incluyendo todos sus mirrors ordenados por prioridad.
+   *
+   * @param id UUID de la película.
+   * @returns Entidad `Movie` o `null` si no existe.
+   */
   public async findByIdWithMirrors(id: string): Promise<Movie | null> {
     const row = await this.db.movie.findUnique({
       where: { id },
@@ -89,12 +72,23 @@ export class PrismaMovieRepository implements IMovieRepository {
     });
 
     if (!row) return null;
-    return this.mapMovieToDomain(row);
+    return mapPrismaMovieToDomain(row);
   }
 
+  /**
+   * Busca una película por su identificador numérico de TMDB (`tmdbId`).
+   * Verifica que el registro corresponda a `mediaType === "MOVIE"` para evitar colisiones
+   * en caso de que una serie y una película compartan el mismo número de ID en TMDB.
+   *
+   * @param tmdbId Identificador numérico de TMDB.
+   * @returns Entidad `Movie` o `null` si no está registrada como película.
+   */
   public async findByTmdbId(tmdbId: number): Promise<Movie | null> {
-    const row = await this.db.movie.findUnique({
-      where: { tmdbId },
+    const row = await this.db.movie.findFirst({
+      where: {
+        tmdbId,
+        mediaType: MediaType.MOVIE,
+      },
       include: {
         mirrors: {
           orderBy: { priority: "asc" },
@@ -103,59 +97,77 @@ export class PrismaMovieRepository implements IMovieRepository {
     });
 
     if (!row) return null;
-    return this.mapMovieToDomain(row);
+    return mapPrismaMovieToDomain(row);
   }
 
+  /**
+   * Crea o actualiza una película en el catálogo junto con su lista completa de enlaces mirror.
+   * Si el `tmdbId` ya está ocupado por un registro de tipo `SERIES`, crea la película con su propio UUID
+   * sin sobrescribir la serie existente.
+   *
+   * @param data Datos de la película y sus mirrors (`UpsertMovieInput`).
+   * @returns Entidad `Movie` persistida con sus nuevos mirrors.
+   */
   public async upsertMovieWithMirrors(data: UpsertMovieInput): Promise<Movie> {
-    const mirrorCreateData = data.mirrors.map((m, idx) => ({
-      serverName: m.serverName,
-      language: m.language || "Latino",
-      rawUrl: m.rawUrl,
-      format: m.format,
-      quality: m.quality || "1080p",
-      priority: m.priority ?? idx + 1,
+    const mirrorCreateData = data.mirrors.map((mirror, index) => ({
+      serverName: mirror.serverName,
+      language: mirror.language || "Latino",
+      rawUrl: mirror.rawUrl,
+      format: mirror.format,
+      quality: mirror.quality || "1080p",
+      priority: mirror.priority ?? index + 1,
       status: MirrorStatus.ACTIVE,
       consecutiveFailures: 0,
     }));
 
-    if (data.tmdbId) {
-      const existing = await this.db.movie.findUnique({
-        where: { tmdbId: data.tmdbId },
+    const targetMediaType: MediaType =
+      data.mediaType === "SERIES" ? MediaType.SERIES : MediaType.MOVIE;
+
+    let safeTmdbId: number | null = data.tmdbId ?? null;
+
+    if (safeTmdbId) {
+      const existingByTmdb = await this.db.movie.findUnique({
+        where: { tmdbId: safeTmdbId },
       });
 
-      if (existing) {
-        const updated = await this.db.movie.update({
-          where: { id: existing.id },
-          data: {
-            title: data.title,
-            originalTitle: data.originalTitle ?? existing.originalTitle,
-            synopsis: data.synopsis,
-            posterUrl: data.posterUrl,
-            backdropUrl: data.backdropUrl ?? existing.backdropUrl,
-            releaseYear: data.releaseYear,
-            durationMins: data.durationMins,
-            rating: data.rating,
-            qualityBadge: data.qualityBadge || existing.qualityBadge,
-            genres: data.genres || existing.genres,
-            mediaType: (data.mediaType as any) || existing.mediaType,
-            isAvailable: true,
-            mirrors: {
-              deleteMany: {},
-              create: mirrorCreateData,
+      if (existingByTmdb) {
+        if (existingByTmdb.mediaType === targetMediaType) {
+          const updated = await this.db.movie.update({
+            where: { id: existingByTmdb.id },
+            data: {
+              title: data.title,
+              originalTitle: data.originalTitle ?? existingByTmdb.originalTitle,
+              synopsis: data.synopsis,
+              posterUrl: data.posterUrl,
+              backdropUrl: data.backdropUrl ?? existingByTmdb.backdropUrl,
+              releaseYear: data.releaseYear,
+              durationMins: data.durationMins,
+              rating: data.rating,
+              qualityBadge: data.qualityBadge || existingByTmdb.qualityBadge,
+              genres: data.genres || existingByTmdb.genres,
+              mediaType: targetMediaType,
+              isAvailable: true,
+              mirrors: {
+                deleteMany: {},
+                create: mirrorCreateData,
+              },
             },
-          },
-          include: {
-            mirrors: { orderBy: { priority: "asc" } },
-          },
-        });
-        return this.mapMovieToDomain(updated);
+            include: {
+              mirrors: { orderBy: { priority: "asc" } },
+            },
+          });
+          return mapPrismaMovieToDomain(updated);
+        }
+
+        // Evita sobrescribir una Serie que comparta el mismo número de ID en TMDB
+        safeTmdbId = null;
       }
     }
 
     const created = await this.db.movie.create({
       data: {
-        tmdbId: data.tmdbId ?? null,
-        mediaType: (data.mediaType as any) || "MOVIE",
+        tmdbId: safeTmdbId,
+        mediaType: targetMediaType,
         title: data.title,
         originalTitle: data.originalTitle ?? null,
         synopsis: data.synopsis,
@@ -176,9 +188,15 @@ export class PrismaMovieRepository implements IMovieRepository {
       },
     });
 
-    return this.mapMovieToDomain(created);
+    return mapPrismaMovieToDomain(created);
   }
 
+  /**
+   * Actualiza el indicador lógico de disponibilidad (`isAvailable`) de una película.
+   *
+   * @param movieId UUID de la película.
+   * @param isAvailable Nuevo estado de disponibilidad.
+   */
   public async updateAvailability(
     movieId: string,
     isAvailable: boolean

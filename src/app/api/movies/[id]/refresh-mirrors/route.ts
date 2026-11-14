@@ -3,6 +3,9 @@ import { catalogService } from "@/infrastructure/container";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Fuerza la re-sincronización de los enlaces mirror de una película (`POST /api/movies/[id]/refresh-mirrors`).
+ */
 export async function POST(
   _request: NextRequest,
   { params }: { params: { id: string } }

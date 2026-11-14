@@ -1,5 +1,5 @@
 /**
- * Fuente única de verdad para detección universal de Streamwish y todos sus
+ * Fuente única de verdad para la detección universal de Streamwish y todos sus
  * dominios espejo (aliases), normalización de embeds y política de filtrado estricto.
  */
 
@@ -9,9 +9,11 @@ export const STRICT_STREAMWISH_ONLY: boolean =
       process.env.NEXT_PUBLIC_STRICT_STREAMWISH_ONLY !== "false"
     : true;
 
-// Contingencia automática activa por defecto: si Streamwish no está disponible
-// (ej. agregador con Anubis PoW o título ausente en Streamwish), permite servidores
-// extraíbles directamente a HLS/MP4 sin anuncios (Vidhide/Dropload/Mixdrop) marcados isDirty=true.
+/**
+ * Contingencia automática activa por defecto: si Streamwish no está disponible
+ * para un título específico, permite servidores extraíbles directamente a HLS/MP4
+ * sin anuncios (Vidhide, Dropload, Mixdrop, Filemoon) marcados con `isDirty = true`.
+ */
 export const FALLBACK_IF_EMPTY: boolean =
   typeof process !== "undefined"
     ? process.env.FALLBACK_IF_EMPTY !== "false" &&
@@ -109,33 +111,53 @@ export interface PrioritizedMirrorResult<T> {
   isDirty: boolean;
 }
 
+/**
+ * Extrae de forma segura el nombre de host en minúsculas desde cualquier cadena URL.
+ *
+ * @param rawUrl URL completa o parcial.
+ * @returns Hostname en minúsculas o cadena vacía si no es una URL válida.
+ */
 export function extractHostname(rawUrl?: string | null): string {
   if (!rawUrl) return "";
   const trimmed = rawUrl.trim();
   if (!trimmed) return "";
 
   try {
-    const withProto = /^https?:\/\//i.test(trimmed)
+    const urlWithProtocol = /^https?:\/\//i.test(trimmed)
       ? trimmed
       : trimmed.startsWith("//")
       ? `https:${trimmed}`
       : `https://${trimmed}`;
-    return new URL(withProto).hostname.toLowerCase();
+    return new URL(urlWithProtocol).hostname.toLowerCase();
   } catch {
     return "";
   }
 }
 
+/**
+ * Verifica si una cadena comienza con el protocolo `http://` o `https://`.
+ *
+ * @param value Cadena a evaluar.
+ * @returns `true` si es una URL HTTP/HTTPS.
+ */
 export function isHttpUrl(value?: string | null): boolean {
   if (!value) return false;
   return /^https?:\/\//i.test(value.trim());
 }
 
+/**
+ * Determina si una URL apunta a un agregador multi-embed intermedio (`embed69`, `playlatinsrc`, `vidsrc`, etc.)
+ * en lugar de un servidor de video final.
+ *
+ * @param rawUrl URL a verificar.
+ * @returns `true` si pertenece a un agregador multi-embed conocido.
+ */
 export function isMultiEmbedAggregatorUrl(rawUrl?: string | null): boolean {
   const host = extractHostname(rawUrl);
   if (!host) return false;
   return MULTI_EMBED_AGGREGATOR_HOSTS.some(
-    (agg) => host === agg || host.endsWith(`.${agg}`)
+    (aggregatorHost) =>
+      host === aggregatorHost || host.endsWith(`.${aggregatorHost}`)
   );
 }
 
@@ -143,8 +165,11 @@ const EXTRACTABLE_FALLBACK_HOST_REGEX =
   /morencius\.com|vidhide|dr0pstream\.com|dropload|mxdrop\.|mixdrop|filemoon/i;
 
 /**
- * Detecta servidores cuyo stream crudo (.m3u8/.mp4) puede extraerse en el backend
- * y reproducirse nativamente en HTML5 <video> con cero anuncios (además de Streamwish).
+ * Detecta servidores cuyo stream crudo (`.m3u8` / `.mp4`) puede extraerse en el backend
+ * y reproducirse nativamente en HTML5 `<video>` con cero anuncios (además de Streamwish).
+ *
+ * @param target URL o descriptor de candidato de servidor.
+ * @returns `true` si el servidor soporta extracción directa limpia.
  */
 export function isExtractableCleanHost(
   target?: string | StreamwishCandidateInput | null
@@ -161,10 +186,16 @@ export function isExtractableCleanHost(
     return EXTRACTABLE_FALLBACK_HOST_REGEX.test(candidateUrl.toLowerCase());
   }
 
-  const labels = `${target.serverName || ""} ${target.label || ""} ${target.name || ""} ${target.server || ""}`.toLowerCase();
-  return EXTRACTABLE_FALLBACK_HOST_REGEX.test(labels);
+  const combinedLabels = `${target.serverName || ""} ${target.label || ""} ${target.name || ""} ${target.server || ""}`.toLowerCase();
+  return EXTRACTABLE_FALLBACK_HOST_REGEX.test(combinedLabels);
 }
 
+/**
+ * Verifica si un nombre de host pertenece a la red de dominios oficiales o espejos de Streamwish.
+ *
+ * @param hostname Nombre de host (ej. `hglink.to`, `sfastwish.com`).
+ * @returns `true` si es un dominio de Streamwish.
+ */
 export function isStreamwishHostname(hostname?: string | null): boolean {
   if (!hostname) return false;
   const host = hostname.trim().toLowerCase();
@@ -181,6 +212,12 @@ export function isStreamwishHostname(hostname?: string | null): boolean {
   return STREAMWISH_HOST_REGEX.test(host);
 }
 
+/**
+ * Evalúa si una URL completa apunta a un dominio de Streamwish.
+ *
+ * @param rawUrl URL del servidor o embed.
+ * @returns `true` si el host de la URL pertenece a Streamwish.
+ */
 export function isStreamwishUrl(rawUrl?: string | null): boolean {
   if (!rawUrl) return false;
   const trimmed = rawUrl.trim();
@@ -192,6 +229,12 @@ export function isStreamwishUrl(rawUrl?: string | null): boolean {
   return isStreamwishHostname(host);
 }
 
+/**
+ * Evalúa si el nombre o etiqueta de un servidor corresponde a Streamwish.
+ *
+ * @param label Nombre del servidor (ej. `"Streamwish-Lat"`).
+ * @returns `true` si coincide con el patrón de nombres de Streamwish.
+ */
 export function isStreamwishServerName(label?: string | null): boolean {
   if (!label) return false;
   return STREAMWISH_LABEL_REGEX.test(label.trim());
@@ -199,8 +242,11 @@ export function isStreamwishServerName(label?: string | null): boolean {
 
 /**
  * Evalúa de forma universal si un servidor o URL pertenece a la familia Streamwish.
- * Cuando hay una URL HTTP externa real, el hostname de la URL es la verdad autoritativa
- * para evitar falsos positivos por etiquetas heredadas (ej. "Streamwish-Lat" apuntando a vidsrc/dropload).
+ * Cuando existe una URL HTTP externa real, el hostname de la URL es la verdad autoritativa
+ * para impedir falsos positivos por etiquetas heredadas.
+ *
+ * @param target Cadena de texto (URL o nombre) u objeto descriptor del candidato.
+ * @returns `true` si es un servidor Streamwish verificado.
  */
 export function isStreamwish(
   target: string | StreamwishCandidateInput | null | undefined
@@ -210,7 +256,11 @@ export function isStreamwish(
   if (typeof target === "string") {
     const trimmed = target.trim();
     if (!trimmed) return false;
-    if (isHttpUrl(trimmed) || trimmed.startsWith("//") || trimmed.includes(".")) {
+    if (
+      isHttpUrl(trimmed) ||
+      trimmed.startsWith("//") ||
+      trimmed.includes(".")
+    ) {
       if (isStreamwishUrl(trimmed)) return true;
       if (isHttpUrl(trimmed)) return false;
     }
@@ -219,7 +269,6 @@ export function isStreamwish(
 
   const candidateUrl = (target.rawUrl || target.url || "").trim();
   if (candidateUrl && isHttpUrl(candidateUrl)) {
-    // Una URL externa concreta manda sobre la etiqueta para evitar servidores sucios disfrazados.
     return isStreamwishUrl(candidateUrl);
   }
 
@@ -232,11 +281,18 @@ export function isStreamwish(
     target.label,
     target.name,
     target.server,
-  ].filter((v): v is string => Boolean(v && v.trim()));
+  ].filter((value): value is string => Boolean(value && value.trim()));
 
-  return labels.some((lbl) => isStreamwishServerName(lbl));
+  return labels.some((label) => isStreamwishServerName(label));
 }
 
+/**
+ * Extrae el código alfanumérico del archivo de video desde una URL embed de Streamwish
+ * (`/e/{code}`, `/embed/{code}`, `/f/{code}`, `/d/{code}`).
+ *
+ * @param rawUrl URL del embed de Streamwish.
+ * @returns Código del archivo o `null` si no coincide con el formato.
+ */
 export function extractStreamwishCode(rawUrl?: string | null): string | null {
   if (!rawUrl) return null;
   const match = rawUrl
@@ -246,29 +302,30 @@ export function extractStreamwishCode(rawUrl?: string | null): string | null {
 }
 
 /**
- * Normaliza dominios antiguos o rotativos de Streamwish hacia el host canónico
- * preservando el file code para extracción y reproducción.
+ * Normaliza dominios antiguos o rotativos de Streamwish hacia el host canónico (`hglink.to`)
+ * preservando el código del archivo para extracción y reproducción.
+ *
+ * @param rawUrl URL original de Streamwish.
+ * @returns URL de embed normalizada.
  */
 export function normalizeStreamwishEmbedUrl(rawUrl: string): string {
   const trimmed = rawUrl.trim();
   if (!isStreamwishUrl(trimmed)) return trimmed;
 
-  const code = extractStreamwishCode(trimmed);
-  if (!code) return trimmed;
+  const fileCode = extractStreamwishCode(trimmed);
+  if (!fileCode) return trimmed;
 
   const host = extractHostname(trimmed);
-  // Dominios ya optimizados para iframe/extracción directa se conservan tal cual;
-  // aliases rotativos (*.wish.* / swdyu) se normalizan a hglink.to para consistencia.
   if (
     host === "hglink.to" ||
     host === "audinifer.com" ||
     host === "vibuxer.com" ||
     host === "hanerix.com"
   ) {
-    return `https://${host}/e/${code}`;
+    return `https://${host}/e/${fileCode}`;
   }
 
-  return `https://hglink.to/e/${code}`;
+  return `https://hglink.to/e/${fileCode}`;
 }
 
 export interface StreamwishExtractionTarget {
@@ -278,18 +335,25 @@ export interface StreamwishExtractionTarget {
 }
 
 /**
- * Genera la lista completa de endpoints de extracción para cualquier variante de Streamwish,
- * probando los nodos directos conocidos (audinifer, vibuxer, hglink) y el origen del alias original.
+ * Genera la lista completa de endpoints espejo de extracción para cualquier variante de Streamwish,
+ * probando los nodos directos conocidos (`audinifer.com`, `vibuxer.com`, `hglink.to`) y el origen original.
+ *
+ * @param embedUrl URL de embed de Streamwish.
+ * @returns Lista deduplicada de objetivos de extracción con su cabecera Referer correspondiente.
  */
 export function buildStreamwishExtractionTargets(
   embedUrl: string
 ): StreamwishExtractionTarget[] {
   const targets: StreamwishExtractionTarget[] = [];
-  const seen = new Set<string>();
+  const seenUrls = new Set<string>();
 
-  const add = (fetchUrl: string, referer: string, sourceEmbedUrl: string) => {
-    if (!seen.has(fetchUrl)) {
-      seen.add(fetchUrl);
+  const registerTarget = (
+    fetchUrl: string,
+    referer: string,
+    sourceEmbedUrl: string
+  ) => {
+    if (!seenUrls.has(fetchUrl)) {
+      seenUrls.add(fetchUrl);
       targets.push({ fetchUrl, referer, sourceEmbedUrl });
     }
   };
@@ -298,47 +362,55 @@ export function buildStreamwishExtractionTargets(
   try {
     origin = new URL(embedUrl).origin;
   } catch {
-    // Usar fallback hglink.to
+    // Mantener hglink.to como origen por defecto
   }
 
   if (isStreamwishUrl(embedUrl)) {
     const fileCode = extractStreamwishCode(embedUrl);
     if (fileCode) {
-      const canonicalSwEmbed = normalizeStreamwishEmbedUrl(embedUrl);
-      add(
+      const canonicalStreamwishEmbed = normalizeStreamwishEmbedUrl(embedUrl);
+      registerTarget(
         `https://audinifer.com/e/${fileCode}`,
         "https://hglink.to/",
-        canonicalSwEmbed
+        canonicalStreamwishEmbed
       );
-      add(
+      registerTarget(
         `https://vibuxer.com/e/${fileCode}`,
         "https://hglink.to/",
-        canonicalSwEmbed
+        canonicalStreamwishEmbed
       );
-      add(
+      registerTarget(
         `https://hglink.to/e/${fileCode}`,
         "https://hglink.to/",
-        canonicalSwEmbed
+        canonicalStreamwishEmbed
       );
       if (
         origin !== "https://audinifer.com" &&
         origin !== "https://vibuxer.com" &&
         origin !== "https://hglink.to"
       ) {
-        add(`${origin}/e/${fileCode}`, `${origin}/`, canonicalSwEmbed);
+        registerTarget(
+          `${origin}/e/${fileCode}`,
+          `${origin}/`,
+          canonicalStreamwishEmbed
+        );
       }
     }
   }
 
-  add(embedUrl, `${origin}/`, embedUrl);
+  registerTarget(embedUrl, `${origin}/`, embedUrl);
   return targets;
 }
 
 /**
  * Aplica de forma determinista el filtrado y priorización estricta para cualquier lista de mirrors:
- * - Streamwish siempre ocupa los primeros índices (índice 0+).
- * - Si strictOnly=true: devuelve únicamente Streamwish.
- * - Si strictOnly=true y no hay Streamwish y fallbackIfEmpty=true: activa contingencia marcando isDirty=true.
+ * - Streamwish siempre ocupa las primeras posiciones.
+ * - Si `strictOnly = true`: devuelve únicamente mirrors de Streamwish.
+ * - Si `strictOnly = true`, no hay Streamwish y `fallbackIfEmpty = true`: activa contingencia marcando `isDirty = true`.
+ *
+ * @param mirrors Lista de candidatos de mirrors a evaluar.
+ * @param options Opciones de política de filtrado (`strictOnly`, `fallbackIfEmpty`).
+ * @returns Lista priorizada y anotada con banderas `isStreamwish` e `isDirty`.
  */
 export function filterAndPrioritizeMirrors<
   T extends StreamwishCandidateInput & { priority?: number }
@@ -349,44 +421,52 @@ export function filterAndPrioritizeMirrors<
   const strictOnly = options?.strictOnly ?? STRICT_STREAMWISH_ONLY;
   const fallbackIfEmpty = options?.fallbackIfEmpty ?? FALLBACK_IF_EMPTY;
 
-  const annotated = mirrors.map((item, idx) => {
-    const clean = isStreamwish(item);
-    const extractable = clean || isExtractableCleanHost(item);
+  const annotatedMirrors = mirrors.map((item, originalIndex) => {
+    const belongsToStreamwish = isStreamwish(item);
+    const isCleanExtractable =
+      belongsToStreamwish || isExtractableCleanHost(item);
+
     return {
       item,
-      isStreamwish: clean,
-      isExtractable: extractable,
-      isDirty: !clean,
-      originalIndex: idx,
+      isStreamwish: belongsToStreamwish,
+      isExtractable: isCleanExtractable,
+      isDirty: !belongsToStreamwish,
+      originalIndex,
     };
   });
 
-  const sorted = [...annotated].sort((a, b) => {
-    if (a.isStreamwish !== b.isStreamwish) {
-      return a.isStreamwish ? -1 : 1;
+  const sortedMirrors = [...annotatedMirrors].sort((first, second) => {
+    if (first.isStreamwish !== second.isStreamwish) {
+      return first.isStreamwish ? -1 : 1;
     }
-    if (a.isExtractable !== b.isExtractable) {
-      return a.isExtractable ? -1 : 1;
+    if (first.isExtractable !== second.isExtractable) {
+      return first.isExtractable ? -1 : 1;
     }
-    const pa = a.item.priority ?? 99;
-    const pb = b.item.priority ?? 99;
-    if (pa !== pb) return pa - pb;
-    return a.originalIndex - b.originalIndex;
+    const firstPriority = first.item.priority ?? 99;
+    const secondPriority = second.item.priority ?? 99;
+    if (firstPriority !== secondPriority) {
+      return firstPriority - secondPriority;
+    }
+    return first.originalIndex - second.originalIndex;
   });
 
-  const streamwishOnly = sorted.filter((entry) => entry.isStreamwish);
+  const streamwishOnlyMirrors = sortedMirrors.filter(
+    (entry) => entry.isStreamwish
+  );
 
   if (strictOnly) {
-    if (streamwishOnly.length > 0) {
-      return streamwishOnly.map(({ item, isStreamwish: sw, isDirty }) => ({
-        item,
-        isStreamwish: sw,
-        isDirty,
-      }));
+    if (streamwishOnlyMirrors.length > 0) {
+      return streamwishOnlyMirrors.map(
+        ({ item, isStreamwish: sw, isDirty }) => ({
+          item,
+          isStreamwish: sw,
+          isDirty,
+        })
+      );
     }
 
     if (fallbackIfEmpty) {
-      return sorted.map(({ item, isStreamwish: sw, isDirty }) => ({
+      return sortedMirrors.map(({ item, isStreamwish: sw, isDirty }) => ({
         item,
         isStreamwish: sw,
         isDirty,
@@ -396,7 +476,7 @@ export function filterAndPrioritizeMirrors<
     return [];
   }
 
-  return sorted.map(({ item, isStreamwish: sw, isDirty }) => ({
+  return sortedMirrors.map(({ item, isStreamwish: sw, isDirty }) => ({
     item,
     isStreamwish: sw,
     isDirty,
@@ -421,4 +501,3 @@ export const streamwishMatcher = {
   buildStreamwishExtractionTargets,
   filterAndPrioritizeMirrors,
 } as const;
-

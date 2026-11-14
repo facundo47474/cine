@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
 import { catalogService, watchHistoryService } from "@/infrastructure/container";
-import { authOptions } from "@/infrastructure/auth/authOptions";
+import { getAuthenticatedUserId } from "@/infrastructure/auth/sessionHelper";
 import {
   apiRateLimiter,
   getClientIp,
@@ -9,6 +8,10 @@ import {
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Obtiene los datos de reproducción, streams firmados con AES-256-GCM y el progreso guardado
+ * de una película (`GET /api/movies/[id]/play`).
+ */
 export async function GET(
   request: NextRequest,
   { params }: { params: { id: string } }
@@ -36,8 +39,7 @@ export async function GET(
       );
     }
 
-    const session = await getServerSession(authOptions);
-    const userId = (session?.user as { id?: string } | undefined)?.id;
+    const userId = await getAuthenticatedUserId();
 
     if (!userId) {
       return NextResponse.json(
@@ -47,7 +49,8 @@ export async function GET(
     }
 
     const idOrTmdbSlug = decodeURIComponent(params.id);
-    const playbackData = await catalogService.getMoviePlaybackData(idOrTmdbSlug);
+    const playbackData =
+      await catalogService.getMoviePlaybackData(idOrTmdbSlug);
 
     if (!playbackData) {
       return NextResponse.json(

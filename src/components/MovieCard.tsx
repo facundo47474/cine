@@ -21,6 +21,12 @@ interface MovieCardProps {
   episodeTitle?: string;
 }
 
+/**
+ * Tarjeta visual de póster 2:3 para Películas y Series (`MovieCard`).
+ *
+ * Soporta tanto grillas de exploración (`fullWidth = true`) como carruseles horizontales,
+ * incluyendo barra de progreso roja e insignia de capítulo en curso (`SERIE • T1:E3`).
+ */
 export default function MovieCard({
   id,
   title,
@@ -109,7 +115,9 @@ export default function MovieCard({
         <div className="flex items-center justify-between text-[11px] sm:text-xs text-zinc-400">
           <span className="truncate">
             {isSeries && seasonNumber && episodeNumber
-              ? `T${seasonNumber}:E${episodeNumber}${episodeTitle ? ` • ${episodeTitle}` : ""}`
+              ? `T${seasonNumber}:E${episodeNumber}${
+                  episodeTitle ? ` • ${episodeTitle}` : ""
+                }`
               : releaseYear}
           </span>
           {typeof rating === "number" && (

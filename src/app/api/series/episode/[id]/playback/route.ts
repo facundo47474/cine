@@ -1,17 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
 import { seriesService } from "@/infrastructure/container";
-import { authOptions } from "@/infrastructure/auth/authOptions";
+import { getAuthenticatedUserId } from "@/infrastructure/auth/sessionHelper";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Obtiene la información de reproducción, capítulos adyacentes y streams firmados de un episodio
+ * (`GET /api/series/episode/[id]/playback`).
+ */
 export async function GET(
-  request: NextRequest,
+  _request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
-    const session = await getServerSession(authOptions);
-    const userId = (session?.user as { id?: string } | undefined)?.id;
+    const userId = await getAuthenticatedUserId();
 
     const playback = await seriesService.getEpisodePlaybackData(
       params.id,
@@ -27,11 +29,16 @@ export async function GET(
 
     return NextResponse.json({ ok: true, playback });
   } catch (error) {
-    console.error(`[GET /api/series/episode/${params.id}/playback] Error:`, error);
+    console.error(
+      `[GET /api/series/episode/${params.id}/playback] Error:`,
+      error
+    );
     return NextResponse.json(
-      { ok: false, error: "Error obteniendo datos de reproducción del episodio." },
+      {
+        ok: false,
+        error: "Error obteniendo datos de reproducción del episodio.",
+      },
       { status: 500 }
     );
   }
 }
-

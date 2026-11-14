@@ -1,12 +1,5 @@
-import crypto from "crypto";
 import dns from "dns";
 import { NextRequest, NextResponse } from "next/server";
-
-try {
-  dns.setDefaultResultOrder("ipv4first");
-} catch {
-  // Silencioso
-}
 import { getServerSession } from "next-auth";
 import { tokenCryptoService } from "@/infrastructure/container";
 import {
@@ -22,46 +15,32 @@ import {
 import {
   FALLBACK_IF_EMPTY,
   STRICT_STREAMWISH_ONLY,
-  buildStreamwishExtractionTargets,
-  filterAndPrioritizeMirrors,
   isMultiEmbedAggregatorUrl,
   isStreamwish,
   isStreamwishUrl,
   normalizeStreamwishEmbedUrl,
 } from "@/domain/utils/streamwishMatcher";
+import { resolveBestEmbedFromEmbed69Url } from "@/infrastructure/providers/Embed69Decoder";
+import { resolveBestEmbedFromPlayLatinByUrl } from "@/infrastructure/providers/PlayLatinClient";
+import {
+  DirectHlsStreamInfo,
+  extractDirectHlsFromStreamwishEmbed,
+} from "@/infrastructure/providers/StreamManifestExtractor";
+
+try {
+  dns.setDefaultResultOrder("ipv4first");
+} catch {
+  // Silencioso en entornos donde no aplique
+}
 
 export const dynamic = "force-dynamic";
 
-interface Embed69ServerEntry {
-  servername?: string;
-  link?: string;
-  type?: string;
-}
-
-interface Embed69LanguageBlock {
-  file_id?: number;
-  video_language?: string;
-  sortedEmbeds?: Embed69ServerEntry[];
-}
-
-interface PlayLatinSourceEntry {
-  url?: string;
-  server?: string;
-  name?: string;
-  version?: string;
-}
-
-interface PlayLatinResolveResponse {
-  sources?: PlayLatinSourceEntry[];
-}
-
-interface Embed69ResolutionResult {
-  url: string | null;
-  status: "RESOLVED" | "NOT_FOUND" | "BLOCKED_OR_ERROR";
-  cleanEmbedUrl: string;
-  isStreamwish: boolean;
-}
-
+/**
+ * Escapa caracteres especiales para su inserción segura en atributos HTML.
+ *
+ * @param value Cadena original.
+ * @returns Cadena con entidades HTML escapadas.
+ */
 function escapeHtmlAttribute(value: string): string {
   return value
     .replace(/&/g, "&amp;")
@@ -71,6 +50,12 @@ function escapeHtmlAttribute(value: string): string {
     .replace(/>/g, "&gt;");
 }
 
+/**
+ * Añade el parámetro `autoplay=1` a una URL para pantallas Smart TV.
+ *
+ * @param rawUrl URL destino.
+ * @returns URL con `autoplay=1`.
+ */
 function appendAutoplayParam(rawUrl: string): string {
   try {
     const parsed = new URL(rawUrl);
@@ -85,13 +70,20 @@ function appendAutoplayParam(rawUrl: string): string {
   }
 }
 
+/**
+ * Añade el fragmento `#t={seconds}` a una URL de embed si existe un punto de reanudación mayor a 5 segundos.
+ *
+ * @param rawUrl URL destino.
+ * @param startSeconds Segundo de inicio.
+ * @returns URL con el hash temporal de reanudación.
+ */
 function appendResumeTimeParam(rawUrl: string, startSeconds: number): string {
   if (!startSeconds || startSeconds <= 5) return rawUrl;
   try {
     const parsed = new URL(rawUrl);
-    const sec = Math.floor(startSeconds);
+    const roundedSeconds = Math.floor(startSeconds);
     if (!parsed.hash) {
-      parsed.hash = `t=${sec}`;
+      parsed.hash = `t=${roundedSeconds}`;
     }
     return parsed.toString();
   } catch {
@@ -99,743 +91,43 @@ function appendResumeTimeParam(rawUrl: string, startSeconds: number): string {
   }
 }
 
-function getServerPriorityWeight(
-  servername?: string,
-  rawUrl?: string
-): number {
-  if (isStreamwish({ serverName: servername, url: rawUrl })) return 1;
-  const normalized = `${servername || ""} ${rawUrl || ""}`.toLowerCase();
-  if (normalized.includes("mixdrop") || normalized.includes("mxdrop")) return 2;
-  if (normalized.includes("vidhide") || normalized.includes("morencius")) return 3;
-  if (normalized.includes("filemoon")) return 4;
-  if (normalized.includes("voe")) return 5;
-  if (normalized.includes("dropload") || normalized.includes("dr0pstream")) return 6;
-  if (normalized.includes("doodstream") || normalized.includes("dood")) return 7;
-  if (normalized.includes("rapidvideo")) return 8;
-  return 9;
-}
+/**
+ * Valida que la cabecera `Referer` (si está presente) provenga del mismo host de la aplicación
+ * para bloquear intentos de hotlinking desde sitios externos.
+ *
+ * @param request Petición `NextRequest` entrante.
+ * @returns `true` si el origen es válido; `false` si debe bloquearse.
+ */
+function isRefererHostAllowed(request: NextRequest): boolean {
+  const referer = request.headers.get("referer");
+  if (!referer) return true;
 
-function solveEmbed69AesKey(
-  challenge: string,
-  difficulty: number,
-  salt: string
-): Buffer | null {
   try {
-    const safeDifficulty = Math.min(Math.max(1, difficulty), 5);
-    const prefix = "0".repeat(safeDifficulty);
-    const maxIterations = 500_000;
-
-    for (let nonce = 0; nonce < maxIterations; nonce++) {
-      const hashHex = crypto
-        .createHash("sha256")
-        .update(challenge + String(nonce))
-        .digest("hex");
-
-      if (hashHex.startsWith(prefix)) {
-        return crypto
-          .createHash("sha256")
-          .update(challenge + String(nonce) + salt)
-          .digest();
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-function decryptEmbed69Link(
-  encryptedBase64: string,
-  aesKey: Buffer
-): string | null {
-  try {
-    if (
-      encryptedBase64.startsWith("http://") ||
-      encryptedBase64.startsWith("https://")
-    ) {
-      return encryptedBase64;
-    }
-    const raw = Buffer.from(encryptedBase64, "base64");
-    if (raw.length <= 16) return null;
-
-    const iv = raw.subarray(0, 16);
-    const ciphertext = raw.subarray(16);
-    const decipher = crypto.createDecipheriv(
-      "aes-256-cbc",
-      aesKey.subarray(0, 32),
-      iv
+    const refererHost = new URL(referer).host.toLowerCase();
+    const allowedHosts = new Set(
+      [
+        request.nextUrl.host,
+        request.headers.get("x-forwarded-host"),
+        request.headers.get("host"),
+      ]
+        .filter((host): host is string => Boolean(host))
+        .map((host) => host.split(",")[0].trim().toLowerCase())
     );
-    const decrypted = Buffer.concat([
-      decipher.update(ciphertext),
-      decipher.final(),
-    ]).toString("utf8");
 
-    return decrypted.replace(/`/g, "").trim() || null;
+    return allowedHosts.size === 0 || allowedHosts.has(refererHost);
   } catch {
-    return null;
+    return false;
   }
 }
 
 /**
- * Extrae y desencripta directamente en el servidor los enlaces de Embed69
- * aplicando STRICT_STREAMWISH_ONLY / FALLBACK_IF_EMPTY mediante streamwishMatcher.
+ * Construye una respuesta HTML mínima que notifica a la ventana padre (`SmartVideoPlayer`)
+ * que el mirror actual falló (`PILOTO_STREAM_ERROR`) para activar el failover inmediato.
+ *
+ * @param mirrorId Identificador del mirror que falló.
+ * @returns Respuesta `NextResponse` con el script de notificación.
  */
-async function resolveDirectStreamwishUrlFromEmbed69(
-  rawUrl: string
-): Promise<Embed69ResolutionResult> {
-  let cleanEmbedUrl = rawUrl;
-  try {
-    const parsedUrl = new URL(rawUrl);
-    const requestedLang = (
-      parsedUrl.searchParams.get("lang") || "LAT"
-    ).toUpperCase();
-    const baseCleanUrl = `${parsedUrl.origin}${parsedUrl.pathname}`;
-    cleanEmbedUrl = baseCleanUrl;
-
-    const candidateUrls = [baseCleanUrl];
-    const epMatch = baseCleanUrl.match(
-      /^(https?:\/\/[^/]+\/f\/tt\d+-\d+x)(\d+)$/i
-    );
-    if (epMatch) {
-      const prefix = epMatch[1];
-      const epDigits = epMatch[2];
-      const unpadded = String(Number(epDigits));
-      const padded = unpadded.padStart(2, "0");
-      const altUrl =
-        epDigits === padded ? `${prefix}${unpadded}` : `${prefix}${padded}`;
-      if (altUrl !== baseCleanUrl) {
-        candidateUrls.push(altUrl);
-      }
-    }
-
-    const fetchCandidate = async (
-      fetchUrl: string
-    ): Promise<{
-      html: string | null;
-      notFound: boolean;
-      blockedOrError: boolean;
-      resolvedUrl: string;
-    }> => {
-      try {
-        const res = await fetch(fetchUrl, {
-          method: "GET",
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            Accept:
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          },
-          signal: AbortSignal.timeout(2500),
-        });
-
-        if (res.status === 404) {
-          return {
-            html: null,
-            notFound: true,
-            blockedOrError: false,
-            resolvedUrl: fetchUrl,
-          };
-        }
-
-        if (!res.ok) {
-          return {
-            html: null,
-            notFound: false,
-            blockedOrError: true,
-            resolvedUrl: fetchUrl,
-          };
-        }
-
-        const text = await res.text();
-        if (
-          text.includes("No folders found") ||
-          (!text.includes("dataLink") && !text.includes("data-url="))
-        ) {
-          return {
-            html: null,
-            notFound: true,
-            blockedOrError: false,
-            resolvedUrl: fetchUrl,
-          };
-        }
-
-        return {
-          html: text,
-          notFound: false,
-          blockedOrError: false,
-          resolvedUrl: fetchUrl,
-        };
-      } catch {
-        return {
-          html: null,
-          notFound: false,
-          blockedOrError: true,
-          resolvedUrl: fetchUrl,
-        };
-      }
-    };
-
-    const results = await Promise.all(
-      candidateUrls.map((u) => fetchCandidate(u))
-    );
-    const validHit = results.find((r) => Boolean(r.html));
-
-    if (!validHit || !validHit.html) {
-      const anyBlocked = results.some((r) => r.blockedOrError);
-      return {
-        url: null,
-        status: anyBlocked ? "BLOCKED_OR_ERROR" : "NOT_FOUND",
-        cleanEmbedUrl,
-        isStreamwish: false,
-      };
-    }
-
-    cleanEmbedUrl = validHit.resolvedUrl;
-    const html = validHit.html;
-
-    const getLangRank = (langRaw: string) => {
-      const lang = langRaw.toUpperCase();
-      if (requestedLang === "SUB") {
-        if (lang === "SUB" || lang === "VOSE") return 1;
-        if (lang === "LAT" || lang === "LATINO") return 2;
-        return 3;
-      }
-      if (lang === "LAT" || lang === "LATINO") return 1;
-      if (lang === "ESP" || lang === "CASTELLANO") return 2;
-      return 3;
-    };
-
-    // Nuevo formato DOM de Embed69 (<li data-url="https://..." data-lang="0">)
-    if (html.includes("data-url=")) {
-      const langByCode = new Map<string, string>([
-        ["0", "LAT"],
-        ["1", "ESP"],
-        ["2", "SUB"],
-      ]);
-
-      const selectBlock = html.match(
-        /<ul[^>]*class="[^"]*SelectLangDisp[^"]*"[^>]*>([\s\S]*?)<\/ul>/i
-      );
-      if (selectBlock?.[1]) {
-        const liRegex = /<li[^>]*data-lang="([^"]+)"[^>]*>([\s\S]*?)<\/li>/gi;
-        let liMatch: RegExpExecArray | null;
-        while ((liMatch = liRegex.exec(selectBlock[1])) !== null) {
-          const code = liMatch[1].trim();
-          const inner = liMatch[2];
-          if (/LAT\.png|latino/i.test(inner)) langByCode.set(code, "LAT");
-          else if (/ESP\.png|espa|castellano/i.test(inner))
-            langByCode.set(code, "ESP");
-          else if (/SUB\.png|subtitulado|vose/i.test(inner))
-            langByCode.set(code, "SUB");
-        }
-      }
-
-      const domEntries: {
-        lang: string;
-        serverName: string;
-        url: string;
-        priority: number;
-      }[] = [];
-      const optionLiRegex =
-        /<li([^>]*data-url="[^"]+"[^>]*)>([\s\S]*?)<\/li>/gi;
-      let optMatch: RegExpExecArray | null;
-      while ((optMatch = optionLiRegex.exec(html)) !== null) {
-        const attrs = optMatch[1];
-        const inner = optMatch[2];
-        if (/data-download\s*=\s*["']1["']/i.test(attrs)) continue;
-
-        const urlMatch = attrs.match(/data-url="([^"]+)"/i);
-        if (!urlMatch?.[1]) continue;
-
-        const candidateUrl = urlMatch[1].trim();
-        if (!candidateUrl.startsWith("http") || /1fichier\.com/i.test(candidateUrl))
-          continue;
-
-        const langCode =
-          attrs.match(/data-lang="([^"]*)"/i)?.[1]?.trim() ?? "0";
-        const lang = langByCode.get(langCode) || "LAT";
-        const serverName =
-          inner.match(/<span>([^<]+)<\/span>/i)?.[1]?.trim() ||
-          inner.match(/alt="([^"]+)"/i)?.[1]?.trim() ||
-          candidateUrl;
-
-        const normalizedUrl = isStreamwish({ serverName, url: candidateUrl })
-          ? normalizeStreamwishEmbedUrl(candidateUrl)
-          : candidateUrl;
-
-        domEntries.push({
-          lang,
-          serverName,
-          url: normalizedUrl,
-          priority:
-            getLangRank(lang) * 100 +
-            getServerPriorityWeight(serverName, normalizedUrl),
-        });
-      }
-
-      const filteredDom = filterAndPrioritizeMirrors(domEntries, {
-        strictOnly: STRICT_STREAMWISH_ONLY,
-        fallbackIfEmpty: FALLBACK_IF_EMPTY,
-      });
-
-      if (filteredDom.length > 0) {
-        return {
-          url: filteredDom[0].item.url,
-          status: "RESOLVED",
-          cleanEmbedUrl,
-          isStreamwish: filteredDom[0].isStreamwish,
-        };
-      }
-    }
-
-    const challengeMatch = html.match(/POW_CHALLENGE\s*=\s*'([^']+)'/);
-    const difficultyMatch = html.match(/POW_DIFFICULTY\s*=\s*(\d+)/);
-    const saltMatch = html.match(/POW_SALT\s*=\s*'([^']+)'/);
-
-    if (!challengeMatch || !difficultyMatch || !saltMatch) {
-      return {
-        url: null,
-        status: "BLOCKED_OR_ERROR",
-        cleanEmbedUrl,
-        isStreamwish: false,
-      };
-    }
-
-    const aesKey = solveEmbed69AesKey(
-      challengeMatch[1],
-      Number(difficultyMatch[1]),
-      saltMatch[1]
-    );
-    if (!aesKey) {
-      return {
-        url: null,
-        status: "BLOCKED_OR_ERROR",
-        cleanEmbedUrl,
-        isStreamwish: false,
-      };
-    }
-
-    const dataLinkMatch = html.match(
-      /let\s+dataLink\s*=\s*(\[\{[\s\S]*?\}\])\s*;\s*let\s+currentLanguageServers/
-    );
-    if (!dataLinkMatch) {
-      return {
-        url: null,
-        status: "NOT_FOUND",
-        cleanEmbedUrl,
-        isStreamwish: false,
-      };
-    }
-
-    const dataLink = JSON.parse(dataLinkMatch[1]) as Embed69LanguageBlock[];
-    if (!Array.isArray(dataLink) || dataLink.length === 0) {
-      return {
-        url: null,
-        status: "NOT_FOUND",
-        cleanEmbedUrl,
-        isStreamwish: false,
-      };
-    }
-
-    const decryptedEntries: {
-      serverName: string;
-      url: string;
-      priority: number;
-    }[] = [];
-
-    for (const block of dataLink) {
-      if (
-        !Array.isArray(block.sortedEmbeds) ||
-        block.sortedEmbeds.length === 0
-      ) {
-        continue;
-      }
-
-      const langRank = getLangRank(block.video_language || "");
-      for (const candidate of block.sortedEmbeds) {
-        if (!candidate.link) continue;
-        const decryptedUrl = decryptEmbed69Link(candidate.link, aesKey);
-        if (
-          decryptedUrl &&
-          decryptedUrl.startsWith("http") &&
-          !/1fichier\.com/i.test(decryptedUrl)
-        ) {
-          const isSw = isStreamwish({
-            serverName: candidate.servername,
-            url: decryptedUrl,
-          });
-          const normalized = isSw
-            ? normalizeStreamwishEmbedUrl(decryptedUrl)
-            : decryptedUrl;
-          decryptedEntries.push({
-            serverName: candidate.servername || normalized,
-            url: normalized,
-            priority:
-              langRank * 100 +
-              getServerPriorityWeight(candidate.servername, normalized),
-          });
-        }
-      }
-    }
-
-    const filteredDecrypted = filterAndPrioritizeMirrors(decryptedEntries, {
-      strictOnly: STRICT_STREAMWISH_ONLY,
-      fallbackIfEmpty: FALLBACK_IF_EMPTY,
-    });
-
-    if (filteredDecrypted.length > 0) {
-      return {
-        url: filteredDecrypted[0].item.url,
-        status: "RESOLVED",
-        cleanEmbedUrl,
-        isStreamwish: filteredDecrypted[0].isStreamwish,
-      };
-    }
-
-    return {
-      url: null,
-      status: "NOT_FOUND",
-      cleanEmbedUrl,
-      isStreamwish: false,
-    };
-  } catch {
-    return {
-      url: null,
-      status: "BLOCKED_OR_ERROR",
-      cleanEmbedUrl,
-      isStreamwish: false,
-    };
-  }
-}
-
-/**
- * Resuelve fuentes desde PlayLatinSrc aplicando la misma política estricta
- * de streamwishMatcher.
- */
-async function resolveFallbackFromPlayLatin(
-  rawUrl: string
-): Promise<{ url: string; isStreamwish: boolean } | null> {
-  try {
-    const tvMatch = rawUrl.match(/(tt\d+)-(\d+)x(\d+)/i);
-    const movieMatch = rawUrl.match(/(tt\d+)/i);
-    if (!tvMatch && !movieMatch) return null;
-
-    const isTv = Boolean(tvMatch);
-    const imdbId = tvMatch ? tvMatch[1] : movieMatch![1];
-    const seasonStr = tvMatch ? String(Number(tvMatch[2])) : "1";
-    const episodeStr = tvMatch ? String(Number(tvMatch[3])) : "1";
-
-    const parsedUrl = new URL(rawUrl);
-    const requestedLang = (
-      parsedUrl.searchParams.get("lang") || "LAT"
-    ).toUpperCase();
-
-    const pageUrl = isTv
-      ? `https://playlatinsrc.co/custom/serial/${imdbId}/${seasonStr}/${episodeStr}`
-      : `https://playlatinsrc.co/custom/movie/${imdbId}`;
-    const pageRes = await fetch(pageUrl, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-      },
-      signal: AbortSignal.timeout(2500),
-    });
-
-    if (!pageRes.ok) return null;
-
-    const html = await pageRes.text();
-    const tokenMatch = html.match(/data-resolve-token="([^"]+)"/);
-    if (!tokenMatch) return null;
-
-    const resolveRes = await fetch("https://playlatinsrc.co/api/resolve", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Referer: pageUrl,
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-      },
-      body: JSON.stringify({
-        type: isTv ? "tv" : "movie",
-        id: imdbId,
-        season: seasonStr,
-        episode: episodeStr,
-        mode: "custom",
-        token: tokenMatch[1],
-      }),
-      signal: AbortSignal.timeout(2500),
-    });
-
-    if (!resolveRes.ok) return null;
-
-    const data = (await resolveRes.json()) as PlayLatinResolveResponse;
-    const sources = Array.isArray(data.sources) ? data.sources : [];
-    if (sources.length === 0) return null;
-
-    const targetVersion =
-      requestedLang === "SUB" || requestedLang === "VOSE"
-        ? "subtitulado"
-        : "latino";
-
-    const candidates = sources.filter(
-      (s) =>
-        Boolean(s.url && s.url.startsWith("http")) &&
-        ((s.version || "").toLowerCase() === targetVersion ||
-          (targetVersion === "latino" &&
-            ((s.version || "").toLowerCase() === "castellano" ||
-              (isTv && !s.version))))
-    );
-
-    const pool =
-      candidates.length > 0
-        ? candidates
-        : sources.filter((s) => Boolean(s.url && s.url.startsWith("http")));
-
-    if (pool.length === 0) return null;
-
-    const mappedPool = pool.map((s) => ({
-      serverName: s.server || s.name || s.url || "",
-      url: s.url || "",
-      priority: getServerPriorityWeight(s.server || s.name, s.url),
-    }));
-
-    const filtered = filterAndPrioritizeMirrors(mappedPool, {
-      strictOnly: STRICT_STREAMWISH_ONLY,
-      fallbackIfEmpty: FALLBACK_IF_EMPTY,
-    });
-
-    if (filtered.length === 0) return null;
-    return {
-      url: filtered[0].isStreamwish
-        ? normalizeStreamwishEmbedUrl(filtered[0].item.url)
-        : filtered[0].item.url,
-      isStreamwish: filtered[0].isStreamwish,
-    };
-  } catch {
-    return null;
-  }
-}
-
-interface StreamwishDirectHlsInfo {
-  hlsUrl: string;
-  inlineM3u8?: string;
-  posterUrl: string;
-  durationSeconds?: number;
-}
-
-/**
- * Desempaqueta todos los bloques obfuscados con Dean Edwards Packer
- * (`eval(function(p,a,c,k,e,d)...)`) de forma segura sin utilizar `eval`.
- */
-function unpackDeanEdwardsBlocks(html: string): string {
-  const packerGlobalRegex =
-    /eval\(function\(p,a,c,k,e,[dr]\)\{[\s\S]*?\}\('([\s\S]*?)',\s*(\d+),\s*(\d+),\s*'([\s\S]*?)'\.split\('\|'\)(?:,\s*\d+,\s*\{\})?\)\)/g;
-
-  const chunks: string[] = [];
-  let match: RegExpExecArray | null;
-
-  while ((match = packerGlobalRegex.exec(html)) !== null) {
-    try {
-      const payload = match[1].replace(/\\'/g, "'");
-      const radix = Number(match[2]);
-      const count = Number(match[3]);
-      const symtab = match[4].split("|");
-
-      if (!radix || !count || symtab.length === 0) continue;
-
-      const encodeBase = (num: number, base: number): string => {
-        const chars =
-          "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        if (base <= 36) {
-          return num.toString(base);
-        }
-        let result = "";
-        let n = num;
-        do {
-          result = chars[n % base] + result;
-          n = Math.floor(n / base);
-        } while (n > 0);
-        return result;
-      };
-
-      const lookup = new Map<string, string>();
-      for (let i = 0; i < count; i++) {
-        if (symtab[i]) {
-          lookup.set(encodeBase(i, radix), symtab[i]);
-        }
-      }
-
-      chunks.push(
-        payload.replace(/\b[0-9a-zA-Z]+\b/g, (word) => {
-          return lookup.get(word) ?? word;
-        })
-      );
-    } catch {
-      // Continuar con el siguiente bloque
-    }
-  }
-
-  return chunks.join("\n");
-}
-
-/**
- * Extrae el stream HLS `.m3u8` directo para cualquier dominio espejo de Streamwish
- * reconocido por streamwishMatcher.
- */
-async function extractStreamwishDirectHls(
-  embedUrl: string
-): Promise<StreamwishDirectHlsInfo | null> {
-  try {
-    const codeMatch = embedUrl.match(/\/(?:e|embed|f|d)\/([a-zA-Z0-9_-]+)/i);
-    if (!codeMatch) return null;
-
-    const isVidhideHost = /morencius\.com|vidhide/i.test(embedUrl);
-    const isStreamwishHost = isStreamwishUrl(embedUrl);
-    if (!isStreamwishHost && !isVidhideHost) return null;
-
-    const fileCode = codeMatch[1];
-    const probeTargets = isVidhideHost
-      ? [
-          {
-            url: embedUrl,
-            origin: new URL(embedUrl).origin,
-            referer: "https://embed69.org/",
-          },
-        ]
-      : buildStreamwishExtractionTargets(embedUrl).map((t) => ({
-          url: t.fetchUrl,
-          origin: new URL(t.fetchUrl).origin,
-          referer: t.referer,
-        }));
-
-    const probeOrigin = async (target: {
-      url: string;
-      origin: string;
-      referer: string;
-    }): Promise<{ origin: string; unpacked: string } | null> => {
-      try {
-        const res = await fetch(target.url, {
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            Referer: target.referer,
-          },
-          signal: AbortSignal.timeout(2500),
-        });
-        if (!res.ok) return null;
-        const html = await res.text();
-        const unpacked = unpackDeanEdwardsBlocks(html);
-        const combined = unpacked ? `${html}\n${unpacked}` : html;
-        if (!/"hls4"|"hls2"|file\s*:\s*["'][^"']+\.m3u8/i.test(combined)) {
-          return null;
-        }
-        return { origin: target.origin, unpacked: combined };
-      } catch {
-        return null;
-      }
-    };
-
-    const originResults = await Promise.all(
-      probeTargets.map((t) => probeOrigin(t))
-    );
-    const hit = originResults.find(
-      (r): r is { origin: string; unpacked: string } => Boolean(r)
-    );
-    if (!hit) return null;
-
-    const { origin, unpacked } = hit;
-    const hls4Match = unpacked.match(/"hls4"\s*:\s*"([^"]+)"/);
-    const hls2Match = unpacked.match(/"hls2"\s*:\s*"([^"]+)"/);
-    const fileMatch = unpacked.match(/file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i);
-    const posterMatch = unpacked.match(/image\s*:\s*["']([^"']+)["']/i);
-    const durationMatch = unpacked.match(/duration\s*:\s*["']?([0-9.]+)["']?/i);
-    const durationSeconds = durationMatch
-      ? Math.floor(Number(durationMatch[1]) || 0)
-      : undefined;
-    const posterUrl = posterMatch?.[1] || "";
-
-    const masterCandidate = hls4Match?.[1] || fileMatch?.[1];
-    if (masterCandidate) {
-      try {
-        const masterUrl = masterCandidate.startsWith("http")
-          ? masterCandidate
-          : `${origin}${masterCandidate}`;
-
-        const masterRes = await fetch(masterUrl, {
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            Referer: `${origin}/e/${fileCode}`,
-          },
-          signal: AbortSignal.timeout(2500),
-        });
-
-        if (masterRes.ok) {
-          const masterText = await masterRes.text();
-          const variantLines = masterText
-            .split("\n")
-            .map((l) => l.trim())
-            .filter((l) => Boolean(l) && !l.startsWith("#"));
-
-          if (variantLines.length > 0) {
-            const chosenVariant = variantLines[variantLines.length - 1];
-            const variantUrl = new URL(chosenVariant, masterUrl).toString();
-
-            const variantRes = await fetch(variantUrl, {
-              headers: {
-                "User-Agent":
-                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-                Referer: `${origin}/e/${fileCode}`,
-              },
-              signal: AbortSignal.timeout(2500),
-            });
-
-            if (variantRes.ok) {
-              const rawVariantM3u8 = await variantRes.text();
-              if (rawVariantM3u8.includes("#EXTM3U")) {
-                const normalizedM3u8 = rawVariantM3u8
-                  .split("\n")
-                  .map((line) => {
-                    const trimmed = line.trim();
-                    if (!trimmed || trimmed.startsWith("#")) return trimmed;
-                    try {
-                      return new URL(trimmed, variantUrl).toString();
-                    } catch {
-                      return trimmed;
-                    }
-                  })
-                  .join("\n");
-
-                return {
-                  hlsUrl: variantUrl,
-                  inlineM3u8: normalizedM3u8,
-                  posterUrl,
-                  durationSeconds,
-                };
-              }
-            }
-          }
-        }
-      } catch {
-        // Si falla la extracción de hls4, continuamos al respaldo hls2
-      }
-    }
-
-    if (hls2Match && hls2Match[1].startsWith("http")) {
-      return {
-        hlsUrl: hls2Match[1],
-        posterUrl,
-        durationSeconds,
-      };
-    }
-
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-function buildStreamErrorHtml(mirrorId: string): NextResponse {
+function buildStreamErrorHtmlResponse(mirrorId: string): NextResponse {
   const failHtml = `<!DOCTYPE html>
 <html lang="es">
 <head><meta charset="utf-8" /><style>html,body{background:#000;margin:0;}</style></head>
@@ -861,181 +153,46 @@ function buildStreamErrorHtml(mirrorId: string): NextResponse {
 }
 
 /**
- * Endpoint Túnel de Reproducción (/api/stream/[token]).
+ * Construye el documento HTML del túnel de reproducción (`/api/stream/[token]`),
+ * renderizando el reproductor nativo `<video id="pilotoVideo">` con `hls.js` cuando se extrajo
+ * el manifiesto HLS directo, o un `<iframe>` blindado contra popups en caso contrario.
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { token: string } }
-) {
-  try {
-    const isTvMode = request.nextUrl.searchParams.get("tv") === "1";
+function buildStreamTunnelPlayerHtml(params: {
+  mirrorId: string;
+  targetIframeUrl: string;
+  escapedRawUrl: string;
+  isTvMode: boolean;
+  isSecondaryServer: boolean;
+  isDirtyIframe: boolean;
+  resumeSeconds: number;
+  streamwishHls: DirectHlsStreamInfo | null;
+}): string {
+  const {
+    mirrorId,
+    targetIframeUrl,
+    escapedRawUrl,
+    isTvMode,
+    isSecondaryServer,
+    isDirtyIframe,
+    resumeSeconds,
+    streamwishHls,
+  } = params;
 
-    const clientIp = getClientIp(request);
-    const rateLimit = apiRateLimiter.checkLimit(
-      `stream:${clientIp}`,
-      60,
-      60_000
-    );
+  const sandboxAttribute = isDirtyIframe
+    ? 'sandbox="allow-scripts allow-same-origin allow-presentation allow-forms"'
+    : "";
 
-    if (!rateLimit.allowed) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error:
-            "Demasiadas solicitudes de reproducción. Intenta en un minuto.",
-        },
-        {
-          status: 429,
-          headers: {
-            "Retry-After": String(rateLimit.retryAfterSeconds),
-          },
-        }
-      );
-    }
-
-    const rawToken = decodeURIComponent(params.token);
-    const payload = tokenCryptoService.decryptStreamToken(rawToken);
-
-    if (!isTvMode) {
-      const session = await getServerSession(authOptions);
-      if (!session?.user) {
-        return NextResponse.json(
-          {
-            ok: false,
-            error: "No autorizado. Inicia sesión para reproducir.",
-          },
-          { status: 401 }
-        );
-      }
-    }
-
-    const secFetchSite = request.headers.get("sec-fetch-site");
-    if (secFetchSite === "cross-site" && !isTvMode) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "Acceso externo no permitido (Anti-Hotlinking).",
-        },
-        { status: 403 }
-      );
-    }
-
-    const referer = request.headers.get("referer");
-    if (referer) {
-      try {
-        const refererHost = new URL(referer).host.toLowerCase();
-        const allowedHosts = new Set(
-          [
-            request.nextUrl.host,
-            request.headers.get("x-forwarded-host"),
-            request.headers.get("host"),
-          ]
-            .filter((h): h is string => Boolean(h))
-            .map((h) => h.split(",")[0].trim().toLowerCase())
-        );
-
-        if (allowedHosts.size > 0 && !allowedHosts.has(refererHost)) {
-          return NextResponse.json(
-            {
-              ok: false,
-              error: "Acceso externo no permitido (Anti-Hotlinking).",
-            },
-            { status: 403 }
-          );
-        }
-      } catch {
-        return NextResponse.json(
-          { ok: false, error: "Cabecera Referer inválida." },
-          { status: 403 }
-        );
-      }
-    }
-
-    if (payload.format !== MirrorFormat.EMBED) {
-      const response = NextResponse.redirect(payload.rawUrl, { status: 302 });
-      response.headers.set(
-        "Cache-Control",
-        "no-store, no-cache, must-revalidate"
-      );
-      response.headers.set("Referrer-Policy", "no-referrer");
-      return response;
-    }
-
-    let finalEmbedUrl = isStreamwishUrl(payload.rawUrl)
-      ? normalizeStreamwishEmbedUrl(payload.rawUrl)
-      : payload.rawUrl;
-    let isSecondaryServer = Boolean(payload.isDirty);
-
-    if (payload.rawUrl.includes("embed69.org/f/")) {
-      const embed69Result = await resolveDirectStreamwishUrlFromEmbed69(
-        payload.rawUrl
-      );
-
-      if (embed69Result.url) {
-        finalEmbedUrl = embed69Result.url;
-        isSecondaryServer = !embed69Result.isStreamwish;
-      } else {
-        const fallbackSource = await resolveFallbackFromPlayLatin(
-          payload.rawUrl
-        );
-
-        if (fallbackSource) {
-          finalEmbedUrl = fallbackSource.url;
-          isSecondaryServer = !fallbackSource.isStreamwish;
-        } else if (
-          embed69Result.status === "NOT_FOUND" ||
-          (STRICT_STREAMWISH_ONLY && !FALLBACK_IF_EMPTY)
-        ) {
-          return buildStreamErrorHtml(payload.mirrorId);
-        } else {
-          finalEmbedUrl = embed69Result.cleanEmbedUrl;
-          isSecondaryServer = true;
-        }
-      }
-    }
-
-    const resolvedIsStreamwish = isStreamwish({
-      serverName: payload.serverName,
-      url: finalEmbedUrl,
-    });
-    const isDirtyIframe = !resolvedIsStreamwish || isMultiEmbedAggregatorUrl(finalEmbedUrl);
-
-    if (STRICT_STREAMWISH_ONLY && !FALLBACK_IF_EMPTY && isDirtyIframe) {
-      return buildStreamErrorHtml(payload.mirrorId);
-    }
-
-    if (isDirtyIframe) {
-      isSecondaryServer = true;
-    }
-
-    const resumeSeconds = Math.max(
-      0,
-      Math.floor(Number(request.nextUrl.searchParams.get("t") || "0") || 0)
-    );
-    const urlWithResume = appendResumeTimeParam(finalEmbedUrl, resumeSeconds);
-    const targetIframeUrl = isTvMode
-      ? appendAutoplayParam(urlWithResume)
-      : urlWithResume;
-    const escapedRawUrl = escapeHtmlAttribute(targetIframeUrl);
-
-    const streamwishHls = resolvedIsStreamwish
-      ? await extractStreamwishDirectHls(finalEmbedUrl)
-      : null;
-
-    const sandboxAttr = isDirtyIframe
-      ? 'sandbox="allow-scripts allow-same-origin allow-presentation allow-forms"'
-      : "";
-
-    const html = `<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="referrer" content="${streamwishHls ? "no-referrer" : "origin"}" />
-  ${streamwishHls
-        ? '<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>'
-        : ""
-      }
+  ${
+    streamwishHls
+      ? '<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>'
+      : ""
+  }
   <style>
     html, body {
       background: #000;
@@ -1090,18 +247,22 @@ export async function GET(
           }
         } catch (e) {}
       });
-      ${isSecondaryServer
-        ? `
+      ${
+        isSecondaryServer
+          ? `
       try {
         window.parent.postMessage(
-          { type: "PILOTO_SECONDARY_SERVER_ACTIVE", mirrorId: ${JSON.stringify(payload.mirrorId)}, isDirty: true },
+          { type: "PILOTO_SECONDARY_SERVER_ACTIVE", mirrorId: ${JSON.stringify(
+            mirrorId
+          )}, isDirty: true },
           "*"
         );
       } catch (e) {}`
-        : ""
+          : ""
       }
-      ${isTvMode
-        ? `
+      ${
+        isTvMode
+          ? `
       window.addEventListener("DOMContentLoaded", function() {
         try {
           window.focus();
@@ -1110,14 +271,15 @@ export async function GET(
           }
         } catch (e) {}
       });`
-        : ""
+          : ""
       }
     })();
   </script>
 </head>
 <body>
-  ${streamwishHls
-        ? `
+  ${
+    streamwishHls
+      ? `
   <div id="playerRoot" style="width:100vw;height:100vh;background:#000;">
     <video
       id="pilotoVideo"
@@ -1133,7 +295,9 @@ export async function GET(
       var root = document.getElementById("playerRoot");
       var hlsUrl = ${JSON.stringify(streamwishHls.hlsUrl)};
       var inlineM3u8 = ${JSON.stringify(streamwishHls.inlineM3u8 || "")};
-      var knownDurationSec = ${JSON.stringify(streamwishHls.durationSeconds || 0)};
+      var knownDurationSec = ${JSON.stringify(
+        streamwishHls.durationSeconds || 0
+      )};
       var fallbackIframeUrl = ${JSON.stringify(targetIframeUrl)};
       var startSec = ${resumeSeconds};
       var switchedToIframe = false;
@@ -1239,26 +403,187 @@ export async function GET(
       }
     })();
   </script>`
-        : `
+      : `
   <iframe
     src="${escapedRawUrl}"
-    ${sandboxAttr}
+    ${sandboxAttribute}
     allow="autoplay *; fullscreen *; picture-in-picture *; encrypted-media *"
     allowfullscreen
     webkitallowfullscreen="true"
     mozallowfullscreen="true"
     referrerpolicy="origin"
   ></iframe>`
-      }
+  }
 </body>
 </html>`;
+}
+
+/**
+ * Endpoint Túnel de Reproducción (`GET /api/stream/[token]`).
+ *
+ * Desencripta el token AES-256-GCM, valida permisos anti-hotlinking, desempaqueta agregadores
+ * en el backend y sirve el reproductor aislado sin revelar la URL real del servidor.
+ */
+export async function GET(
+  request: NextRequest,
+  { params }: { params: { token: string } }
+) {
+  try {
+    const isTvMode = request.nextUrl.searchParams.get("tv") === "1";
+
+    const clientIp = getClientIp(request);
+    const rateLimit = apiRateLimiter.checkLimit(
+      `stream:${clientIp}`,
+      60,
+      60_000
+    );
+
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "Demasiadas solicitudes de reproducción. Intenta en un minuto.",
+        },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(rateLimit.retryAfterSeconds),
+          },
+        }
+      );
+    }
+
+    const rawToken = decodeURIComponent(params.token);
+    const payload = tokenCryptoService.decryptStreamToken(rawToken);
+
+    if (!isTvMode) {
+      const session = await getServerSession(authOptions);
+      if (!session?.user) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "No autorizado. Inicia sesión para reproducir.",
+          },
+          { status: 401 }
+        );
+      }
+    }
+
+    const secFetchSite = request.headers.get("sec-fetch-site");
+    if (secFetchSite === "cross-site" && !isTvMode) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "Acceso externo no permitido (Anti-Hotlinking).",
+        },
+        { status: 403 }
+      );
+    }
+
+    if (!isRefererHostAllowed(request)) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "Acceso externo no permitido (Anti-Hotlinking).",
+        },
+        { status: 403 }
+      );
+    }
+
+    if (payload.format !== MirrorFormat.EMBED) {
+      const redirectResponse = NextResponse.redirect(payload.rawUrl, {
+        status: 302,
+      });
+      redirectResponse.headers.set(
+        "Cache-Control",
+        "no-store, no-cache, must-revalidate"
+      );
+      redirectResponse.headers.set("Referrer-Policy", "no-referrer");
+      return redirectResponse;
+    }
+
+    let finalEmbedUrl = isStreamwishUrl(payload.rawUrl)
+      ? normalizeStreamwishEmbedUrl(payload.rawUrl)
+      : payload.rawUrl;
+    let isSecondaryServer = Boolean(payload.isDirty);
+
+    if (payload.rawUrl.includes("embed69.org/f/")) {
+      const embed69Result = await resolveBestEmbedFromEmbed69Url(
+        payload.rawUrl
+      );
+
+      if (embed69Result.url) {
+        finalEmbedUrl = embed69Result.url;
+        isSecondaryServer = !embed69Result.isStreamwish;
+      } else {
+        const playLatinFallback = await resolveBestEmbedFromPlayLatinByUrl(
+          payload.rawUrl
+        );
+
+        if (playLatinFallback) {
+          finalEmbedUrl = playLatinFallback.url;
+          isSecondaryServer = !playLatinFallback.isStreamwish;
+        } else if (
+          embed69Result.status === "NOT_FOUND" ||
+          (STRICT_STREAMWISH_ONLY && !FALLBACK_IF_EMPTY)
+        ) {
+          return buildStreamErrorHtmlResponse(payload.mirrorId);
+        } else {
+          finalEmbedUrl = embed69Result.cleanEmbedUrl;
+          isSecondaryServer = true;
+        }
+      }
+    }
+
+    const resolvedIsStreamwish = isStreamwish({
+      serverName: payload.serverName,
+      url: finalEmbedUrl,
+    });
+    const isDirtyIframe =
+      !resolvedIsStreamwish || isMultiEmbedAggregatorUrl(finalEmbedUrl);
+
+    if (STRICT_STREAMWISH_ONLY && !FALLBACK_IF_EMPTY && isDirtyIframe) {
+      return buildStreamErrorHtmlResponse(payload.mirrorId);
+    }
+
+    if (isDirtyIframe) {
+      isSecondaryServer = true;
+    }
+
+    const resumeSeconds = Math.max(
+      0,
+      Math.floor(Number(request.nextUrl.searchParams.get("t") || "0") || 0)
+    );
+    const urlWithResume = appendResumeTimeParam(finalEmbedUrl, resumeSeconds);
+    const targetIframeUrl = isTvMode
+      ? appendAutoplayParam(urlWithResume)
+      : urlWithResume;
+    const escapedRawUrl = escapeHtmlAttribute(targetIframeUrl);
+
+    const streamwishHls = resolvedIsStreamwish
+      ? await extractDirectHlsFromStreamwishEmbed(finalEmbedUrl)
+      : null;
+
+    const html = buildStreamTunnelPlayerHtml({
+      mirrorId: payload.mirrorId,
+      targetIframeUrl,
+      escapedRawUrl,
+      isTvMode,
+      isSecondaryServer,
+      isDirtyIframe,
+      resumeSeconds,
+      streamwishHls,
+    });
 
     return new NextResponse(html, {
       status: 200,
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store, no-cache, must-revalidate",
-        "Referrer-Policy": streamwishHls ? "no-referrer" : "strict-origin-when-cross-origin",
+        "Referrer-Policy": streamwishHls
+          ? "no-referrer"
+          : "strict-origin-when-cross-origin",
         "Permissions-Policy":
           "fullscreen=*, autoplay=*, picture-in-picture=*",
         "Content-Security-Policy":

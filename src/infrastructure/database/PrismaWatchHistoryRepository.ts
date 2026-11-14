@@ -6,11 +6,36 @@ import {
   WatchHistoryWithMovie,
 } from "@/domain/interfaces/IWatchHistoryRepository";
 import { WatchHistory } from "@/domain/entities/WatchHistory";
-import { Movie } from "@/domain/entities/Movie";
+import {
+  mapPrismaMovieToDomain,
+  mapPrismaWatchHistoryToDomain,
+} from "./mappers/PrismaDomainMappers";
 
+/**
+ * Umbral porcentual a partir del cual una película se considera completada (92%).
+ */
+const MOVIE_COMPLETION_THRESHOLD = 0.92;
+
+/**
+ * Umbral porcentual a partir del cual un capítulo de serie se considera completado (90%).
+ */
+const EPISODE_COMPLETION_THRESHOLD = 0.9;
+
+/**
+ * Repositorio concreto de Historial de Reproducción (`WatchHistory`) sobre PostgreSQL con Prisma ORM.
+ */
 export class PrismaWatchHistoryRepository implements IWatchHistoryRepository {
   constructor(private readonly db: PrismaClient) {}
 
+  /**
+   * Obtiene los registros de visualización en curso (`completed: false`) de un usuario,
+   * incluyendo tanto películas como capítulos de series y deduplicando por serie para mostrar
+   * únicamente el último capítulo visto de cada serie en la fila "Continuar viendo".
+   *
+   * @param userId UUID del usuario.
+   * @param limit Cantidad máxima de tarjetas a devolver (por defecto 12).
+   * @returns Lista de elementos `WatchHistoryWithMovie`.
+   */
   public async findByUserId(
     userId: string,
     limit: number = 12
@@ -43,37 +68,12 @@ export class PrismaWatchHistoryRepository implements IWatchHistoryRepository {
       const targetMedia = row.movie ?? row.episode?.season?.series ?? null;
       if (!targetMedia) continue;
 
-      // Deduplicamos por ID de película/serie para mostrar solo el último episodio visto de cada serie
+      // Deduplica por ID de película/serie para mostrar solo el último episodio en curso de cada serie
       if (seenMediaIds.has(targetMedia.id)) continue;
       seenMediaIds.add(targetMedia.id);
 
-      const historyEntity = new WatchHistory({
-        id: row.id,
-        userId: row.userId,
-        movieId: row.movieId,
-        episodeId: row.episodeId,
-        progressSeconds: row.progressSeconds,
-        durationSeconds: row.durationSeconds,
-        completed: row.completed,
-        updatedAt: row.updatedAt,
-      });
-
-      const movieEntity = new Movie({
-        id: targetMedia.id,
-        tmdbId: targetMedia.tmdbId,
-        mediaType: targetMedia.mediaType,
-        title: targetMedia.title,
-        originalTitle: targetMedia.originalTitle,
-        synopsis: targetMedia.synopsis,
-        posterUrl: targetMedia.posterUrl,
-        backdropUrl: targetMedia.backdropUrl,
-        releaseYear: targetMedia.releaseYear,
-        durationMins: targetMedia.durationMins,
-        rating: targetMedia.rating,
-        qualityBadge: targetMedia.qualityBadge,
-        genres: targetMedia.genres,
-        isAvailable: targetMedia.isAvailable,
-      });
+      const historyEntity = mapPrismaWatchHistoryToDomain(row);
+      const movieEntity = mapPrismaMovieToDomain(targetMedia);
 
       const episodeInfo =
         row.episode && row.episode.season
@@ -97,6 +97,13 @@ export class PrismaWatchHistoryRepository implements IWatchHistoryRepository {
     return results;
   }
 
+  /**
+   * Busca el progreso de visualización de un usuario para una película específica.
+   *
+   * @param userId UUID del usuario.
+   * @param movieId UUID de la película.
+   * @returns Entidad `WatchHistory` o `null` si no existe registro.
+   */
   public async findMovieProgress(
     userId: string,
     movieId: string
@@ -110,27 +117,24 @@ export class PrismaWatchHistoryRepository implements IWatchHistoryRepository {
       },
     });
 
-    if (!row) return null;
-
-    return new WatchHistory({
-      id: row.id,
-      userId: row.userId,
-      movieId: row.movieId,
-      episodeId: row.episodeId,
-      progressSeconds: row.progressSeconds,
-      durationSeconds: row.durationSeconds,
-      completed: row.completed,
-      updatedAt: row.updatedAt,
-    });
+    return row ? mapPrismaWatchHistoryToDomain(row) : null;
   }
 
+  /**
+   * Guarda o actualiza el progreso de reproducción de una película, marcándola como
+   * completada automáticamente si supera el 92% de su duración total.
+   *
+   * @param input Datos de progreso de la película (`SaveProgressInput`).
+   * @returns Entidad `WatchHistory` actualizada.
+   */
   public async saveProgress(input: SaveProgressInput): Promise<WatchHistory> {
     const safeDuration = Math.max(1, input.durationSeconds);
     const safeProgress = Math.max(
       0,
       Math.min(input.progressSeconds, safeDuration)
     );
-    const isCompleted = safeProgress / safeDuration >= 0.92;
+    const isCompleted =
+      safeProgress / safeDuration >= MOVIE_COMPLETION_THRESHOLD;
 
     const row = await this.db.watchHistory.upsert({
       where: {
@@ -153,18 +157,16 @@ export class PrismaWatchHistoryRepository implements IWatchHistoryRepository {
       },
     });
 
-    return new WatchHistory({
-      id: row.id,
-      userId: row.userId,
-      movieId: row.movieId,
-      episodeId: row.episodeId,
-      progressSeconds: row.progressSeconds,
-      durationSeconds: row.durationSeconds,
-      completed: row.completed,
-      updatedAt: row.updatedAt,
-    });
+    return mapPrismaWatchHistoryToDomain(row);
   }
 
+  /**
+   * Busca el progreso de visualización de un usuario para un episodio específico.
+   *
+   * @param userId UUID del usuario.
+   * @param episodeId UUID del episodio.
+   * @returns Entidad `WatchHistory` o `null` si no existe registro.
+   */
   public async findEpisodeProgress(
     userId: string,
     episodeId: string
@@ -178,20 +180,16 @@ export class PrismaWatchHistoryRepository implements IWatchHistoryRepository {
       },
     });
 
-    if (!row) return null;
-
-    return new WatchHistory({
-      id: row.id,
-      userId: row.userId,
-      movieId: row.movieId,
-      episodeId: row.episodeId,
-      progressSeconds: row.progressSeconds,
-      durationSeconds: row.durationSeconds,
-      completed: row.completed,
-      updatedAt: row.updatedAt,
-    });
+    return row ? mapPrismaWatchHistoryToDomain(row) : null;
   }
 
+  /**
+   * Guarda o actualiza el progreso de reproducción de un capítulo de serie,
+   * marcándolo como completado si alcanza o supera el 90% de su duración total.
+   *
+   * @param input Datos de progreso del episodio (`SaveEpisodeProgressInput`).
+   * @returns Entidad `WatchHistory` actualizada.
+   */
   public async saveEpisodeProgress(
     input: SaveEpisodeProgressInput
   ): Promise<WatchHistory> {
@@ -200,7 +198,8 @@ export class PrismaWatchHistoryRepository implements IWatchHistoryRepository {
       0,
       Math.min(input.progressSeconds, safeDuration)
     );
-    const isCompleted = safeProgress / safeDuration >= 0.90;
+    const isCompleted =
+      safeProgress / safeDuration >= EPISODE_COMPLETION_THRESHOLD;
 
     const row = await this.db.watchHistory.upsert({
       where: {
@@ -223,24 +222,22 @@ export class PrismaWatchHistoryRepository implements IWatchHistoryRepository {
       },
     });
 
-    return new WatchHistory({
-      id: row.id,
-      userId: row.userId,
-      movieId: row.movieId,
-      episodeId: row.episodeId,
-      progressSeconds: row.progressSeconds,
-      durationSeconds: row.durationSeconds,
-      completed: row.completed,
-      updatedAt: row.updatedAt,
-    });
+    return mapPrismaWatchHistoryToDomain(row);
   }
 
+  /**
+   * Obtiene un mapa con el progreso de un usuario en un conjunto de episodios de una temporada.
+   *
+   * @param userId UUID del usuario.
+   * @param episodeIds Lista de UUIDs de episodios a consultar.
+   * @returns Mapa `episodeId -> WatchHistory`.
+   */
   public async findSeriesEpisodesProgress(
     userId: string,
     episodeIds: string[]
   ): Promise<Map<string, WatchHistory>> {
-    const map = new Map<string, WatchHistory>();
-    if (!userId || episodeIds.length === 0) return map;
+    const progressByEpisodeMap = new Map<string, WatchHistory>();
+    if (!userId || episodeIds.length === 0) return progressByEpisodeMap;
 
     const rows = await this.db.watchHistory.findMany({
       where: {
@@ -251,25 +248,24 @@ export class PrismaWatchHistoryRepository implements IWatchHistoryRepository {
 
     for (const row of rows) {
       if (row.episodeId) {
-        map.set(
+        progressByEpisodeMap.set(
           row.episodeId,
-          new WatchHistory({
-            id: row.id,
-            userId: row.userId,
-            movieId: row.movieId,
-            episodeId: row.episodeId,
-            progressSeconds: row.progressSeconds,
-            durationSeconds: row.durationSeconds,
-            completed: row.completed,
-            updatedAt: row.updatedAt,
-          })
+          mapPrismaWatchHistoryToDomain(row)
         );
       }
     }
 
-    return map;
+    return progressByEpisodeMap;
   }
 
+  /**
+   * Obtiene el historial completo de episodios vistos por un usuario dentro de una serie,
+   * ordenado desde el más reciente al más antiguo.
+   *
+   * @param userId UUID del usuario.
+   * @param seriesId UUID de la serie.
+   * @returns Lista de entidades `WatchHistory`.
+   */
   public async findUserSeriesHistory(
     userId: string,
     seriesId: string
@@ -288,18 +284,6 @@ export class PrismaWatchHistoryRepository implements IWatchHistoryRepository {
       orderBy: { updatedAt: "desc" },
     });
 
-    return rows.map(
-      (row) =>
-        new WatchHistory({
-          id: row.id,
-          userId: row.userId,
-          movieId: row.movieId,
-          episodeId: row.episodeId,
-          progressSeconds: row.progressSeconds,
-          durationSeconds: row.durationSeconds,
-          completed: row.completed,
-          updatedAt: row.updatedAt,
-        })
-    );
+    return rows.map((row) => mapPrismaWatchHistoryToDomain(row));
   }
 }

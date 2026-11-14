@@ -7,6 +7,13 @@ import {
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Endpoint Principal del Catálogo (`GET /api/movies`).
+ *
+ * - Con `?mode=home`: devuelve el feed completo de la portada (carruseles y banner destacado).
+ * - Sin `mode=home`: ejecuta búsqueda y exploración paginada por texto (`q`), género (`genreId`),
+ *   plataforma (`providerId`) y tipo de contenido (`mediaType`).
+ */
 export async function GET(request: NextRequest) {
   try {
     const clientIp = getClientIp(request);
@@ -20,7 +27,8 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(
         {
           ok: false,
-          error: "Demasiadas peticiones al catálogo. Por favor aguarda unos segundos.",
+          error:
+            "Demasiadas peticiones al catálogo. Por favor aguarda unos segundos.",
         },
         {
           status: 429,
@@ -67,7 +75,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({
       ok: true,
       ...result,
-      // Mantenemos compatibilidad retroactiva con `movies`
+      // Mantiene compatibilidad retroactiva con la propiedad `movies`
       movies: result.items,
     });
   } catch (error) {

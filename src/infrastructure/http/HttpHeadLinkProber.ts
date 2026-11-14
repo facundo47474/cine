@@ -2,9 +2,11 @@ import { ILinkProber, LinkProbeResult } from "@/domain/interfaces/ILinkProber";
 import { MirrorFormat } from "@/domain/enums/MirrorFormat";
 
 /**
- * Adaptador de Red para verificación de enlaces (Health Checker).
- * Utiliza HTTP HEAD para no descargar el archivo de video completo.
- * Si el servidor bloquea HEAD (405 Method Not Allowed), hace fallback a GET con Range: bytes=0-0.
+ * Adaptador de Red para verificación de enlaces (`HttpHeadLinkProber`).
+ *
+ * Utiliza peticiones `HTTP HEAD` para comprobar la salud del enlace sin descargar el video completo.
+ * Si el servidor de origen bloquea `HEAD` (`405 Method Not Allowed` o `501 Not Implemented`),
+ * realiza fallback automático a `GET` solicitando únicamente el primer byte (`Range: bytes=0-0`).
  */
 export class HttpHeadLinkProber implements ILinkProber {
   private readonly timeoutMs: number;
@@ -15,6 +17,13 @@ export class HttpHeadLinkProber implements ILinkProber {
     this.timeoutMs = timeoutMs;
   }
 
+  /**
+   * Sondea una URL de video o embed y devuelve su estado HTTP, latencia y si fue dada de baja.
+   *
+   * @param url URL cruda del recurso a verificar.
+   * @param format Formato del mirror (`MP4`, `HLS` o `EMBED`).
+   * @returns Resultado detallado del sondeo (`LinkProbeResult`).
+   */
   public async probeUrl(
     url: string,
     format: MirrorFormat
@@ -44,31 +53,34 @@ export class HttpHeadLinkProber implements ILinkProber {
         });
       }
 
-      const elapsed = Date.now() - startTime;
-      const status = response.status;
-      // En plataformas serverless (Vercel AWS IPs), Cloudflare suele devolver 403 a peticiones HEAD/GET
-      // sobre servidores EMBED válidos (embed69, hglink, dr0pstream, vidsrc). No degradar por 403 en EMBED.
+      const elapsedMs = Date.now() - startTime;
+      const httpStatus = response.status;
+
+      // En entornos serverless (IPs de datacenter), Cloudflare suele responder 403/429 a peticiones
+      // HEAD/GET sobre servidores EMBED válidos. No se degradan enlaces EMBED por retos 403/429.
       const isCloudflareEmbedChallenge =
-        format === MirrorFormat.EMBED && (status === 403 || status === 429);
+        format === MirrorFormat.EMBED &&
+        (httpStatus === 403 || httpStatus === 429);
       const isAlive =
-        (status >= 200 && status < 400) || isCloudflareEmbedChallenge;
-      const isPermanentGone = status === 404 || status === 410;
+        (httpStatus >= 200 && httpStatus < 400) || isCloudflareEmbedChallenge;
+      const isPermanentGone = httpStatus === 404 || httpStatus === 410;
 
       return {
         isAlive,
-        httpStatus: status,
+        httpStatus,
         isPermanentGone,
-        responseTimeMs: elapsed,
-        reason: isAlive ? "OK" : `HTTP ${status}`,
+        responseTimeMs: elapsedMs,
+        reason: isAlive ? "OK" : `HTTP ${httpStatus}`,
       };
     } catch (error) {
-      const elapsed = Date.now() - startTime;
+      const elapsedMs = Date.now() - startTime;
       return {
         isAlive: false,
         httpStatus: 0,
         isPermanentGone: false,
-        responseTimeMs: elapsed,
-        reason: error instanceof Error ? error.message : "Network timeout/error",
+        responseTimeMs: elapsedMs,
+        reason:
+          error instanceof Error ? error.message : "Network timeout/error",
       };
     }
   }

@@ -1,4 +1,14 @@
-export { default } from "next-auth/middleware";
+import { withAuth } from "next-auth/middleware";
+
+export default withAuth({
+  pages: {
+    signIn: "/login",
+  },
+  secret:
+    process.env.NEXTAUTH_SECRET ||
+    process.env.STREAM_TOKEN_SECRET ||
+    "piloto_default_nextauth_secret_2026",
+});
 
 export const config = {
   matcher: [

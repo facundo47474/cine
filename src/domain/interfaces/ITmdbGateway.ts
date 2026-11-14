@@ -1,5 +1,6 @@
 export interface TmdbMovieMetadata {
   tmdbId: number;
+  imdbId?: string | null;
   title: string;
   originalTitle: string;
   synopsis: string;
@@ -88,9 +89,13 @@ export interface TmdbDiscoverFilters {
   mediaType?: "movie" | "tv";
 }
 
+/**
+ * Contrato de puerta de enlace (Gateway) para consultar metadatos de películas y series en TMDB.
+ */
 export interface ITmdbGateway {
   isConfigured(): boolean;
   fetchMovieMetadata(tmdbId: number): Promise<TmdbMovieMetadata>;
+  fetchMovieImdbId(tmdbId: number): Promise<string | null>;
   fetchTvMetadata(tmdbId: number): Promise<TmdbTvMetadata>;
   fetchTvImdbId(tmdbId: number): Promise<string | null>;
   fetchTvSeason(tmdbId: number, seasonNumber: number): Promise<TmdbTvSeasonDetails>;

@@ -3,7 +3,14 @@ import { healthCheckerService } from "@/infrastructure/container";
 
 export const dynamic = "force-dynamic";
 
-function isAuthorized(request: NextRequest): boolean {
+/**
+ * Verifica si la petición al endpoint de auditoría programada incluye el secreto `CRON_SECRET`
+ * válido por cabecera `Authorization: Bearer` o por query param `?secret=`.
+ *
+ * @param request Petición `NextRequest` entrante.
+ * @returns `true` si la petición está autorizada.
+ */
+function isCronRequestAuthorized(request: NextRequest): boolean {
   const configuredSecret =
     process.env.CRON_SECRET || "piloto_cron_secret_2026_seguro";
 
@@ -20,8 +27,12 @@ function isAuthorized(request: NextRequest): boolean {
   return false;
 }
 
+/**
+ * Endpoint de Auditoría Automática de Enlaces (`GET /api/health/cron`).
+ * Ejecuta un lote de revisiones HTTP sobre los mirrors del catálogo.
+ */
 export async function GET(request: NextRequest) {
-  if (!isAuthorized(request)) {
+  if (!isCronRequestAuthorized(request)) {
     return NextResponse.json(
       { ok: false, error: "No autorizado. Provee CRON_SECRET válido." },
       { status: 401 }
@@ -30,8 +41,11 @@ export async function GET(request: NextRequest) {
 
   try {
     const { searchParams } = new URL(request.url);
-    const limit = Number(searchParams.get("limit") || "25");
-    const report = await healthCheckerService.runBatchHealthCheck(limit, 150);
+    const batchLimit = Number(searchParams.get("limit") || "25");
+    const report = await healthCheckerService.runBatchHealthCheck(
+      batchLimit,
+      150
+    );
 
     return NextResponse.json({
       ok: true,
@@ -46,6 +60,9 @@ export async function GET(request: NextRequest) {
   }
 }
 
+/**
+ * Permite invocar el cron también mediante método `POST`.
+ */
 export async function POST(request: NextRequest) {
   return GET(request);
 }

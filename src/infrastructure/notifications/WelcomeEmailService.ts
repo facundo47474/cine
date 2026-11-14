@@ -5,9 +5,16 @@ export interface WelcomeEmailParams {
 
 /**
  * Servicio desacoplado de Onboarding por correo electrónico vía API REST de Resend.
- * Diseñado bajo política Zero-Crash para nunca interrumpir ni retrasar el flujo OAuth.
+ * Diseñado bajo política Zero-Crash para nunca interrumpir ni retrasar el flujo de inicio de sesión OAuth.
  */
 export class WelcomeEmailService {
+  /**
+   * Construye la plantilla HTML responsiva del correo de bienvenida a PILOTO Streaming.
+   *
+   * @param displayName Nombre para mostrar del usuario.
+   * @param appUrl URL pública de la aplicación.
+   * @returns Cadena HTML completa con estilos inline compatibles con clientes de correo.
+   */
   private buildHtmlTemplate(displayName: string, appUrl: string): string {
     return `<!DOCTYPE html>
 <html lang="es">
@@ -84,6 +91,11 @@ export class WelcomeEmailService {
 </html>`;
   }
 
+  /**
+   * Envía de forma asíncrona el correo de bienvenida al usuario recién registrado si `RESEND_API_KEY` está configurada.
+   *
+   * @param params Destinatario (`toEmail`) y nombre opcional (`userName`).
+   */
   public async sendWelcomeEmail({
     toEmail,
     userName,
@@ -138,4 +150,3 @@ export class WelcomeEmailService {
 }
 
 export const welcomeEmailService = new WelcomeEmailService();
-

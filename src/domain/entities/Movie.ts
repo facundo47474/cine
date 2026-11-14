@@ -1,5 +1,8 @@
 import { MirrorLink } from "./MirrorLink";
 
+/**
+ * Propiedades estructurales de la entidad `Movie` (Película o Serie en catálogo).
+ */
 export interface MovieProps {
   id: string;
   tmdbId: number | null;
@@ -19,47 +22,102 @@ export interface MovieProps {
 }
 
 /**
- * Entidad de Dominio Movie / Media.
- * Controla la disponibilidad lógica (Soft Delete) según el estado de sus Mirrors.
+ * Entidad de Dominio `Movie`.
+ * Representa un título audiovisual del catálogo y controla su disponibilidad lógica (Soft Delete)
+ * según la salud de sus enlaces mirror.
  */
 export class Movie {
   constructor(private props: MovieProps) {}
 
-  get id(): string { return this.props.id; }
-  get tmdbId(): number | null { return this.props.tmdbId; }
-  get mediaType(): "MOVIE" | "SERIES" { return this.props.mediaType ?? "MOVIE"; }
-  get title(): string { return this.props.title; }
-  get originalTitle(): string | null { return this.props.originalTitle; }
-  get synopsis(): string { return this.props.synopsis; }
-  get posterUrl(): string { return this.props.posterUrl; }
-  get backdropUrl(): string | null { return this.props.backdropUrl; }
-  get releaseYear(): number { return this.props.releaseYear; }
-  get durationMins(): number { return this.props.durationMins; }
-  get rating(): number { return this.props.rating; }
-  get qualityBadge(): string { return this.props.qualityBadge; }
-  get genres(): string[] { return this.props.genres; }
-  get isAvailable(): boolean { return this.props.isAvailable; }
-  get mirrors(): MirrorLink[] { return this.props.mirrors ?? []; }
-
-  /**
-   * Obtiene los enlaces disponibles ordenados por prioridad (1, 2, 3...).
-   */
-  public getPlayableMirrors(): MirrorLink[] {
-    return this.mirrors
-      .filter((m) => m.isPlayable())
-      .sort((a, b) => a.priority - b.priority);
+  get id(): string {
+    return this.props.id;
   }
 
-  /**
-   * Recalcula si la película debe estar visible en el catálogo (Soft Delete automático).
-   * Si no queda ningún mirror reproducible, isAvailable pasa a false.
-   */
-  public recalculateAvailability(): boolean {
-    const hasPlayable = this.getPlayableMirrors().length > 0;
-    this.props.isAvailable = hasPlayable;
+  get tmdbId(): number | null {
+    return this.props.tmdbId;
+  }
+
+  get mediaType(): "MOVIE" | "SERIES" {
+    return this.props.mediaType ?? "MOVIE";
+  }
+
+  get title(): string {
+    return this.props.title;
+  }
+
+  get originalTitle(): string | null {
+    return this.props.originalTitle;
+  }
+
+  get synopsis(): string {
+    return this.props.synopsis;
+  }
+
+  get posterUrl(): string {
+    return this.props.posterUrl;
+  }
+
+  get backdropUrl(): string | null {
+    return this.props.backdropUrl;
+  }
+
+  get releaseYear(): number {
+    return this.props.releaseYear;
+  }
+
+  get durationMins(): number {
+    return this.props.durationMins;
+  }
+
+  get rating(): number {
+    return this.props.rating;
+  }
+
+  get qualityBadge(): string {
+    return this.props.qualityBadge;
+  }
+
+  get genres(): string[] {
+    return this.props.genres;
+  }
+
+  get isAvailable(): boolean {
     return this.props.isAvailable;
   }
 
+  get mirrors(): MirrorLink[] {
+    return this.props.mirrors ?? [];
+  }
+
+  /**
+   * Obtiene los enlaces mirror reproducibles (`ACTIVE` o `UNDER_REVIEW`)
+   * ordenados ascendentemente por prioridad (`1, 2, 3...`).
+   *
+   * @returns Arreglo ordenado de `MirrorLink`.
+   */
+  public getPlayableMirrors(): MirrorLink[] {
+    return this.mirrors
+      .filter((mirror) => mirror.isPlayable())
+      .sort((first, second) => first.priority - second.priority);
+  }
+
+  /**
+   * Recalcula si la película debe permanecer visible en el catálogo (Soft Delete automático).
+   * Si no queda ningún mirror reproducible, `isAvailable` pasa a `false`.
+   *
+   * @returns Nuevo estado booleano de disponibilidad (`isAvailable`).
+   */
+  public recalculateAvailability(): boolean {
+    const hasPlayableMirrors = this.getPlayableMirrors().length > 0;
+    this.props.isAvailable = hasPlayableMirrors;
+    return this.props.isAvailable;
+  }
+
+  /**
+   * Exporta una copia plana de las propiedades de la película.
+   *
+   * @returns Objeto `MovieProps`.
+   */
   public toObject(): MovieProps {
     return { ...this.props };
   }

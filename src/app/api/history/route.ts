@@ -1,14 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
 import { watchHistoryService } from "@/infrastructure/container";
-import { authOptions } from "@/infrastructure/auth/authOptions";
+import { getAuthenticatedUserId } from "@/infrastructure/auth/sessionHelper";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Obtiene la lista "Continuar viendo" del usuario autenticado (`GET /api/history`).
+ */
 export async function GET() {
   try {
-    const session = await getServerSession(authOptions);
-    const userId = (session?.user as { id?: string } | undefined)?.id;
+    const userId = await getAuthenticatedUserId();
 
     if (!userId) {
       return NextResponse.json(
@@ -28,10 +29,12 @@ export async function GET() {
   }
 }
 
+/**
+ * Registra o actualiza el progreso de reproducción de una película o episodio (`POST /api/history`).
+ */
 export async function POST(request: NextRequest) {
   try {
-    const session = await getServerSession(authOptions);
-    const userId = (session?.user as { id?: string } | undefined)?.id;
+    const userId = await getAuthenticatedUserId();
 
     if (!userId) {
       return NextResponse.json(
@@ -45,29 +48,34 @@ export async function POST(request: NextRequest) {
 
     if ((!movieId && !episodeId) || typeof progressSeconds !== "number") {
       return NextResponse.json(
-        { ok: false, error: "Datos de progreso incompletos (se requiere movieId o episodeId)." },
+        {
+          ok: false,
+          error:
+            "Datos de progreso incompletos (se requiere movieId o episodeId).",
+        },
         { status: 400 }
       );
     }
 
     if (episodeId) {
-      const saved = await watchHistoryService.recordEpisodeProgress({
-        userId,
-        episodeId,
-        progressSeconds: Math.floor(progressSeconds),
-        durationSeconds: Math.floor(durationSeconds || 2700),
-      });
-      return NextResponse.json({ ok: true, progress: saved });
+      const savedEpisodeProgress =
+        await watchHistoryService.recordEpisodeProgress({
+          userId,
+          episodeId,
+          progressSeconds: Math.floor(progressSeconds),
+          durationSeconds: Math.floor(durationSeconds || 2700),
+        });
+      return NextResponse.json({ ok: true, progress: savedEpisodeProgress });
     }
 
-    const saved = await watchHistoryService.recordProgress({
+    const savedMovieProgress = await watchHistoryService.recordProgress({
       userId,
       movieId,
       progressSeconds: Math.floor(progressSeconds),
       durationSeconds: Math.floor(durationSeconds || 7200),
     });
 
-    return NextResponse.json({ ok: true, progress: saved });
+    return NextResponse.json({ ok: true, progress: savedMovieProgress });
   } catch (error) {
     console.error("[POST /api/history] Error:", error);
     return NextResponse.json(

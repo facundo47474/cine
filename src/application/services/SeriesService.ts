@@ -6,6 +6,7 @@ import { IMirrorResolver } from "@/domain/interfaces/IMirrorResolver";
 import { SignedMirrorStreamDto } from "../dto/PlaybackStreamDto";
 import { MirrorFormat } from "@/domain/enums/MirrorFormat";
 import { MirrorStatus } from "@/domain/enums/MirrorStatus";
+import { WatchHistory } from "@/domain/entities/WatchHistory";
 import {
   SeriesDetailsDto,
   SeasonSummaryDto,
@@ -23,6 +24,24 @@ import {
   isStreamwish,
 } from "@/domain/utils/streamwishMatcher";
 
+interface CandidateEpisodeMirror {
+  id?: string;
+  serverName: string;
+  language: string;
+  rawUrl: string;
+  format: MirrorFormat;
+  quality: string;
+  priority: number;
+}
+
+/**
+ * Servicio de Aplicación para Series de TV, Temporadas y Episodios (`SeriesService`).
+ *
+ * Responsabilidades:
+ * - Auto-importar series y temporadas bajo demanda desde TMDB hacia PostgreSQL.
+ * - Calcular el punto de reanudación inteligente (`Smart CTA`: "Reproducir", "Continuar" o "Ver siguiente").
+ * - Resolver mirrors de capítulos priorizando Streamwish en Español Latino y firmar tokens de reproducción.
+ */
 export class SeriesService {
   constructor(
     private readonly seriesRepository: ISeriesRepository,
@@ -33,77 +52,92 @@ export class SeriesService {
   ) {}
 
   /**
-   * Obtiene los detalles completos de una serie (con temporadas, episodios de T1, elenco y resume)
+   * Extrae un ID numérico de TMDB si el identificador recibido tiene formato `"tmdb-{id}"` o numérico.
+   *
+   * @param slugOrId Identificador o slug de la serie.
+   * @returns ID numérico de TMDB o `null` si es un UUID local.
+   */
+  private parseTmdbIdFromSlug(slugOrId: string): number | null {
+    if (slugOrId.startsWith("tmdb-")) {
+      const parsed = Number(slugOrId.replace("tmdb-", ""));
+      return !isNaN(parsed) && parsed > 0 ? parsed : null;
+    }
+    if (/^\d+$/.test(slugOrId)) {
+      const parsed = Number(slugOrId);
+      return !isNaN(parsed) && parsed > 0 ? parsed : null;
+    }
+    return null;
+  }
+
+  /**
+   * Obtiene los detalles completos de una serie (con temporadas, episodios de la temporada inicial,
+   * reparto principal y estado de reanudación del usuario).
+   *
+   * @param slugOrId UUID local o slug `"tmdb-{id}"` de la serie.
+   * @param userId UUID opcional del usuario autenticado.
+   * @returns Objeto `SeriesDetailsDto` o `null` si la serie no existe.
    */
   public async getSeriesDetails(
     slugOrId: string,
     userId?: string
   ): Promise<SeriesDetailsDto | null> {
-    let details = await this.seriesRepository.findSeriesDetails(slugOrId);
-
+    let seriesDetails = await this.seriesRepository.findSeriesDetails(slugOrId);
     let preloadedCast: CastMemberDto[] = [];
 
-    // Si no está en BD (o quedó sin temporadas cargadas) y tenemos un ID de TMDB, lo importamos automáticamente de TMDB
-    if (!details || details.seasons.length === 0) {
-      let tmdbId: number | null = details?.series.tmdbId ?? null;
-      if (!tmdbId) {
-        if (slugOrId.startsWith("tmdb-")) {
-          tmdbId = Number(slugOrId.replace("tmdb-", ""));
-        } else if (!isNaN(Number(slugOrId))) {
-          tmdbId = Number(slugOrId);
-        }
-      }
+    if (!seriesDetails || seriesDetails.seasons.length === 0) {
+      const tmdbId =
+        seriesDetails?.series.tmdbId ?? this.parseTmdbIdFromSlug(slugOrId);
 
       if (tmdbId && tmdbId > 0) {
         try {
-          // Cargamos metadatos de TV, temporada 1 y elenco en paralelo para máxima velocidad
-          const [tvMeta, s1Details, tmdbCast] = await Promise.all([
+          const [tvMetadata, seasonOneDetails, tmdbCast] = await Promise.all([
             this.tmdbGateway.fetchTvMetadata(tmdbId),
             this.tmdbGateway.fetchTvSeason(tmdbId, 1),
             this.tmdbGateway.fetchTvCredits(tmdbId),
           ]);
 
-          preloadedCast = tmdbCast.map((c) => ({
-            id: c.id,
-            name: c.name,
-            character: c.character,
-            profileUrl: c.profileUrl,
+          preloadedCast = tmdbCast.map((member) => ({
+            id: member.id,
+            name: member.name,
+            character: member.character,
+            profileUrl: member.profileUrl,
           }));
 
-          // Construimos el upsert inicial
-          details = await this.seriesRepository.upsertSeries({
+          seriesDetails = await this.seriesRepository.upsertSeries({
             tmdbId,
-            title: tvMeta.title,
-            originalTitle: tvMeta.originalTitle,
-            synopsis: tvMeta.synopsis,
-            posterUrl: tvMeta.posterUrl,
-            backdropUrl: tvMeta.backdropUrl,
-            releaseYear: tvMeta.releaseYear,
-            rating: tvMeta.rating,
+            title: tvMetadata.title,
+            originalTitle: tvMetadata.originalTitle,
+            synopsis: tvMetadata.synopsis,
+            posterUrl: tvMetadata.posterUrl,
+            backdropUrl: tvMetadata.backdropUrl,
+            releaseYear: tvMetadata.releaseYear,
+            rating: tvMetadata.rating,
             qualityBadge: "HD",
-            genres: tvMeta.genres,
+            genres: tvMetadata.genres,
             seasons: [
               {
-                seasonNumber: s1Details.seasonNumber,
-                title: s1Details.title,
-                overview: s1Details.overview,
-                posterUrl: s1Details.posterUrl,
-                episodes: s1Details.episodes.map((ep) => ({
-                  episodeNumber: ep.episodeNumber,
-                  title: ep.title,
-                  overview: ep.overview,
-                  duration: ep.duration,
-                  thumbnailUrl: ep.thumbnailUrl,
+                seasonNumber: seasonOneDetails.seasonNumber,
+                title: seasonOneDetails.title,
+                overview: seasonOneDetails.overview,
+                posterUrl: seasonOneDetails.posterUrl,
+                episodes: seasonOneDetails.episodes.map((episode) => ({
+                  episodeNumber: episode.episodeNumber,
+                  title: episode.title,
+                  overview: episode.overview,
+                  duration: episode.duration,
+                  thumbnailUrl: episode.thumbnailUrl,
                 })),
               },
-              // Si hay más temporadas en los metadatos, creamos temporadas esqueleto
-              ...tvMeta.seasons
-                .filter((s) => s.seasonNumber !== s1Details.seasonNumber)
-                .map((s) => ({
-                  seasonNumber: s.seasonNumber,
-                  title: s.title,
-                  overview: s.overview,
-                  posterUrl: s.posterUrl,
+              ...tvMetadata.seasons
+                .filter(
+                  (season) =>
+                    season.seasonNumber !== seasonOneDetails.seasonNumber
+                )
+                .map((season) => ({
+                  seasonNumber: season.seasonNumber,
+                  title: season.title,
+                  overview: season.overview,
+                  posterUrl: season.posterUrl,
                   episodes: [],
                 })),
             ],
@@ -113,28 +147,27 @@ export class SeriesService {
             `[SeriesService] Error auto-importando serie TMDB #${tmdbId}:`,
             error
           );
-          if (!details) {
-            details = await this.seriesRepository.findSeriesDetails(slugOrId);
+          if (!seriesDetails) {
+            seriesDetails =
+              await this.seriesRepository.findSeriesDetails(slugOrId);
           }
         }
       }
     }
 
-    if (!details) return null;
+    if (!seriesDetails) return null;
 
-    const { series, seasons } = details;
+    const { series, seasons } = seriesDetails;
 
-    // Resumen liviano de temporadas
-    const seasonsSummary: SeasonSummaryDto[] = seasons.map((s) => ({
-      id: s.id,
-      seasonNumber: s.seasonNumber,
-      title: s.title,
-      overview: s.overview,
-      posterUrl: s.posterUrl,
-      episodeCount: s.episodes.length,
+    const seasonsSummary: SeasonSummaryDto[] = seasons.map((season) => ({
+      id: season.id,
+      seasonNumber: season.seasonNumber,
+      title: season.title,
+      overview: season.overview,
+      posterUrl: season.posterUrl,
+      episodeCount: season.episodes.length,
     }));
 
-    // Temporada por defecto (primera disponible, usualmente Season 1)
     const defaultSeason = seasons[0];
     let currentSeasonEpisodes: EpisodeDto[] = [];
 
@@ -146,38 +179,36 @@ export class SeriesService {
       );
     }
 
-    // Elenco desde TMDB (reusamos preloadedCast si se acaba de importar)
     let cast: CastMemberDto[] = preloadedCast;
     if (cast.length === 0 && series.tmdbId) {
       try {
         const tmdbCast = await this.tmdbGateway.fetchTvCredits(series.tmdbId);
-        cast = tmdbCast.map((c) => ({
-          id: c.id,
-          name: c.name,
-          character: c.character,
-          profileUrl: c.profileUrl,
+        cast = tmdbCast.map((member) => ({
+          id: member.id,
+          name: member.name,
+          character: member.character,
+          profileUrl: member.profileUrl,
         }));
       } catch {
         cast = [];
       }
     }
 
-    // Punto de reanudación inteligente para el botón CTA
     let resume: SeriesResumeDto | undefined;
     if (userId) {
       resume = await this.getUserSeriesResume(userId, series.id);
     } else if (currentSeasonEpisodes.length > 0) {
-      const firstEp = currentSeasonEpisodes[0];
+      const firstEpisode = currentSeasonEpisodes[0];
       resume = {
-        episodeId: firstEp.id,
-        seasonNumber: firstEp.seasonNumber,
-        episodeNumber: firstEp.episodeNumber,
-        episodeTitle: firstEp.title,
+        episodeId: firstEpisode.id,
+        seasonNumber: firstEpisode.seasonNumber,
+        episodeNumber: firstEpisode.episodeNumber,
+        episodeTitle: firstEpisode.title,
         progressSeconds: 0,
-        durationSeconds: firstEp.duration * 60,
+        durationSeconds: firstEpisode.duration * 60,
         progressPercentage: 0,
         isResume: false,
-        label: `Reproducir T${firstEp.seasonNumber}:E${firstEp.episodeNumber}`,
+        label: `Reproducir T${firstEpisode.seasonNumber}:E${firstEpisode.episodeNumber}`,
       };
     }
 
@@ -202,7 +233,13 @@ export class SeriesService {
   }
 
   /**
-   * Carga bajo demanda los episodios de una temporada específica con el progreso del usuario
+   * Carga bajo demanda los episodios de una temporada específica enriquecidos con el progreso
+   * de visualización del usuario. Si la temporada aún es un esqueleto sin episodios, la sincroniza desde TMDB.
+   *
+   * @param seriesId UUID de la serie en PostgreSQL.
+   * @param seasonNumberOrId Número de temporada (`1, 2...`) o UUID de la temporada.
+   * @param userId UUID opcional del usuario autenticado.
+   * @returns Lista ordenada de `EpisodeDto`.
    */
   public async getSeasonEpisodes(
     seriesId: string,
@@ -211,10 +248,11 @@ export class SeriesService {
   ): Promise<EpisodeDto[]> {
     const seasons = await this.seriesRepository.findSeasonsBySeriesId(seriesId);
 
-    let targetSeason = seasons.find((s) =>
+    let targetSeason = seasons.find((season) =>
       typeof seasonNumberOrId === "number"
-        ? s.seasonNumber === seasonNumberOrId
-        : s.id === seasonNumberOrId || s.seasonNumber === Number(seasonNumberOrId)
+        ? season.seasonNumber === seasonNumberOrId
+        : season.id === seasonNumberOrId ||
+          season.seasonNumber === Number(seasonNumberOrId)
     );
 
     if (!targetSeason && seasons.length > 0) {
@@ -223,10 +261,10 @@ export class SeriesService {
 
     if (!targetSeason) return [];
 
-    // Si la temporada existe pero aún no tiene episodios en BD y tenemos tmdbId, la cargamos desde TMDB
-    let episodes = await this.seriesRepository.findEpisodesBySeasonId(
-      targetSeason.id
-    );
+    let episodes =
+      targetSeason.episodes.length > 0
+        ? targetSeason.episodes
+        : await this.seriesRepository.findEpisodesBySeasonId(targetSeason.id);
 
     if (episodes.length === 0) {
       const series = await this.seriesRepository.findSeriesById(seriesId);
@@ -250,12 +288,12 @@ export class SeriesService {
                   title: tmdbSeason.title,
                   overview: tmdbSeason.overview,
                   posterUrl: tmdbSeason.posterUrl,
-                  episodes: tmdbSeason.episodes.map((ep) => ({
-                    episodeNumber: ep.episodeNumber,
-                    title: ep.title,
-                    overview: ep.overview,
-                    duration: ep.duration,
-                    thumbnailUrl: ep.thumbnailUrl,
+                  episodes: tmdbSeason.episodes.map((episode) => ({
+                    episodeNumber: episode.episodeNumber,
+                    title: episode.title,
+                    overview: episode.overview,
+                    duration: episode.duration,
+                    thumbnailUrl: episode.thumbnailUrl,
                   })),
                 },
               ],
@@ -264,51 +302,60 @@ export class SeriesService {
               targetSeason.id
             );
           }
-        } catch (e) {
+        } catch (error) {
           console.error(
             `[SeriesService] Error cargando temporada ${targetSeason.seasonNumber} de TMDB:`,
-            e
+            error
           );
         }
       }
     }
 
-    // Progreso del usuario
-    let progressMap = new Map<string, any>();
+    let progressByEpisodeId = new Map<string, WatchHistory>();
     if (userId && episodes.length > 0) {
-      const episodeIds = episodes.map((e) => e.id);
-      progressMap = await this.historyRepository.findSeriesEpisodesProgress(
-        userId,
-        episodeIds
-      );
+      const episodeIds = episodes.map((episode) => episode.id);
+      progressByEpisodeId =
+        await this.historyRepository.findSeriesEpisodesProgress(
+          userId,
+          episodeIds
+        );
     }
 
-    return episodes.map((ep) => {
-      const history = progressMap.get(ep.id);
+    return episodes.map((episode) => {
+      const historyRecord = progressByEpisodeId.get(episode.id);
       return {
-        id: ep.id,
-        seasonId: ep.seasonId,
+        id: episode.id,
+        seasonId: episode.seasonId,
         seasonNumber: targetSeason!.seasonNumber,
-        episodeNumber: ep.episodeNumber,
-        title: ep.title,
-        overview: ep.overview,
-        duration: ep.duration,
-        videoUrl: ep.videoUrl,
-        thumbnailUrl: ep.thumbnailUrl,
-        introStart: ep.introStart,
-        introEnd: ep.introEnd,
-        progressSeconds: history ? history.progressSeconds : 0,
-        progressPercentage: history ? history.getProgressPercentage() : 0,
-        completed: history ? history.completed : false,
+        episodeNumber: episode.episodeNumber,
+        title: episode.title,
+        overview: episode.overview,
+        duration: episode.duration,
+        videoUrl: episode.videoUrl,
+        thumbnailUrl: episode.thumbnailUrl,
+        introStart: episode.introStart,
+        introEnd: episode.introEnd,
+        progressSeconds: historyRecord ? historyRecord.progressSeconds : 0,
+        progressPercentage: historyRecord
+          ? historyRecord.getProgressPercentage()
+          : 0,
+        completed: historyRecord ? historyRecord.completed : false,
       };
     });
   }
 
   /**
-   * Determina la acción del botón principal de reproducción inteligente (Smart CTA):
-   * 1. Si nunca vio la serie -> Apunta a T1:E1 ("Reproducir T1:E1")
-   * 2. Si dejó un episodio a mitad -> Apunta a ese episodio en el segundo exacto ("Continuar viendo T1:E3")
-   * 3. Si terminó un episodio -> Apunta automáticamente al siguiente episodio ("Ver T1:E4")
+   * Determina la acción del botón principal de reproducción inteligente (`Smart CTA`):
+   * 1. Si el usuario nunca vio la serie -> Apunta a `T1:E1` (`"Reproducir T1:E1"`).
+   * 2. Si dejó un episodio en curso -> Apunta a ese episodio en el segundo exacto (`"Continuar T1:E3"`).
+   * 3. Si completó un episodio -> Apunta automáticamente al siguiente capítulo (`"Ver T1:E4"`).
+   *
+   * Nota de rendimiento: Reutiliza directamente `season.episodes` devueltos por `findSeasonsBySeriesId`
+   * evitando consultas N+1 por cada temporada.
+   *
+   * @param userId UUID del usuario autenticado.
+   * @param seriesId UUID de la serie.
+   * @returns Objeto `SeriesResumeDto`.
    */
   public async getUserSeriesResume(
     userId: string,
@@ -316,7 +363,7 @@ export class SeriesService {
   ): Promise<SeriesResumeDto> {
     const seasons = await this.seriesRepository.findSeasonsBySeriesId(seriesId);
 
-    interface FlatEpisode {
+    interface FlattenedEpisodeItem {
       id: string;
       seasonNumber: number;
       episodeNumber: number;
@@ -324,16 +371,15 @@ export class SeriesService {
       durationMinutes: number;
     }
 
-    const flatEpisodes: FlatEpisode[] = [];
+    const flatEpisodes: FlattenedEpisodeItem[] = [];
     for (const season of seasons) {
-      const eps = await this.seriesRepository.findEpisodesBySeasonId(season.id);
-      for (const ep of eps) {
+      for (const episode of season.episodes) {
         flatEpisodes.push({
-          id: ep.id,
+          id: episode.id,
           seasonNumber: season.seasonNumber,
-          episodeNumber: ep.episodeNumber,
-          title: ep.title,
-          durationMinutes: ep.duration,
+          episodeNumber: episode.episodeNumber,
+          title: episode.title,
+          durationMinutes: episode.duration,
         });
       }
     }
@@ -352,20 +398,24 @@ export class SeriesService {
       };
     }
 
-    const firstEp = flatEpisodes[0];
+    const firstEpisode = flatEpisodes[0];
+    const buildStartFromEpisodeResume = (
+      targetEpisode: FlattenedEpisodeItem,
+      actionVerb: string = "Reproducir"
+    ): SeriesResumeDto => ({
+      episodeId: targetEpisode.id,
+      seasonNumber: targetEpisode.seasonNumber,
+      episodeNumber: targetEpisode.episodeNumber,
+      episodeTitle: targetEpisode.title,
+      progressSeconds: 0,
+      durationSeconds: targetEpisode.durationMinutes * 60,
+      progressPercentage: 0,
+      isResume: false,
+      label: `${actionVerb} T${targetEpisode.seasonNumber}:E${targetEpisode.episodeNumber}`,
+    });
 
     if (!userId) {
-      return {
-        episodeId: firstEp.id,
-        seasonNumber: firstEp.seasonNumber,
-        episodeNumber: firstEp.episodeNumber,
-        episodeTitle: firstEp.title,
-        progressSeconds: 0,
-        durationSeconds: firstEp.durationMinutes * 60,
-        progressPercentage: 0,
-        isResume: false,
-        label: `Reproducir T${firstEp.seasonNumber}:E${firstEp.episodeNumber}`,
-      };
+      return buildStartFromEpisodeResume(firstEpisode, "Reproducir");
     }
 
     const userHistory = await this.historyRepository.findUserSeriesHistory(
@@ -374,96 +424,77 @@ export class SeriesService {
     );
 
     if (!userHistory || userHistory.length === 0) {
-      return {
-        episodeId: firstEp.id,
-        seasonNumber: firstEp.seasonNumber,
-        episodeNumber: firstEp.episodeNumber,
-        episodeTitle: firstEp.title,
-        progressSeconds: 0,
-        durationSeconds: firstEp.durationMinutes * 60,
-        progressPercentage: 0,
-        isResume: false,
-        label: `Reproducir T${firstEp.seasonNumber}:E${firstEp.episodeNumber}`,
-      };
+      return buildStartFromEpisodeResume(firstEpisode, "Reproducir");
     }
 
     const latestRecord = userHistory[0];
-    const currentEpIndex = flatEpisodes.findIndex(
-      (e) => e.id === latestRecord.episodeId
+    const currentEpisodeIndex = flatEpisodes.findIndex(
+      (episode) => episode.id === latestRecord.episodeId
     );
 
-    if (currentEpIndex === -1) {
-      return {
-        episodeId: firstEp.id,
-        seasonNumber: firstEp.seasonNumber,
-        episodeNumber: firstEp.episodeNumber,
-        episodeTitle: firstEp.title,
-        progressSeconds: 0,
-        durationSeconds: firstEp.durationMinutes * 60,
-        progressPercentage: 0,
-        isResume: false,
-        label: `Reproducir T${firstEp.seasonNumber}:E${firstEp.episodeNumber}`,
-      };
+    if (currentEpisodeIndex === -1) {
+      return buildStartFromEpisodeResume(firstEpisode, "Reproducir");
     }
 
-    const currentEp = flatEpisodes[currentEpIndex];
+    const currentEpisode = flatEpisodes[currentEpisodeIndex];
 
     if (!latestRecord.completed && latestRecord.progressSeconds > 15) {
       return {
-        episodeId: currentEp.id,
-        seasonNumber: currentEp.seasonNumber,
-        episodeNumber: currentEp.episodeNumber,
-        episodeTitle: currentEp.title,
+        episodeId: currentEpisode.id,
+        seasonNumber: currentEpisode.seasonNumber,
+        episodeNumber: currentEpisode.episodeNumber,
+        episodeTitle: currentEpisode.title,
         progressSeconds: latestRecord.progressSeconds,
         durationSeconds: latestRecord.durationSeconds,
         progressPercentage: latestRecord.getProgressPercentage(),
         isResume: true,
-        label: `Continuar T${currentEp.seasonNumber}:E${currentEp.episodeNumber}`,
+        label: `Continuar T${currentEpisode.seasonNumber}:E${currentEpisode.episodeNumber}`,
       };
     }
 
-    const nextEpIndex = currentEpIndex + 1;
-    if (nextEpIndex < flatEpisodes.length) {
-      const nextEp = flatEpisodes[nextEpIndex];
-      return {
-        episodeId: nextEp.id,
-        seasonNumber: nextEp.seasonNumber,
-        episodeNumber: nextEp.episodeNumber,
-        episodeTitle: nextEp.title,
-        progressSeconds: 0,
-        durationSeconds: nextEp.durationMinutes * 60,
-        progressPercentage: 0,
-        isResume: false,
-        label: `Ver T${nextEp.seasonNumber}:E${nextEp.episodeNumber}`,
-      };
+    const nextEpisodeIndex = currentEpisodeIndex + 1;
+    if (nextEpisodeIndex < flatEpisodes.length) {
+      const nextEpisode = flatEpisodes[nextEpisodeIndex];
+      return buildStartFromEpisodeResume(nextEpisode, "Ver");
     }
 
     return {
-      episodeId: currentEp.id,
-      seasonNumber: currentEp.seasonNumber,
-      episodeNumber: currentEp.episodeNumber,
-      episodeTitle: currentEp.title,
+      episodeId: currentEpisode.id,
+      seasonNumber: currentEpisode.seasonNumber,
+      episodeNumber: currentEpisode.episodeNumber,
+      episodeTitle: currentEpisode.title,
       progressSeconds: 0,
-      durationSeconds: currentEp.durationMinutes * 60,
+      durationSeconds: currentEpisode.durationMinutes * 60,
       progressPercentage: 100,
       isResume: false,
-      label: `Volver a ver T${currentEp.seasonNumber}:E${currentEp.episodeNumber}`,
+      label: `Volver a ver T${currentEpisode.seasonNumber}:E${currentEpisode.episodeNumber}`,
     };
   }
 
   /**
-   * Obtiene la información necesaria para reproducir un episodio en el reproductor de video
+   * Obtiene los datos completos de reproducción de un episodio (`EpisodePlaybackDto`),
+   * incluyendo navegación al capítulo anterior/siguiente, lista de temporadas y streams firmados.
+   *
+   * @param episodeId UUID del episodio a reproducir.
+   * @param userId UUID opcional del usuario autenticado.
+   * @returns Objeto `EpisodePlaybackDto` o `null` si el episodio no existe.
    */
   public async getEpisodePlaybackData(
     episodeId: string,
     userId?: string
   ): Promise<EpisodePlaybackDto | null> {
-    const hierarchy = await this.seriesRepository.findEpisodeHierarchy(episodeId);
+    const hierarchy =
+      await this.seriesRepository.findEpisodeHierarchy(episodeId);
     if (!hierarchy) return null;
 
-    const { episode, season: currentSeason, series, allSeasons: fullSeasons } = hierarchy;
+    const {
+      episode,
+      season: currentSeason,
+      series,
+      allSeasons: fullSeasons,
+    } = hierarchy;
 
-    interface FlatEpItem {
+    interface FlattenedEpisodeNavigationItem {
       id: string;
       seasonNumber: number;
       episodeNumber: number;
@@ -472,35 +503,35 @@ export class SeriesService {
       duration: number;
     }
 
-    const flatList: FlatEpItem[] = [];
+    const flatList: FlattenedEpisodeNavigationItem[] = [];
     const allSeasonsData: EpisodePlaybackDto["allSeasons"] = [];
 
-    for (const s of fullSeasons) {
+    for (const seasonItem of fullSeasons) {
       allSeasonsData.push({
-        seasonNumber: s.seasonNumber,
-        title: s.title,
-        episodes: s.episodes.map((e) => ({
-          id: e.id,
-          episodeNumber: e.episodeNumber,
-          title: e.title,
-          duration: e.duration,
-          thumbnailUrl: e.thumbnailUrl,
+        seasonNumber: seasonItem.seasonNumber,
+        title: seasonItem.title,
+        episodes: seasonItem.episodes.map((ep) => ({
+          id: ep.id,
+          episodeNumber: ep.episodeNumber,
+          title: ep.title,
+          duration: ep.duration,
+          thumbnailUrl: ep.thumbnailUrl,
         })),
       });
 
-      for (const e of s.episodes) {
+      for (const ep of seasonItem.episodes) {
         flatList.push({
-          id: e.id,
-          seasonNumber: s.seasonNumber,
-          episodeNumber: e.episodeNumber,
-          title: e.title,
-          thumbnailUrl: e.thumbnailUrl,
-          duration: e.duration,
+          id: ep.id,
+          seasonNumber: seasonItem.seasonNumber,
+          episodeNumber: ep.episodeNumber,
+          title: ep.title,
+          thumbnailUrl: ep.thumbnailUrl,
+          duration: ep.duration,
         });
       }
     }
 
-    const currentIndex = flatList.findIndex((e) => e.id === episode.id);
+    const currentIndex = flatList.findIndex((ep) => ep.id === episode.id);
     const nextEpisode =
       currentIndex >= 0 && currentIndex + 1 < flatList.length
         ? {
@@ -523,45 +554,47 @@ export class SeriesService {
         : undefined;
 
     const tmdbId = series.tmdbId;
-    const seasonNum = currentSeason.seasonNumber;
-    const epNum = episode.episodeNumber;
+    const seasonNumber = currentSeason.seasonNumber;
+    const episodeNumber = episode.episodeNumber;
 
-    const candidateMirrors: {
-      serverName: string;
-      language: string;
-      rawUrl: string;
-      format: MirrorFormat;
-      quality: string;
-      priority: number;
-    }[] = [];
+    const candidateMirrors: CandidateEpisodeMirror[] = [];
 
-    // 1. Direct videoUrl si existe
+    // 1. Enlace directo videoUrl si fue cargado en el episodio
     if (episode.videoUrl && episode.videoUrl.trim() !== "") {
       const cleanVideoUrl = episode.videoUrl.trim();
-      const videoIsSw = isStreamwish({ url: cleanVideoUrl });
+      const videoBelongsToStreamwish = isStreamwish({ url: cleanVideoUrl });
       candidateMirrors.push({
-        serverName: videoIsSw ? "Streamwish-Lat" : "Direct-Video-Lat",
+        id: `ep-direct-${episode.id}`,
+        serverName: videoBelongsToStreamwish
+          ? "Streamwish-Lat"
+          : "Direct-Video-Lat",
         language: "Latino",
         rawUrl: cleanVideoUrl,
-        format: cleanVideoUrl.includes(".m3u8") ? MirrorFormat.HLS : MirrorFormat.EMBED,
+        format: cleanVideoUrl.includes(".m3u8")
+          ? MirrorFormat.HLS
+          : MirrorFormat.EMBED,
         quality: "1080p",
-        priority: videoIsSw ? 1 : 50,
+        priority: videoBelongsToStreamwish ? 1 : 50,
       });
     }
 
-    // 2. Mirrors de BD (resueltos si hay Streamwish directo o un fallback extraíble limpio con FALLBACK_IF_EMPTY activo)
-    const existingPlayable = episode.getPlayableMirrors();
-    const hasDirectResolvedInDb = existingPlayable.some(
-      (m) =>
-        !isMultiEmbedAggregatorUrl(m.rawUrl) &&
-        (isStreamwish({ serverName: m.serverName, url: m.rawUrl }) ||
+    // 2. Mirrors persistidos en BD (si ya cuenta con un Streamwish directo o servidor extraíble limpio)
+    const existingPlayableMirrors = episode.getPlayableMirrors();
+    const hasDirectResolvedInDb = existingPlayableMirrors.some(
+      (mirror) =>
+        !isMultiEmbedAggregatorUrl(mirror.rawUrl) &&
+        (isStreamwish({ serverName: mirror.serverName, url: mirror.rawUrl }) ||
           (FALLBACK_IF_EMPTY &&
-            isExtractableCleanHost({ serverName: m.serverName, url: m.rawUrl })))
+            isExtractableCleanHost({
+              serverName: mirror.serverName,
+              url: mirror.rawUrl,
+            })))
     );
 
     if (hasDirectResolvedInDb) {
-      for (const mirror of existingPlayable) {
+      for (const mirror of existingPlayableMirrors) {
         candidateMirrors.push({
+          id: `ep-${mirror.id}`,
           serverName: mirror.serverName,
           language: mirror.language,
           rawUrl: mirror.rawUrl,
@@ -575,44 +608,63 @@ export class SeriesService {
       const resolvedMirrors =
         await this.mirrorResolver.resolveDefaultMirrorsForTvEpisode(
           tmdbId,
-          seasonNum,
-          epNum,
+          seasonNumber,
+          episodeNumber,
           imdbId
         );
 
-      const newlyResolvedDirect = resolvedMirrors.some(
-        (m) =>
-          isStreamwish({ serverName: m.serverName, url: m.rawUrl }) &&
-          !isMultiEmbedAggregatorUrl(m.rawUrl)
+      const hasNewlyResolvedDirect = resolvedMirrors.some(
+        (mirror) =>
+          isStreamwish({ serverName: mirror.serverName, url: mirror.rawUrl }) &&
+          !isMultiEmbedAggregatorUrl(mirror.rawUrl)
       );
 
-      if (newlyResolvedDirect || (existingPlayable.length === 0 && resolvedMirrors.length > 0)) {
+      let persistedEpisodeMirrors = existingPlayableMirrors;
+      if (
+        hasNewlyResolvedDirect ||
+        (existingPlayableMirrors.length === 0 && resolvedMirrors.length > 0)
+      ) {
         try {
-          await this.seriesRepository.saveEpisodeMirrors(
-            episode.id,
-            resolvedMirrors
-          );
+          persistedEpisodeMirrors =
+            await this.seriesRepository.saveEpisodeMirrors(
+              episode.id,
+              resolvedMirrors
+            );
         } catch {
-          // No bloquear reproducción si falla el guardado en caché
+          // No interrumpir la reproducción si falla el guardado en caché
         }
       }
 
-      for (const m of resolvedMirrors) {
-        candidateMirrors.push({
-          serverName: m.serverName,
-          language: m.language || "Latino",
-          rawUrl: m.rawUrl,
-          format: m.format,
-          quality: m.quality || "1080p",
-          priority: m.priority,
-        });
+      if (persistedEpisodeMirrors.length > 0 && hasNewlyResolvedDirect) {
+        for (const mirror of persistedEpisodeMirrors) {
+          candidateMirrors.push({
+            id: `ep-${mirror.id}`,
+            serverName: mirror.serverName,
+            language: mirror.language,
+            rawUrl: mirror.rawUrl,
+            format: mirror.format,
+            quality: mirror.quality,
+            priority: mirror.priority,
+          });
+        }
+      } else {
+        for (const mirror of resolvedMirrors) {
+          candidateMirrors.push({
+            serverName: mirror.serverName,
+            language: mirror.language || "Latino",
+            rawUrl: mirror.rawUrl,
+            format: mirror.format,
+            quality: mirror.quality || "1080p",
+            priority: mirror.priority,
+          });
+        }
       }
     } else if (tmdbId) {
       const imdbId = await this.tmdbGateway.fetchTvImdbId(tmdbId);
 
       if (imdbId) {
-        const paddedEp = String(epNum).padStart(2, "0");
-        const embed69EpisodeSlug = `${imdbId}-${seasonNum}x${paddedEp}`;
+        const paddedEpisode = String(episodeNumber).padStart(2, "0");
+        const embed69EpisodeSlug = `${imdbId}-${seasonNumber}x${paddedEpisode}`;
 
         candidateMirrors.push(
           {
@@ -637,7 +689,7 @@ export class SeriesService {
       candidateMirrors.push({
         serverName: "Backup-Sub",
         language: "Inglés (Sub)",
-        rawUrl: `https://vidsrc.me/embed/tv?tmdb=${tmdbId}&season=${seasonNum}&episode=${epNum}&ds_lang=es`,
+        rawUrl: `https://vidsrc.me/embed/tv?tmdb=${tmdbId}&season=${seasonNumber}&episode=${episodeNumber}&ds_lang=es`,
         format: MirrorFormat.EMBED,
         quality: "1080p",
         priority: 99,
@@ -650,32 +702,35 @@ export class SeriesService {
     });
 
     const ttlHours = Number(process.env.STREAM_TOKEN_TTL_HOURS || "4");
-    const expiresAt = new Date(Date.now() + ttlHours * 3600 * 1000).toISOString();
+    const expiresAt = new Date(
+      Date.now() + ttlHours * 3600 * 1000
+    ).toISOString();
 
     const signedStreams: SignedMirrorStreamDto[] = prioritizedMirrors.map(
-      ({ item: m, isStreamwish: sw, isDirty }, idx) => {
-        const mirrorId = `ep-${episode.id}-${idx + 1}`;
-        const token = this.tokenCryptoService.encryptStreamToken({
+      ({ item: mirror, isStreamwish: belongsToSw, isDirty }, index) => {
+        const mirrorId = mirror.id || `ep-${episode.id}-${index + 1}`;
+        const encryptedToken = this.tokenCryptoService.encryptStreamToken({
           mirrorId,
           movieId: series.id,
-          rawUrl: m.rawUrl,
-          format: m.format,
-          serverName: m.serverName,
-          isStreamwish: sw,
+          episodeId: episode.id,
+          rawUrl: mirror.rawUrl,
+          format: mirror.format,
+          serverName: mirror.serverName,
+          isStreamwish: belongsToSw,
           isDirty,
         });
 
         return {
           mirrorId,
-          serverName: m.serverName,
-          language: m.language,
-          format: m.format,
-          quality: m.quality,
-          priority: idx + 1,
+          serverName: mirror.serverName,
+          language: mirror.language,
+          format: mirror.format,
+          quality: mirror.quality,
+          priority: index + 1,
           status: MirrorStatus.ACTIVE,
-          streamUrl: `/api/stream/${encodeURIComponent(token)}`,
+          streamUrl: `/api/stream/${encodeURIComponent(encryptedToken)}`,
           expiresAt,
-          isStreamwish: sw,
+          isStreamwish: belongsToSw,
           isDirty,
         };
       }
@@ -683,12 +738,12 @@ export class SeriesService {
 
     let savedProgressSeconds = 0;
     if (userId) {
-      const history = await this.historyRepository.findEpisodeProgress(
+      const historyRecord = await this.historyRepository.findEpisodeProgress(
         userId,
         episode.id
       );
-      if (history && !history.completed) {
-        savedProgressSeconds = history.progressSeconds;
+      if (historyRecord && !historyRecord.completed) {
+        savedProgressSeconds = historyRecord.progressSeconds;
       }
     }
 

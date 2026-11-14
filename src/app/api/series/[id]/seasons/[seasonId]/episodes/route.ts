@@ -1,17 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
 import { seriesService } from "@/infrastructure/container";
-import { authOptions } from "@/infrastructure/auth/authOptions";
+import { getAuthenticatedUserId } from "@/infrastructure/auth/sessionHelper";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Obtiene la lista de episodios de una temporada específica enriquecida con el progreso del usuario
+ * (`GET /api/series/[id]/seasons/[seasonId]/episodes`).
+ */
 export async function GET(
-  request: NextRequest,
+  _request: NextRequest,
   { params }: { params: { id: string; seasonId: string } }
 ) {
   try {
-    const session = await getServerSession(authOptions);
-    const userId = (session?.user as { id?: string } | undefined)?.id;
+    const userId = await getAuthenticatedUserId();
 
     const episodes = await seriesService.getSeasonEpisodes(
       params.id,
@@ -31,4 +33,3 @@ export async function GET(
     );
   }
 }
-

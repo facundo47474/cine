@@ -1,4 +1,7 @@
-import { IMovieRepository, CreateMirrorInput } from "@/domain/interfaces/IMovieRepository";
+import {
+  IMovieRepository,
+  CreateMirrorInput,
+} from "@/domain/interfaces/IMovieRepository";
 import { ITmdbGateway } from "@/domain/interfaces/ITmdbGateway";
 import { MovieProps } from "@/domain/entities/Movie";
 
@@ -9,8 +12,8 @@ export interface ImportFromTmdbInput {
 }
 
 /**
- * Servicio de Ingesta Automática desde TMDB.
- * Descarga metadatos oficiales en español (con fallback a inglés) y vincula los mirrors.
+ * Servicio de Aplicación para la Ingesta Automática desde TMDB (`TmdbImportService`).
+ * Descarga metadatos oficiales en español (con fallback a inglés) y vincula los mirrors provistos.
  */
 export class TmdbImportService {
   constructor(
@@ -18,9 +21,20 @@ export class TmdbImportService {
     private readonly movieRepository: IMovieRepository
   ) {}
 
-  public async importMovieByTmdbId(input: ImportFromTmdbInput): Promise<MovieProps> {
+  /**
+   * Importa o actualiza una película en el catálogo local a partir de su ID de TMDB
+   * junto con sus enlaces mirror iniciales.
+   *
+   * @param input Parámetros de importación (`tmdbId`, `qualityBadge`, `mirrors`).
+   * @returns Propiedades planas de la película persistida (`MovieProps`).
+   */
+  public async importMovieByTmdbId(
+    input: ImportFromTmdbInput
+  ): Promise<MovieProps> {
     if (!input.mirrors || input.mirrors.length === 0) {
-      throw new Error("Se requiere al menos un enlace mirror para importar la película.");
+      throw new Error(
+        "Se requiere al menos un enlace mirror para importar la película."
+      );
     }
 
     const metadata = await this.tmdbGateway.fetchMovieMetadata(input.tmdbId);

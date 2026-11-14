@@ -10,6 +10,10 @@ interface EpisodeCardProps {
   fallbackBackdrop?: string | null;
 }
 
+/**
+ * Tarjeta horizontal de un capítulo dentro de la ficha de una serie (`EpisodeCard`).
+ * Muestra número de capítulo, miniatura 16:9, barra de progreso si fue iniciado, duración y sinopsis.
+ */
 export default function EpisodeCard({
   episode,
   fallbackBackdrop,
@@ -19,8 +23,7 @@ export default function EpisodeCard({
     fallbackBackdrop ||
     "https://images.unsplash.com/photo-1574375927938-d5a98e8ffe85?w=600&auto=format&fit=crop&q=80";
 
-  const durationLabel =
-    episode.duration > 0 ? `${episode.duration}m` : "45m";
+  const durationLabel = episode.duration > 0 ? `${episode.duration}m` : "45m";
 
   const hasProgress =
     typeof episode.progressPercentage === "number" &&
@@ -60,7 +63,10 @@ export default function EpisodeCard({
               <div
                 className="h-full bg-netflix-red transition-all duration-300"
                 style={{
-                  width: `${Math.max(6, Math.min(100, episode.progressPercentage!))}%`,
+                  width: `${Math.max(
+                    6,
+                    Math.min(100, episode.progressPercentage!)
+                  )}%`,
                 }}
               />
             </div>
@@ -86,4 +92,3 @@ export default function EpisodeCard({
     </Link>
   );
 }
-

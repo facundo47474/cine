@@ -7,6 +7,12 @@ import { ArrowLeft, Cast, Clock, Film, Languages, Star } from "lucide-react";
 import SmartVideoPlayer from "@/components/SmartVideoPlayer";
 import { MoviePlaybackDto } from "@/application/dto/PlaybackStreamDto";
 
+/**
+ * Página de reproducción dedicada para Películas (`/watch/[id]`).
+ *
+ * Carga los enlaces firmados de la película y el punto de reanudación del usuario,
+ * permitiendo alternar entre Audio Latino e Inglés Subtitulado y transmitir a Smart TV.
+ */
 export default function WatchMoviePage() {
   const params = useParams<{ id: string }>();
   const movieId = params.id;
@@ -19,14 +25,17 @@ export default function WatchMoviePage() {
     "Latino" | "Inglés (Sub)"
   >("Latino");
 
+  /**
+   * Consulta al backend los streams firmados y el progreso guardado de la película.
+   */
   const loadPlayback = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/movies/${movieId}/play`, {
+      const response = await fetch(`/api/movies/${movieId}/play`, {
         cache: "no-store",
       });
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
         throw new Error(data.error || "No se pudo cargar la película.");
       }
       setMovie(data.movie);
@@ -42,15 +51,19 @@ export default function WatchMoviePage() {
 
   useEffect(() => {
     if (movieId) {
-      loadPlayback();
+      void loadPlayback();
     }
   }, [movieId, loadPlayback]);
 
   const hasLatino =
-    movie?.streams.some((s) => s.language === "Latino") ?? false;
+    movie?.streams.some((stream) => stream.language === "Latino") ?? false;
   const hasEnglish =
-    movie?.streams.some((s) => s.language === "Inglés (Sub)") ?? false;
+    movie?.streams.some((stream) => stream.language === "Inglés (Sub)") ??
+    false;
 
+  /**
+   * Ajusta el idioma seleccionado automáticamente según las pistas disponibles en la película.
+   */
   useEffect(() => {
     if (!movie) return;
     if (!hasLatino && hasEnglish) {
@@ -60,6 +73,9 @@ export default function WatchMoviePage() {
     }
   }, [movie, hasLatino, hasEnglish]);
 
+  /**
+   * Emite el evento global para activar la transmisión a Chromecast o AirPlay desde el reproductor.
+   */
   const handleNativeCastTrigger = useCallback(() => {
     window.dispatchEvent(new CustomEvent("piloto:trigger-cast"));
   }, []);
@@ -195,12 +211,12 @@ export default function WatchMoviePage() {
                 </p>
 
                 <div className="flex flex-wrap gap-1.5 sm:gap-2 pt-1 sm:pt-2">
-                  {movie.genres.map((g) => (
+                  {movie.genres.map((genre) => (
                     <span
-                      key={g}
+                      key={genre}
                       className="text-[11px] sm:text-xs px-2.5 sm:px-3 py-1 rounded-full bg-white/5 border border-white/10 text-zinc-300"
                     >
-                      {g}
+                      {genre}
                     </span>
                   ))}
                 </div>

@@ -1,21 +1,26 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
 import { seriesService } from "@/infrastructure/container";
-import { authOptions } from "@/infrastructure/auth/authOptions";
+import { getAuthenticatedUserId } from "@/infrastructure/auth/sessionHelper";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Calcula y devuelve el punto de reanudación inteligente (`Smart CTA`) de una serie
+ * para el usuario autenticado (`GET /api/series/[id]/resume`).
+ */
 export async function GET(
-  request: NextRequest,
+  _request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
-    const session = await getServerSession(authOptions);
-    const userId = (session?.user as { id?: string } | undefined)?.id;
+    const userId = await getAuthenticatedUserId();
 
     if (!userId) {
       return NextResponse.json(
-        { ok: false, error: "Debes iniciar sesión para obtener el punto de reanudación." },
+        {
+          ok: false,
+          error: "Debes iniciar sesión para obtener el punto de reanudación.",
+        },
         { status: 401 }
       );
     }
@@ -25,9 +30,11 @@ export async function GET(
   } catch (error) {
     console.error(`[GET /api/series/${params.id}/resume] Error:`, error);
     return NextResponse.json(
-      { ok: false, error: "Error calculando el punto de reanudación de la serie." },
+      {
+        ok: false,
+        error: "Error calculando el punto de reanudación de la serie.",
+      },
       { status: 500 }
     );
   }
 }
-

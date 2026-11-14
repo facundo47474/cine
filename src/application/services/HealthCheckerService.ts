@@ -29,6 +29,13 @@ export interface BatchHealthReport {
   details: MirrorAuditDetail[];
 }
 
+/**
+ * Determina si el resultado de una sonda HTTP sobre un mirror representa una caída fatal
+ * (`HTTP 404`, `HTTP 410`, `HTTP >= 500` o marcado explícito como eliminado).
+ *
+ * @param detail Resultado de auditoría de un mirror.
+ * @returns `true` si el fallo es definitivo/fatal.
+ */
 function isFatalMirrorProbeFailure(detail: MirrorAuditDetail): boolean {
   if (detail.newStatus === MirrorStatus.ACTIVE) return false;
   return (
@@ -40,9 +47,10 @@ function isFatalMirrorProbeFailure(detail: MirrorAuditDetail): boolean {
 }
 
 /**
- * Servicio Determinista de Auditoría y Salud de Enlaces (Health Checker).
+ * Servicio Determinista de Auditoría y Salud de Enlaces (`HealthCheckerService`).
+ *
  * Evalúa primero todos los mirrors de Streamwish en paralelo y solo consulta servidores
- * alternativos si todos los mirrors de Streamwish devuelven HTTP 404/410/500 o fueron borrados.
+ * alternativos si la totalidad de los mirrors de Streamwish devolvieron error fatal.
  */
 export class HealthCheckerService {
   constructor(
@@ -51,12 +59,23 @@ export class HealthCheckerService {
     private readonly linkProber: ILinkProber
   ) {}
 
+  /**
+   * Verifica la disponibilidad HTTP de un mirror individual, actualiza su estado en la entidad
+   * de dominio y persiste el cambio en la base de datos.
+   *
+   * @param mirror Entidad `MirrorLink` a verificar.
+   * @param recalculateMovieAvailability Si es `true`, recalcula inmediatamente la disponibilidad de la película.
+   * @returns Detalle completo del resultado de la auditoría (`MirrorAuditDetail`).
+   */
   private async probeAndPersistMirror(
     mirror: MirrorLink,
     recalculateMovieAvailability: boolean = true
   ): Promise<MirrorAuditDetail> {
     const previousStatus = mirror.status;
-    const probeResult = await this.linkProber.probeUrl(mirror.rawUrl, mirror.format);
+    const probeResult = await this.linkProber.probeUrl(
+      mirror.rawUrl,
+      mirror.format
+    );
 
     if (probeResult.isAlive) {
       mirror.markCheckSuccess();
@@ -68,11 +87,9 @@ export class HealthCheckerService {
 
     let movieStillAvailable = true;
     if (recalculateMovieAvailability) {
-      const movie = await this.movieRepository.findByIdWithMirrors(mirror.movieId);
-      if (movie) {
-        movieStillAvailable = movie.recalculateAvailability();
-        await this.movieRepository.updateAvailability(movie.id, movieStillAvailable);
-      }
+      movieStillAvailable = await this.refreshMovieAvailabilityStatus(
+        mirror.movieId
+      );
     }
 
     return {
@@ -94,9 +111,32 @@ export class HealthCheckerService {
   }
 
   /**
-   * Audita un único mirror por ID (usado tanto por el worker como cuando un usuario reporta fallo).
+   * Recalcula y persiste en PostgreSQL si una película sigue teniendo al menos un mirror reproducible.
+   *
+   * @param movieId UUID de la película.
+   * @returns `true` si la película continúa disponible; `false` si fue ocultada (Soft Delete).
    */
-  public async auditSingleMirror(mirrorId: string): Promise<MirrorAuditDetail | null> {
+  private async refreshMovieAvailabilityStatus(
+    movieId: string
+  ): Promise<boolean> {
+    const movie = await this.movieRepository.findByIdWithMirrors(movieId);
+    if (!movie) return true;
+
+    const stillAvailable = movie.recalculateAvailability();
+    await this.movieRepository.updateAvailability(movie.id, stillAvailable);
+    return stillAvailable;
+  }
+
+  /**
+   * Audita un único mirror por su ID (invocado por el reproductor cuando falla un servidor
+   * o desde herramientas administrativas).
+   *
+   * @param mirrorId UUID del mirror a verificar.
+   * @returns Detalle de la auditoría o `null` si el mirror no existe.
+   */
+  public async auditSingleMirror(
+    mirrorId: string
+  ): Promise<MirrorAuditDetail | null> {
     const mirror = await this.mirrorRepository.findById(mirrorId);
     if (!mirror) return null;
 
@@ -106,65 +146,71 @@ export class HealthCheckerService {
   /**
    * Ejecuta una verificación determinista por película:
    * 1. Evalúa primero todos los mirrors de Streamwish en paralelo.
-   * 2. Solo evalúa servidores alternativos si todos los Streamwish devolvieron HTTP 404/410/500 o archivo borrado.
+   * 2. Solo evalúa servidores alternativos si todos los Streamwish sufrieron un fallo fatal.
+   *
+   * @param movieId UUID de la película.
+   * @param mirrors Lista de enlaces `MirrorLink` asociados a la película.
+   * @returns Lista de detalles de auditoría para cada mirror verificado.
    */
   public async auditMirrorGroupDeterministic(
     movieId: string,
     mirrors: MirrorLink[]
   ): Promise<MirrorAuditDetail[]> {
-    const streamwishMirrors = mirrors.filter((m) =>
-      isStreamwish({ serverName: m.serverName, url: m.rawUrl })
+    const streamwishMirrors = mirrors.filter((mirror) =>
+      isStreamwish({ serverName: mirror.serverName, url: mirror.rawUrl })
     );
     const alternativeMirrors = mirrors.filter(
-      (m) => !isStreamwish({ serverName: m.serverName, url: m.rawUrl })
+      (mirror) =>
+        !isStreamwish({ serverName: mirror.serverName, url: mirror.rawUrl })
     );
 
-    const details: MirrorAuditDetail[] = [];
+    const auditDetails: MirrorAuditDetail[] = [];
 
     if (streamwishMirrors.length > 0) {
-      const swResults = await Promise.all(
-        streamwishMirrors.map((m) => this.probeAndPersistMirror(m, false))
+      const streamwishResults = await Promise.all(
+        streamwishMirrors.map((mirror) =>
+          this.probeAndPersistMirror(mirror, false)
+        )
       );
-      details.push(...swResults);
+      auditDetails.push(...streamwishResults);
 
-      const allStreamwishDead = swResults.every((res) =>
-        isFatalMirrorProbeFailure(res)
+      const allStreamwishDead = streamwishResults.every((result) =>
+        isFatalMirrorProbeFailure(result)
       );
 
       if (!allStreamwishDead) {
-        const movie = await this.movieRepository.findByIdWithMirrors(movieId);
-        if (movie) {
-          const stillAvailable = movie.recalculateAvailability();
-          await this.movieRepository.updateAvailability(movie.id, stillAvailable);
-          details.forEach((d) => {
-            d.movieStillAvailable = stillAvailable;
-          });
-        }
-        return details;
+        const stillAvailable = await this.refreshMovieAvailabilityStatus(
+          movieId
+        );
+        auditDetails.forEach((detail) => {
+          detail.movieStillAvailable = stillAvailable;
+        });
+        return auditDetails;
       }
     }
 
     if (alternativeMirrors.length > 0) {
-      const altResults = await Promise.all(
-        alternativeMirrors.map((m) => this.probeAndPersistMirror(m, false))
+      const alternativeResults = await Promise.all(
+        alternativeMirrors.map((mirror) =>
+          this.probeAndPersistMirror(mirror, false)
+        )
       );
-      details.push(...altResults);
+      auditDetails.push(...alternativeResults);
     }
 
-    const movie = await this.movieRepository.findByIdWithMirrors(movieId);
-    if (movie) {
-      const stillAvailable = movie.recalculateAvailability();
-      await this.movieRepository.updateAvailability(movie.id, stillAvailable);
-      details.forEach((d) => {
-        d.movieStillAvailable = stillAvailable;
-      });
-    }
+    const stillAvailable = await this.refreshMovieAvailabilityStatus(movieId);
+    auditDetails.forEach((detail) => {
+      detail.movieStillAvailable = stillAvailable;
+    });
 
-    return details;
+    return auditDetails;
   }
 
   /**
    * Verifica de forma determinista todos los mirrors de una película específica.
+   *
+   * @param movieId UUID de la película.
+   * @returns Detalles de auditoría de sus mirrors.
    */
   public async verifyMovieMirrorsDeterministic(
     movieId: string
@@ -176,27 +222,33 @@ export class HealthCheckerService {
   }
 
   /**
-   * Ejecuta un lote de revisiones deterministas agrupadas por película
-   * para priorizar siempre Streamwish en paralelo antes de tocar respaldos sucios.
+   * Ejecuta un lote de revisiones de salud agrupadas por película,
+   * respetando una pausa configurable (`delayBetweenChecksMs`) entre grupos.
+   *
+   * @param batchSize Cantidad máxima de mirrors a revisar en el lote.
+   * @param delayBetweenChecksMs Milisegundos de espera entre cada grupo de película.
+   * @returns Reporte consolidado de salud (`BatchHealthReport`).
    */
   public async runBatchHealthCheck(
     batchSize: number = 25,
     delayBetweenChecksMs: number = 200
   ): Promise<BatchHealthReport> {
-    const mirrors = await this.mirrorRepository.findBatchForHealthCheck(batchSize);
+    const mirrors = await this.mirrorRepository.findBatchForHealthCheck(
+      batchSize
+    );
     const details: MirrorAuditDetail[] = [];
     const disabledMovieIds = new Set<string>();
 
     const mirrorsByMovie = new Map<string, MirrorLink[]>();
     for (const mirror of mirrors) {
-      const group = mirrorsByMovie.get(mirror.movieId) ?? [];
-      group.push(mirror);
-      mirrorsByMovie.set(mirror.movieId, group);
+      const movieGroup = mirrorsByMovie.get(mirror.movieId) ?? [];
+      movieGroup.push(mirror);
+      mirrorsByMovie.set(mirror.movieId, movieGroup);
     }
 
     const movieGroups = Array.from(mirrorsByMovie.entries());
-    for (let i = 0; i < movieGroups.length; i++) {
-      const [movieId, groupMirrors] = movieGroups[i];
+    for (let groupIndex = 0; groupIndex < movieGroups.length; groupIndex++) {
+      const [movieId, groupMirrors] = movieGroups[groupIndex];
       const groupDetails = await this.auditMirrorGroupDeterministic(
         movieId,
         groupMirrors
@@ -209,17 +261,25 @@ export class HealthCheckerService {
         }
       }
 
-      if (delayBetweenChecksMs > 0 && i < movieGroups.length - 1) {
-        await new Promise((resolve) => setTimeout(resolve, delayBetweenChecksMs));
+      if (delayBetweenChecksMs > 0 && groupIndex < movieGroups.length - 1) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, delayBetweenChecksMs)
+        );
       }
     }
 
     return {
       timestamp: new Date().toISOString(),
       totalChecked: details.length,
-      aliveCount: details.filter((d) => d.newStatus === MirrorStatus.ACTIVE).length,
-      underReviewCount: details.filter((d) => d.newStatus === MirrorStatus.UNDER_REVIEW).length,
-      downCount: details.filter((d) => d.newStatus === MirrorStatus.DOWN).length,
+      aliveCount: details.filter(
+        (detail) => detail.newStatus === MirrorStatus.ACTIVE
+      ).length,
+      underReviewCount: details.filter(
+        (detail) => detail.newStatus === MirrorStatus.UNDER_REVIEW
+      ).length,
+      downCount: details.filter(
+        (detail) => detail.newStatus === MirrorStatus.DOWN
+      ).length,
       moviesDisabledCount: disabledMovieIds.size,
       details,
     };

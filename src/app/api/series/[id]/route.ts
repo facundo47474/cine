@@ -1,18 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
 import { seriesService } from "@/infrastructure/container";
-import { authOptions } from "@/infrastructure/auth/authOptions";
+import { getAuthenticatedUserId } from "@/infrastructure/auth/sessionHelper";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Obtiene la ficha completa de una serie con sus temporadas, episodios iniciales y reparto (`GET /api/series/[id]`).
+ */
 export async function GET(
-  request: NextRequest,
+  _request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
-    const session = await getServerSession(authOptions);
-    const userId = (session?.user as { id?: string } | undefined)?.id;
-
+    const userId = await getAuthenticatedUserId();
     const details = await seriesService.getSeriesDetails(params.id, userId);
 
     if (!details) {
@@ -31,4 +31,3 @@ export async function GET(
     );
   }
 }
-

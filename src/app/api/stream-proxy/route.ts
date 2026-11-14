@@ -1,5 +1,6 @@
 import dns from "dns";
 import { NextRequest, NextResponse } from "next/server";
+import { DEFAULT_SCRAPER_USER_AGENT } from "@/infrastructure/providers/Embed69Decoder";
 
 try {
   dns.setDefaultResultOrder("ipv4first");
@@ -10,11 +11,10 @@ try {
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-// Límite seguro por debajo de los 4.5 MB máximos de payload por invocación Serverless en Vercel
+/**
+ * Límite seguro por debajo de los 4.5 MB máximos de payload por invocación Serverless en Vercel.
+ */
 const MAX_VERCEL_MP4_CHUNK_BYTES = 3_500_000;
-
-const BROWSER_USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -24,6 +24,9 @@ const CORS_HEADERS: Record<string, string> = {
     "Content-Length, Content-Range, Accept-Ranges, Content-Type",
 };
 
+/**
+ * Responde a las pre-peticiones CORS (`OPTIONS`).
+ */
 export async function OPTIONS() {
   return new NextResponse(null, {
     status: 204,
@@ -32,9 +35,84 @@ export async function OPTIONS() {
 }
 
 /**
- * PASO 3: Endpoint Proxy de Streaming (/api/stream-proxy?url=<STREAM_URL>&referer=<REFERER_URL>)
- * Inyecta cabeceras Referer, Origin y User-Agent, reescribe manifiestos HLS (.m3u8) y transmite
- * segmentos (.ts, .m4s) o archivos (.mp4) evitando bloqueos 403 Forbidden y errores CORS.
+ * Reescribe todas las URLs de segmentos y claves dentro de un manifiesto HLS (`.m3u8`)
+ * para que atraviesen el proxy `/api/stream-proxy` conservando el `Referer` requerido.
+ *
+ * @param manifestText Contenido texto del manifiesto `.m3u8`.
+ * @param finalBaseUrl URL base desde donde se descargó el manifiesto.
+ * @param refererHeader Cabecera Referer que debe propagarse a cada segmento.
+ * @returns Manifiesto HLS reescrito.
+ */
+function rewriteHlsManifestLines(
+  manifestText: string,
+  finalBaseUrl: string,
+  refererHeader: string
+): string {
+  const buildProxyUrl = (targetUrl: string): string =>
+    `/api/stream-proxy?url=${encodeURIComponent(
+      targetUrl
+    )}&referer=${encodeURIComponent(refererHeader)}`;
+
+  return manifestText
+    .split(/\r?\n/)
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return line;
+
+      if (trimmed.startsWith("#")) {
+        // Reescribe también atributos URI="..." en etiquetas como #EXT-X-KEY o #EXT-X-MAP
+        return trimmed.replace(/URI="([^"]+)"/gi, (fullMatch, uriValue: string) => {
+          try {
+            const resolvedUri = new URL(uriValue, finalBaseUrl).toString();
+            return `URI="${buildProxyUrl(resolvedUri)}"`;
+          } catch {
+            return fullMatch;
+          }
+        });
+      }
+
+      try {
+        const resolvedSegmentUrl = new URL(trimmed, finalBaseUrl).toString();
+        return buildProxyUrl(resolvedSegmentUrl);
+      } catch {
+        return trimmed;
+      }
+    })
+    .join("\n");
+}
+
+/**
+ * Elimina cabeceras falsas camufladas (ej. PNG/JPEG/HTML inyectados al inicio de segmentos `.ts` por servidores como Streamwish)
+ * buscando la triple marca de sincronización MPEG-TS (`0x47` cada 188 bytes).
+ *
+ * @param rawBuffer Buffer crudo del segmento MPEG-TS.
+ * @returns Sub-buffer limpio alineado al primer paquete MPEG-TS (`0x47`).
+ */
+function stripCamouflagedMpegTsHeader(rawBuffer: Buffer): Buffer {
+  if (rawBuffer.length <= 376 || rawBuffer[0] === 0x47) {
+    return rawBuffer;
+  }
+
+  const maxInspectOffset = Math.min(rawBuffer.length - 376, 1024);
+  for (let offset = 0; offset < maxInspectOffset; offset++) {
+    if (
+      rawBuffer[offset] === 0x47 &&
+      rawBuffer[offset + 188] === 0x47 &&
+      rawBuffer[offset + 376] === 0x47
+    ) {
+      return rawBuffer.subarray(offset);
+    }
+  }
+
+  return rawBuffer;
+}
+
+/**
+ * Endpoint Proxy de Streaming (`GET /api/stream-proxy?url=<STREAM_URL>&referer=<REFERER_URL>`).
+ *
+ * Inyecta cabeceras `Referer`, `Origin` y `User-Agent`, reescribe manifiestos HLS (`.m3u8`)
+ * y transmite segmentos MPEG-TS (`.ts`), segmentos fMP4 (`.m4s`) o archivos `.mp4` directos
+ * evitando bloqueos `403 Forbidden` y errores CORS.
  */
 export async function GET(request: NextRequest) {
   const streamUrl = request.nextUrl.searchParams.get("url")?.trim() || "";
@@ -81,7 +159,7 @@ export async function GET(request: NextRequest) {
   }
 
   const upstreamHeaders: Record<string, string> = {
-    "User-Agent": BROWSER_USER_AGENT,
+    "User-Agent": DEFAULT_SCRAPER_USER_AGENT,
     Referer: refererHeader,
     Origin: originHeader,
     Accept: "*/*",
@@ -89,10 +167,10 @@ export async function GET(request: NextRequest) {
 
   const isLikelyMp4Request = /\.mp4(\?|$)/i.test(parsedStreamUrl.pathname);
   const rangeHeader = request.headers.get("range");
+
   if (isLikelyMp4Request) {
-    // En Vercel Serverless el payload máximo de respuesta es 4.5 MB.
-    // Acotamos cada petición Range de archivos .mp4 a bloques de 3.5 MB (HTTP 206)
-    // para que el elemento <video> solicite los siguientes bloques progresivamente sin error 502/413.
+    // Acota cada petición Range de archivos .mp4 a bloques de 3.5 MB (HTTP 206)
+    // para respetar el límite de respuesta de Vercel Serverless (4.5 MB).
     const rangeMatch = rangeHeader?.match(/bytes=(\d+)-(\d*)/i);
     const startByte = rangeMatch ? Number(rangeMatch[1]) : 0;
     const requestedEnd =
@@ -108,25 +186,25 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const upstreamRes = await fetch(streamUrl, {
+    const upstreamResponse = await fetch(streamUrl, {
       method: "GET",
       headers: upstreamHeaders,
       redirect: "follow",
     });
 
-    if (!upstreamRes.ok && upstreamRes.status !== 206) {
+    if (!upstreamResponse.ok && upstreamResponse.status !== 206) {
       return NextResponse.json(
         {
-          error: `El servidor de origen respondió con HTTP ${upstreamRes.status}`,
+          error: `El servidor de origen respondió con HTTP ${upstreamResponse.status}`,
         },
-        { status: upstreamRes.status, headers: CORS_HEADERS }
+        { status: upstreamResponse.status, headers: CORS_HEADERS }
       );
     }
 
     const contentType = (
-      upstreamRes.headers.get("content-type") || ""
+      upstreamResponse.headers.get("content-type") || ""
     ).toLowerCase();
-    const finalBaseUrl = upstreamRes.url || streamUrl;
+    const finalBaseUrl = upstreamResponse.url || streamUrl;
     const isHlsManifest =
       /\.m3u8(\?|$)/i.test(parsedStreamUrl.pathname) ||
       /\.m3u8/i.test(finalBaseUrl) ||
@@ -135,40 +213,13 @@ export async function GET(request: NextRequest) {
       contentType.includes("mpegurl") ||
       contentType.includes("x-mpegurl");
 
-    const buildProxyUrl = (targetUrl: string): string => {
-      return `/api/stream-proxy?url=${encodeURIComponent(
-        targetUrl
-      )}&referer=${encodeURIComponent(refererHeader)}`;
-    };
-
     if (isHlsManifest) {
-      const manifestText = await upstreamRes.text();
-
-      const rewrittenLines = manifestText.split(/\r?\n/).map((line) => {
-        const trimmed = line.trim();
-        if (!trimmed) return line;
-
-        if (trimmed.startsWith("#")) {
-          // Reescribir también atributos URI="..." en etiquetas como #EXT-X-KEY o #EXT-X-MAP
-          return trimmed.replace(/URI="([^"]+)"/gi, (_full, uriVal: string) => {
-            try {
-              const resolvedUri = new URL(uriVal, finalBaseUrl).toString();
-              return `URI="${buildProxyUrl(resolvedUri)}"`;
-            } catch {
-              return _full;
-            }
-          });
-        }
-
-        try {
-          const resolvedSegmentUrl = new URL(trimmed, finalBaseUrl).toString();
-          return buildProxyUrl(resolvedSegmentUrl);
-        } catch {
-          return trimmed;
-        }
-      });
-
-      const modifiedManifest = rewrittenLines.join("\n");
+      const manifestText = await upstreamResponse.text();
+      const modifiedManifest = rewriteHlsManifestLines(
+        manifestText,
+        finalBaseUrl,
+        refererHeader
+      );
 
       return new NextResponse(modifiedManifest, {
         status: 200,
@@ -180,30 +231,18 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // Si es un segmento HLS (no un archivo .mp4 completo), verificamos si trae cabecera camuflada
-    // (ej. PNG/JPEG/HTML falso antes del byte de sincronización MPEG-TS 0x47 alineado a 188 bytes)
-    const isDirectMp4 =
-      /\.mp4(\?|$)/i.test(parsedStreamUrl.pathname) ||
-      contentType.includes("video/mp4");
+    // Distingue archivos/segmentos MP4 e ISO-BMFF (.mp4, .m4s, .m4v, .cmfv) de segmentos MPEG-TS (.ts)
+    const isMp4OrIsoSegment =
+      /\.(?:mp4|m4s|m4v|cmfv|cmfa)(\?|$)/i.test(parsedStreamUrl.pathname) ||
+      contentType.includes("video/mp4") ||
+      contentType.includes("video/iso.segment") ||
+      contentType.includes("audio/mp4");
 
-    if (!isDirectMp4) {
-      const rawBuffer = Buffer.from(await upstreamRes.arrayBuffer());
-      let tsStartOffset = 0;
-      if (rawBuffer.length > 376 && rawBuffer[0] !== 0x47) {
-        for (let i = 0; i < Math.min(rawBuffer.length - 376, 1024); i++) {
-          if (
-            rawBuffer[i] === 0x47 &&
-            rawBuffer[i + 188] === 0x47 &&
-            rawBuffer[i + 376] === 0x47
-          ) {
-            tsStartOffset = i;
-            break;
-          }
-        }
-      }
-      const cleanTsBuffer =
-        tsStartOffset > 0 ? rawBuffer.subarray(tsStartOffset) : rawBuffer;
-      return new NextResponse(cleanTsBuffer, {
+    if (!isMp4OrIsoSegment) {
+      const rawBuffer = Buffer.from(await upstreamResponse.arrayBuffer());
+      const cleanTsBuffer = stripCamouflagedMpegTsHeader(rawBuffer);
+
+      return new NextResponse(new Uint8Array(cleanTsBuffer), {
         status: 200,
         headers: {
           ...CORS_HEADERS,
@@ -214,9 +253,8 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // Si es un segmento de video (.ts, .m4s) o un archivo .mp4 directo, transmitir el ReadableStream
+    // Transmite directamente el ReadableStream para archivos .mp4 y segmentos fMP4 (.m4s)
     const responseHeaders = new Headers(CORS_HEADERS);
-
     const passthroughHeaderNames = [
       "content-type",
       "content-length",
@@ -226,22 +264,22 @@ export async function GET(request: NextRequest) {
     ];
 
     for (const headerName of passthroughHeaderNames) {
-      const val = upstreamRes.headers.get(headerName);
-      if (val) {
-        responseHeaders.set(headerName, val);
+      const headerValue = upstreamResponse.headers.get(headerName);
+      if (headerValue) {
+        responseHeaders.set(headerName, headerValue);
       }
     }
 
     if (!responseHeaders.has("content-type")) {
-      if (/\.mp4(\?|$)/i.test(parsedStreamUrl.pathname)) {
-        responseHeaders.set("content-type", "video/mp4");
+      if (/\.m4s(\?|$)/i.test(parsedStreamUrl.pathname)) {
+        responseHeaders.set("content-type", "video/iso.segment");
       } else {
-        responseHeaders.set("content-type", "video/mp2t");
+        responseHeaders.set("content-type", "video/mp4");
       }
     }
 
-    return new NextResponse(upstreamRes.body, {
-      status: upstreamRes.status,
+    return new NextResponse(upstreamResponse.body, {
+      status: upstreamResponse.status,
       headers: responseHeaders,
     });
   } catch (error) {
@@ -256,4 +294,3 @@ export async function GET(request: NextRequest) {
     );
   }
 }
-
