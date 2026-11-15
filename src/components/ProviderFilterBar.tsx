@@ -107,13 +107,13 @@ export default function ProviderFilterBar({
                 type="button"
                 key={prov.name}
                 onClick={() => onSelectProvider(prov.id)}
-                className={`relative overflow-hidden rounded-xl px-3 sm:px-4 py-2.5 sm:py-3 text-left transition-all border ${
+                className={`relative min-w-0 overflow-hidden rounded-xl px-3 sm:px-4 py-2.5 sm:py-3 text-left transition-all border ${
                   isSelected
                     ? `bg-gradient-to-br ${prov.badgeColor} text-white border-white/40 shadow-lg sm:scale-[1.02]`
                     : "bg-zinc-800/70 hover:bg-zinc-800 text-zinc-300 border-white/5 hover:border-white/20"
                 }`}
               >
-                <div className="flex items-center justify-between gap-1">
+                <div className="flex items-center justify-between gap-1.5 min-w-0">
                   <span className="text-xs sm:text-sm font-black tracking-tight truncate">
                     {prov.name}
                   </span>
@@ -140,7 +140,7 @@ export default function ProviderFilterBar({
                 type="button"
                 key={genre.name}
                 onClick={() => onSelectGenre(genre.id)}
-                className={`px-3 sm:px-3.5 py-1.5 rounded-full text-xs font-semibold flex-shrink-0 transition border ${
+                className={`px-3 sm:px-3.5 py-2 sm:py-1.5 rounded-full text-xs font-semibold flex-shrink-0 transition border ${
                   isSelected
                     ? "bg-white text-black border-white shadow"
                     : "bg-black/40 text-zinc-300 border-white/10 hover:border-white/30 hover:text-white"

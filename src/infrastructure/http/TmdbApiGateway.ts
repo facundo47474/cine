@@ -255,8 +255,27 @@ export class TmdbApiGateway implements ITmdbGateway {
   private readonly baseUrl = "https://api.themoviedb.org/3";
   private readonly imageBaseUrl = "https://image.tmdb.org/t/p";
   private readonly cacheTtlSeconds = 3600;
+  private readonly httpTimeoutMs = 8000;
 
   constructor(private readonly cacheService: ICacheService) {}
+
+  /**
+   * Ejecuta una petición HTTP hacia la API de TMDB con límite de tiempo (`AbortSignal.timeout`)
+   * para evitar bloqueos indefinidos ante caídas o lentitud externa.
+   *
+   * @param url URL completa de destino.
+   * @param init Opciones estándar de `fetch`.
+   * @returns Respuesta HTTP obtenida.
+   */
+  private fetchWithTimeout(
+    url: string,
+    init: RequestInit = {}
+  ): Promise<Response> {
+    return fetch(url, {
+      ...init,
+      signal: init.signal ?? AbortSignal.timeout(this.httpTimeoutMs),
+    });
+  }
 
   /**
    * Indica si existen credenciales de API (`TMDB_API_KEY` o `TMDB_BEARER_TOKEN`) en el entorno.
@@ -413,7 +432,7 @@ export class TmdbApiGateway implements ITmdbGateway {
     });
 
     try {
-      const response = await fetch(url, {
+      const response = await this.fetchWithTimeout(url, {
         method: "GET",
         headers,
         next: { revalidate: this.cacheTtlSeconds },
@@ -601,7 +620,7 @@ export class TmdbApiGateway implements ITmdbGateway {
       `/movie/${tmdbId}`,
       { language: "es-MX" }
     );
-    const resEs = await fetch(urlEs, {
+    const resEs = await this.fetchWithTimeout(urlEs, {
       method: "GET",
       headers,
       next: { revalidate: this.cacheTtlSeconds },
@@ -622,7 +641,7 @@ export class TmdbApiGateway implements ITmdbGateway {
         const { url: urlEn } = this.buildHeadersAndUrl(`/movie/${tmdbId}`, {
           language: "en-US",
         });
-        const resEn = await fetch(urlEn, {
+        const resEn = await this.fetchWithTimeout(urlEn, {
           method: "GET",
           headers,
           next: { revalidate: this.cacheTtlSeconds },
@@ -738,7 +757,7 @@ export class TmdbApiGateway implements ITmdbGateway {
         `/tv/${tmdbId}/external_ids`,
         {}
       );
-      const response = await fetch(url, {
+      const response = await this.fetchWithTimeout(url, {
         method: "GET",
         headers,
         next: { revalidate: this.cacheTtlSeconds },
@@ -792,7 +811,7 @@ export class TmdbApiGateway implements ITmdbGateway {
           language: "es-MX",
         }
       );
-      const response = await fetch(url, {
+      const response = await this.fetchWithTimeout(url, {
         method: "GET",
         headers,
         next: { revalidate: this.cacheTtlSeconds },
@@ -862,7 +881,7 @@ export class TmdbApiGateway implements ITmdbGateway {
     const { url: urlEs, headers } = this.buildHeadersAndUrl(`/tv/${tmdbId}`, {
       language: "es-MX",
     });
-    const resEs = await fetch(urlEs, {
+    const resEs = await this.fetchWithTimeout(urlEs, {
       method: "GET",
       headers,
       next: { revalidate: this.cacheTtlSeconds },
@@ -883,7 +902,10 @@ export class TmdbApiGateway implements ITmdbGateway {
         const { url: urlEsSpain } = this.buildHeadersAndUrl(`/tv/${tmdbId}`, {
           language: "es-ES",
         });
-        const resEsSpain = await fetch(urlEsSpain, { method: "GET", headers });
+        const resEsSpain = await this.fetchWithTimeout(urlEsSpain, {
+          method: "GET",
+          headers,
+        });
         if (resEsSpain.ok) {
           const dataEsSpain = await resEsSpain.json();
           finalOverview = dataEsSpain.overview?.trim() || "";
@@ -899,7 +921,10 @@ export class TmdbApiGateway implements ITmdbGateway {
         const { url: urlEn } = this.buildHeadersAndUrl(`/tv/${tmdbId}`, {
           language: "en-US",
         });
-        const resEn = await fetch(urlEn, { method: "GET", headers });
+        const resEn = await this.fetchWithTimeout(urlEn, {
+          method: "GET",
+          headers,
+        });
         if (resEn.ok) {
           const dataEn = await resEn.json();
           finalOverview = dataEn.overview?.trim() || "Sin sinopsis disponible.";
@@ -1002,7 +1027,7 @@ export class TmdbApiGateway implements ITmdbGateway {
       `/tv/${tmdbId}/season/${seasonNumber}`,
       { language: "es-MX" }
     );
-    const resEs = await fetch(urlEs, {
+    const resEs = await this.fetchWithTimeout(urlEs, {
       method: "GET",
       headers,
       next: { revalidate: this.cacheTtlSeconds },
@@ -1156,7 +1181,7 @@ export class TmdbApiGateway implements ITmdbGateway {
     });
 
     try {
-      const response = await fetch(url, {
+      const response = await this.fetchWithTimeout(url, {
         method: "GET",
         headers,
         next: { revalidate: this.cacheTtlSeconds },

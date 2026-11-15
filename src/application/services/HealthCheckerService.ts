@@ -65,11 +65,13 @@ export class HealthCheckerService {
    *
    * @param mirror Entidad `MirrorLink` a verificar.
    * @param recalculateMovieAvailability Si es `true`, recalcula inmediatamente la disponibilidad de la película.
+   * @param allowImmediatePermanentDown Si es `false`, aplica tolerancia gradual (`UNDER_REVIEW`) incluso ante 404/410.
    * @returns Detalle completo del resultado de la auditoría (`MirrorAuditDetail`).
    */
   private async probeAndPersistMirror(
     mirror: MirrorLink,
-    recalculateMovieAvailability: boolean = true
+    recalculateMovieAvailability: boolean = true,
+    allowImmediatePermanentDown: boolean = true
   ): Promise<MirrorAuditDetail> {
     const previousStatus = mirror.status;
     const probeResult = await this.linkProber.probeUrl(
@@ -80,7 +82,9 @@ export class HealthCheckerService {
     if (probeResult.isAlive) {
       mirror.markCheckSuccess();
     } else {
-      mirror.markCheckFailure(probeResult.isPermanentGone);
+      mirror.markCheckFailure(
+        allowImmediatePermanentDown && probeResult.isPermanentGone
+      );
     }
 
     await this.mirrorRepository.save(mirror);
@@ -129,7 +133,8 @@ export class HealthCheckerService {
 
   /**
    * Audita un único mirror por su ID (invocado por el reproductor cuando falla un servidor
-   * o desde herramientas administrativas).
+   * o desde herramientas administrativas). Aplica tolerancia gradual de fallos (`UNDER_REVIEW`)
+   * para evitar deshabilitar películas completas ante un fallo puntual del navegador.
    *
    * @param mirrorId UUID del mirror a verificar.
    * @returns Detalle de la auditoría o `null` si el mirror no existe.
@@ -140,7 +145,7 @@ export class HealthCheckerService {
     const mirror = await this.mirrorRepository.findById(mirrorId);
     if (!mirror) return null;
 
-    return this.probeAndPersistMirror(mirror, true);
+    return this.probeAndPersistMirror(mirror, true, false);
   }
 
   /**

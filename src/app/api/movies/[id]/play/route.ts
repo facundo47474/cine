@@ -9,6 +9,25 @@ import {
 export const dynamic = "force-dynamic";
 
 /**
+ * Obtiene de forma aislada el progreso guardado de una película para el usuario.
+ * Si la lectura del historial falla, degrada a `0` segundos para no interrumpir la reproducción.
+ */
+async function obtenerProgresoDeReanudacionSeguro(
+  userId: string,
+  movieId: string
+): Promise<number> {
+  try {
+    return await watchHistoryService.getMovieProgress(userId, movieId);
+  } catch (historyError) {
+    console.warn(
+      `[GET /api/movies/[id]/play] Error leyendo progreso de película ${movieId}:`,
+      historyError
+    );
+    return 0;
+  }
+}
+
+/**
  * Obtiene los datos de reproducción, streams firmados con AES-256-GCM y el progreso guardado
  * de una película (`GET /api/movies/[id]/play`).
  */
@@ -59,7 +78,16 @@ export async function GET(
       );
     }
 
-    const savedProgressSeconds = await watchHistoryService.getMovieProgress(
+    if (playbackData.redirectToSeriesId) {
+      return NextResponse.json({
+        ok: true,
+        redirectToSeriesId: playbackData.redirectToSeriesId,
+        movie: playbackData,
+        savedProgressSeconds: 0,
+      });
+    }
+
+    const savedProgressSeconds = await obtenerProgresoDeReanudacionSeguro(
       userId,
       playbackData.id
     );

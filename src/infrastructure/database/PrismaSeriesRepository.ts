@@ -1,4 +1,4 @@
-import { PrismaClient, Movie as PrismaMovie } from "@prisma/client";
+import { Prisma, PrismaClient, Movie as PrismaMovie } from "@prisma/client";
 import {
   ISeriesRepository,
   UpsertSeriesInput,
@@ -22,6 +22,38 @@ import {
  */
 export class PrismaSeriesRepository implements ISeriesRepository {
   constructor(private readonly db: PrismaClient) {}
+
+  /**
+   * Determina si un error de Prisma corresponde a una condición de carrera transaccional
+   * o de restricción única (`P2002` / `P2034`).
+   */
+  private isPrismaConcurrencyError(error: unknown): boolean {
+    return (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      (error.code === "P2002" || error.code === "P2034")
+    );
+  }
+
+  /**
+   * Ejecuta una operación de escritura en PostgreSQL con un reintento automático breve
+   * en caso de conflicto transaccional concurrente (`P2002` / `P2034`).
+   *
+   * @param databaseOperation Función asíncrona que ejecuta la consulta Prisma.
+   * @returns Resultado de la operación.
+   */
+  private async ejecutarConReintentoAnteConflicto<T>(
+    databaseOperation: () => Promise<T>
+  ): Promise<T> {
+    try {
+      return await databaseOperation();
+    } catch (error) {
+      if (!this.isPrismaConcurrencyError(error)) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      return databaseOperation();
+    }
+  }
 
   /**
    * Busca una serie por su UUID primario en la tabla `Movie`.
@@ -297,58 +329,62 @@ export class PrismaSeriesRepository implements ISeriesRepository {
     }
 
     for (const seasonData of data.seasons) {
-      const seasonRecord = await this.db.season.upsert({
-        where: {
-          seriesId_seasonNumber: {
-            seriesId: seriesRecord.id,
-            seasonNumber: seasonData.seasonNumber,
-          },
-        },
-        update: {
-          title: seasonData.title,
-          overview: seasonData.overview ?? null,
-          posterUrl: seasonData.posterUrl ?? null,
-          releaseDate: seasonData.releaseDate ?? null,
-        },
-        create: {
-          seriesId: seriesRecord.id,
-          seasonNumber: seasonData.seasonNumber,
-          title: seasonData.title,
-          overview: seasonData.overview ?? null,
-          posterUrl: seasonData.posterUrl ?? null,
-          releaseDate: seasonData.releaseDate ?? null,
-        },
-      });
-
-      for (const episodeData of seasonData.episodes) {
-        await this.db.episode.upsert({
+      const seasonRecord = await this.ejecutarConReintentoAnteConflicto(() =>
+        this.db.season.upsert({
           where: {
-            seasonId_episodeNumber: {
-              seasonId: seasonRecord.id,
-              episodeNumber: episodeData.episodeNumber,
+            seriesId_seasonNumber: {
+              seriesId: seriesRecord.id,
+              seasonNumber: seasonData.seasonNumber,
             },
           },
           update: {
-            title: episodeData.title,
-            overview: episodeData.overview ?? null,
-            duration: episodeData.duration ?? 45,
-            ...(episodeData.videoUrl ? { videoUrl: episodeData.videoUrl } : {}),
-            thumbnailUrl: episodeData.thumbnailUrl ?? null,
-            introStart: episodeData.introStart ?? null,
-            introEnd: episodeData.introEnd ?? null,
+            title: seasonData.title,
+            overview: seasonData.overview ?? null,
+            posterUrl: seasonData.posterUrl ?? null,
+            releaseDate: seasonData.releaseDate ?? null,
           },
           create: {
-            seasonId: seasonRecord.id,
-            episodeNumber: episodeData.episodeNumber,
-            title: episodeData.title,
-            overview: episodeData.overview ?? null,
-            duration: episodeData.duration ?? 45,
-            videoUrl: episodeData.videoUrl ?? "",
-            thumbnailUrl: episodeData.thumbnailUrl ?? null,
-            introStart: episodeData.introStart ?? null,
-            introEnd: episodeData.introEnd ?? null,
+            seriesId: seriesRecord.id,
+            seasonNumber: seasonData.seasonNumber,
+            title: seasonData.title,
+            overview: seasonData.overview ?? null,
+            posterUrl: seasonData.posterUrl ?? null,
+            releaseDate: seasonData.releaseDate ?? null,
           },
-        });
+        })
+      );
+
+      for (const episodeData of seasonData.episodes) {
+        await this.ejecutarConReintentoAnteConflicto(() =>
+          this.db.episode.upsert({
+            where: {
+              seasonId_episodeNumber: {
+                seasonId: seasonRecord.id,
+                episodeNumber: episodeData.episodeNumber,
+              },
+            },
+            update: {
+              title: episodeData.title,
+              overview: episodeData.overview ?? null,
+              duration: episodeData.duration ?? 45,
+              ...(episodeData.videoUrl ? { videoUrl: episodeData.videoUrl } : {}),
+              thumbnailUrl: episodeData.thumbnailUrl ?? null,
+              introStart: episodeData.introStart ?? null,
+              introEnd: episodeData.introEnd ?? null,
+            },
+            create: {
+              seasonId: seasonRecord.id,
+              episodeNumber: episodeData.episodeNumber,
+              title: episodeData.title,
+              overview: episodeData.overview ?? null,
+              duration: episodeData.duration ?? 45,
+              videoUrl: episodeData.videoUrl ?? "",
+              thumbnailUrl: episodeData.thumbnailUrl ?? null,
+              introStart: episodeData.introStart ?? null,
+              introEnd: episodeData.introEnd ?? null,
+            },
+          })
+        );
       }
     }
 
@@ -362,7 +398,7 @@ export class PrismaSeriesRepository implements ISeriesRepository {
 
   /**
    * Reemplaza transaccionalmente los enlaces mirror de un episodio y devuelve las entidades
-   * `EpisodeMirror` creadas con sus UUID reales en base de datos.
+   * `EpisodeMirror` creadas con sus UUID reales en base de datos, tolerando conflictos concurrentes.
    *
    * @param episodeId UUID del episodio.
    * @param mirrors Lista de mirrors a persistir.
@@ -386,10 +422,18 @@ export class PrismaSeriesRepository implements ISeriesRepository {
       consecutiveFailures: 0,
     }));
 
-    await this.db.$transaction([
-      this.db.episodeMirror.deleteMany({ where: { episodeId } }),
-      this.db.episodeMirror.createMany({ data: mirrorCreateData }),
-    ]);
+    try {
+      await this.ejecutarConReintentoAnteConflicto(() =>
+        this.db.$transaction([
+          this.db.episodeMirror.deleteMany({ where: { episodeId } }),
+          this.db.episodeMirror.createMany({ data: mirrorCreateData }),
+        ])
+      );
+    } catch (error) {
+      if (!this.isPrismaConcurrencyError(error)) {
+        throw error;
+      }
+    }
 
     const savedRows = await this.db.episodeMirror.findMany({
       where: { episodeId },

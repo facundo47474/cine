@@ -34,9 +34,9 @@ export default function EpisodeCard({
       href={`/watch/episode/${episode.id}`}
       className="group flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-5 p-3 sm:p-4 rounded-xl hover:bg-zinc-800/60 transition border border-transparent hover:border-zinc-700/60"
     >
-      {/* Encabezado Mobile / Número Desktop */}
-      <div className="flex items-center gap-3 sm:gap-4 flex-shrink-0">
-        <span className="text-xl sm:text-2xl font-bold text-zinc-500 group-hover:text-white transition w-6 sm:w-8 text-center">
+      {/* Encabezado / Número Desktop + Miniatura 16:9 sin desborde móvil */}
+      <div className="flex items-center gap-3 sm:gap-4 w-full sm:w-auto flex-shrink-0">
+        <span className="hidden sm:block text-2xl font-bold text-zinc-500 group-hover:text-white transition w-8 text-center flex-shrink-0">
           {episode.episodeNumber}
         </span>
 
@@ -49,6 +49,10 @@ export default function EpisodeCard({
             loading="lazy"
             className="w-full h-full object-cover object-center group-hover:scale-105 transition duration-300"
           />
+
+          <span className="sm:hidden absolute top-2 left-2 z-10 px-2 py-0.5 rounded bg-black/80 border border-white/15 text-[11px] font-bold text-white backdrop-blur-sm">
+            Episodio {episode.episodeNumber}
+          </span>
 
           {/* Overlay oscuro al hover */}
           <div className="absolute inset-0 bg-black/30 group-hover:bg-black/60 transition flex items-center justify-center">
@@ -75,12 +79,15 @@ export default function EpisodeCard({
       </div>
 
       {/* Información del episodio */}
-      <div className="flex-1 min-w-0 space-y-1">
-        <div className="flex items-center justify-between gap-2">
-          <h3 className="text-sm sm:text-base font-bold text-zinc-100 group-hover:text-netflix-red transition truncate">
+      <div className="flex-1 min-w-0 w-full space-y-1">
+        <div className="flex items-start justify-between gap-2">
+          <h3 className="text-sm sm:text-base font-bold text-zinc-100 group-hover:text-netflix-red transition line-clamp-2 sm:line-clamp-1 leading-snug">
+            <span className="sm:hidden text-zinc-400 mr-1">
+              {episode.episodeNumber}.
+            </span>
             {episode.title}
           </h3>
-          <span className="text-xs sm:text-sm font-medium text-zinc-400 flex-shrink-0">
+          <span className="text-xs sm:text-sm font-medium text-zinc-400 flex-shrink-0 pt-0.5">
             {durationLabel}
           </span>
         </div>

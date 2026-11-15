@@ -30,4 +30,5 @@ export interface MoviePlaybackDto {
   genres: string[];
   isAvailable: boolean;
   streams: SignedMirrorStreamDto[];
+  redirectToSeriesId?: string;
 }

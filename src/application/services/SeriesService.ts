@@ -6,6 +6,7 @@ import { IMirrorResolver } from "@/domain/interfaces/IMirrorResolver";
 import { SignedMirrorStreamDto } from "../dto/PlaybackStreamDto";
 import { MirrorFormat } from "@/domain/enums/MirrorFormat";
 import { MirrorStatus } from "@/domain/enums/MirrorStatus";
+import { Episode } from "@/domain/entities/Episode";
 import { WatchHistory } from "@/domain/entities/WatchHistory";
 import {
   SeriesDetailsDto,
@@ -23,6 +24,7 @@ import {
   isMultiEmbedAggregatorUrl,
   isStreamwish,
 } from "@/domain/utils/streamwishMatcher";
+import { InFlightOperationCoalescer } from "../utils/InFlightOperationCoalescer";
 
 interface CandidateEpisodeMirror {
   id?: string;
@@ -43,6 +45,8 @@ interface CandidateEpisodeMirror {
  * - Resolver mirrors de capítulos priorizando Streamwish en Español Latino y firmar tokens de reproducción.
  */
 export class SeriesService {
+  private readonly seriesOperationCoalescer = new InFlightOperationCoalescer();
+
   constructor(
     private readonly seriesRepository: ISeriesRepository,
     private readonly historyRepository: IWatchHistoryRepository,
@@ -70,6 +74,109 @@ export class SeriesService {
   }
 
   /**
+   * Importa desde TMDB e inicializa en PostgreSQL los metadatos de una serie junto con su
+   * primera temporada disponible, tolerando fallos parciales en créditos o en capítulos.
+   */
+  private async importarSerieDesdeTmdbConRespaldoSeguro(
+    slugOrId: string,
+    tmdbId: number
+  ): Promise<{
+    seriesDetails: Awaited<ReturnType<ISeriesRepository["findSeriesDetails"]>>;
+    cast: CastMemberDto[];
+  }> {
+    return this.seriesOperationCoalescer.executeSingleFlight(
+      `series-import:${tmdbId}`,
+      async () => {
+        try {
+          const [tvMetadata, tmdbCast] = await Promise.all([
+            this.tmdbGateway.fetchTvMetadata(tmdbId),
+            this.tmdbGateway.fetchTvCredits(tmdbId).catch(() => []),
+          ]);
+
+          const firstSeasonNumber = tvMetadata.seasons[0]?.seasonNumber ?? 1;
+          const firstSeasonDetails = await this.tmdbGateway
+            .fetchTvSeason(tmdbId, firstSeasonNumber)
+            .catch(() => null);
+
+          const cast: CastMemberDto[] = tmdbCast.map((member) => ({
+            id: member.id,
+            name: member.name,
+            character: member.character,
+            profileUrl: member.profileUrl,
+          }));
+
+          const remainingSeasons = tvMetadata.seasons
+            .filter(
+              (season) =>
+                !firstSeasonDetails ||
+                season.seasonNumber !== firstSeasonDetails.seasonNumber
+            )
+            .map((season) => ({
+              seasonNumber: season.seasonNumber,
+              title: season.title,
+              overview: season.overview,
+              posterUrl: season.posterUrl,
+              episodes: [],
+            }));
+
+          const seasonsToPersist = firstSeasonDetails
+            ? [
+                {
+                  seasonNumber: firstSeasonDetails.seasonNumber,
+                  title: firstSeasonDetails.title,
+                  overview: firstSeasonDetails.overview,
+                  posterUrl: firstSeasonDetails.posterUrl,
+                  episodes: firstSeasonDetails.episodes.map((episode) => ({
+                    episodeNumber: episode.episodeNumber,
+                    title: episode.title,
+                    overview: episode.overview,
+                    duration: episode.duration,
+                    thumbnailUrl: episode.thumbnailUrl,
+                  })),
+                },
+                ...remainingSeasons,
+              ]
+            : remainingSeasons.length > 0
+            ? remainingSeasons
+            : [
+                {
+                  seasonNumber: firstSeasonNumber,
+                  title: `Temporada ${firstSeasonNumber}`,
+                  overview: null,
+                  posterUrl: null,
+                  episodes: [],
+                },
+              ];
+
+          const persistedSeries = await this.seriesRepository.upsertSeries({
+            tmdbId,
+            title: tvMetadata.title,
+            originalTitle: tvMetadata.originalTitle,
+            synopsis: tvMetadata.synopsis,
+            posterUrl: tvMetadata.posterUrl,
+            backdropUrl: tvMetadata.backdropUrl,
+            releaseYear: tvMetadata.releaseYear,
+            rating: tvMetadata.rating,
+            qualityBadge: "HD",
+            genres: tvMetadata.genres,
+            seasons: seasonsToPersist,
+          });
+
+          return { seriesDetails: persistedSeries, cast };
+        } catch (error) {
+          console.error(
+            `[SeriesService] Error auto-importando serie TMDB #${tmdbId}:`,
+            error
+          );
+          const fallbackDetails =
+            await this.seriesRepository.findSeriesDetails(slugOrId);
+          return { seriesDetails: fallbackDetails, cast: [] };
+        }
+      }
+    );
+  }
+
+  /**
    * Obtiene los detalles completos de una serie (con temporadas, episodios de la temporada inicial,
    * reparto principal y estado de reanudación del usuario).
    *
@@ -89,69 +196,12 @@ export class SeriesService {
         seriesDetails?.series.tmdbId ?? this.parseTmdbIdFromSlug(slugOrId);
 
       if (tmdbId && tmdbId > 0) {
-        try {
-          const [tvMetadata, seasonOneDetails, tmdbCast] = await Promise.all([
-            this.tmdbGateway.fetchTvMetadata(tmdbId),
-            this.tmdbGateway.fetchTvSeason(tmdbId, 1),
-            this.tmdbGateway.fetchTvCredits(tmdbId),
-          ]);
-
-          preloadedCast = tmdbCast.map((member) => ({
-            id: member.id,
-            name: member.name,
-            character: member.character,
-            profileUrl: member.profileUrl,
-          }));
-
-          seriesDetails = await this.seriesRepository.upsertSeries({
-            tmdbId,
-            title: tvMetadata.title,
-            originalTitle: tvMetadata.originalTitle,
-            synopsis: tvMetadata.synopsis,
-            posterUrl: tvMetadata.posterUrl,
-            backdropUrl: tvMetadata.backdropUrl,
-            releaseYear: tvMetadata.releaseYear,
-            rating: tvMetadata.rating,
-            qualityBadge: "HD",
-            genres: tvMetadata.genres,
-            seasons: [
-              {
-                seasonNumber: seasonOneDetails.seasonNumber,
-                title: seasonOneDetails.title,
-                overview: seasonOneDetails.overview,
-                posterUrl: seasonOneDetails.posterUrl,
-                episodes: seasonOneDetails.episodes.map((episode) => ({
-                  episodeNumber: episode.episodeNumber,
-                  title: episode.title,
-                  overview: episode.overview,
-                  duration: episode.duration,
-                  thumbnailUrl: episode.thumbnailUrl,
-                })),
-              },
-              ...tvMetadata.seasons
-                .filter(
-                  (season) =>
-                    season.seasonNumber !== seasonOneDetails.seasonNumber
-                )
-                .map((season) => ({
-                  seasonNumber: season.seasonNumber,
-                  title: season.title,
-                  overview: season.overview,
-                  posterUrl: season.posterUrl,
-                  episodes: [],
-                })),
-            ],
-          });
-        } catch (error) {
-          console.error(
-            `[SeriesService] Error auto-importando serie TMDB #${tmdbId}:`,
-            error
-          );
-          if (!seriesDetails) {
-            seriesDetails =
-              await this.seriesRepository.findSeriesDetails(slugOrId);
-          }
+        const importOutcome =
+          await this.importarSerieDesdeTmdbConRespaldoSeguro(slugOrId, tmdbId);
+        if (importOutcome.seriesDetails) {
+          seriesDetails = importOutcome.seriesDetails;
         }
+        preloadedCast = importOutcome.cast;
       }
     }
 
@@ -472,6 +522,284 @@ export class SeriesService {
   }
 
   /**
+   * Construye enlaces de contingencia multi-servidor para un capítulo específico
+   * cuando la resolución primaria o la base de datos no devuelven espejos reproducibles.
+   */
+  private construirMirrorsDeContingenciaParaEpisodio(
+    tmdbId: number,
+    seasonNumber: number,
+    episodeNumber: number,
+    imdbId?: string | null
+  ): CandidateEpisodeMirror[] {
+    const emergencyMirrors: CandidateEpisodeMirror[] = [];
+    let nextPriority = 70;
+
+    if (imdbId && imdbId.trim().startsWith("tt")) {
+      const paddedEpisode = String(episodeNumber).padStart(2, "0");
+      const embed69EpisodeSlug = `${imdbId.trim()}-${seasonNumber}x${paddedEpisode}`;
+
+      emergencyMirrors.push(
+        {
+          serverName: "Embed69-Fallback-Lat",
+          language: "Latino",
+          rawUrl: `https://embed69.org/f/${embed69EpisodeSlug}?lang=LAT&prefer=streamwish`,
+          format: MirrorFormat.EMBED,
+          quality: "1080p",
+          priority: nextPriority++,
+        },
+        {
+          serverName: "Embed69-Fallback-Sub",
+          language: "Inglés (Sub)",
+          rawUrl: `https://embed69.org/f/${embed69EpisodeSlug}?lang=SUB&prefer=streamwish`,
+          format: MirrorFormat.EMBED,
+          quality: "1080p",
+          priority: nextPriority++,
+        }
+      );
+    }
+
+    emergencyMirrors.push(
+      {
+        serverName: "VidLink-Contingencia",
+        language: "Inglés (Sub)",
+        rawUrl: `https://vidlink.pro/tv/${tmdbId}/${seasonNumber}/${episodeNumber}`,
+        format: MirrorFormat.EMBED,
+        quality: "1080p",
+        priority: nextPriority++,
+      },
+      {
+        serverName: "VidSrcCC-Contingencia",
+        language: "Inglés (Sub)",
+        rawUrl: `https://vidsrc.cc/v2/embed/tv/${tmdbId}/${seasonNumber}/${episodeNumber}`,
+        format: MirrorFormat.EMBED,
+        quality: "1080p",
+        priority: nextPriority++,
+      },
+      {
+        serverName: "AutoEmbed-Contingencia",
+        language: "Inglés (Sub)",
+        rawUrl: `https://autoembed.cc/tv/tmdb/${tmdbId}-${seasonNumber}-${episodeNumber}`,
+        format: MirrorFormat.EMBED,
+        quality: "1080p",
+        priority: nextPriority++,
+      },
+      {
+        serverName: "Backup-Sub",
+        language: "Inglés (Sub)",
+        rawUrl: `https://vidsrc.me/embed/tv?tmdb=${tmdbId}&season=${seasonNumber}&episode=${episodeNumber}&ds_lang=es`,
+        format: MirrorFormat.EMBED,
+        quality: "1080p",
+        priority: 99,
+      }
+    );
+
+    return emergencyMirrors;
+  }
+
+  /**
+   * Resuelve de forma segura y coalescida (*Singleflight*) los espejos candidatos de un episodio,
+   * garantizando degradación a mirrors existentes o de contingencia ante cualquier fallo externo.
+   */
+  private async resolverMirrorsDeEpisodioConRespaldoSeguro(
+    episode: Episode,
+    tmdbId: number | null,
+    seasonNumber: number,
+    episodeNumber: number
+  ): Promise<CandidateEpisodeMirror[]> {
+    const candidateMirrors: CandidateEpisodeMirror[] = [];
+
+    // 1. Enlace directo videoUrl si fue cargado en el episodio
+    if (episode.videoUrl && episode.videoUrl.trim() !== "") {
+      const cleanVideoUrl = episode.videoUrl.trim();
+      const videoBelongsToStreamwish = isStreamwish({ url: cleanVideoUrl });
+      candidateMirrors.push({
+        id: `ep-direct-${episode.id}`,
+        serverName: videoBelongsToStreamwish
+          ? "Streamwish-Lat"
+          : "Direct-Video-Lat",
+        language: "Latino",
+        rawUrl: cleanVideoUrl,
+        format: cleanVideoUrl.includes(".m3u8")
+          ? MirrorFormat.HLS
+          : MirrorFormat.EMBED,
+        quality: "1080p",
+        priority: videoBelongsToStreamwish ? 1 : 50,
+      });
+    }
+
+    // 2. Mirrors persistidos en BD (si ya cuenta con un Streamwish directo o servidor extraíble limpio)
+    const existingPlayableMirrors = episode.getPlayableMirrors();
+    const hasDirectResolvedInDb = existingPlayableMirrors.some(
+      (mirror) =>
+        !isMultiEmbedAggregatorUrl(mirror.rawUrl) &&
+        (isStreamwish({ serverName: mirror.serverName, url: mirror.rawUrl }) ||
+          (FALLBACK_IF_EMPTY &&
+            isExtractableCleanHost({
+              serverName: mirror.serverName,
+              url: mirror.rawUrl,
+            })))
+    );
+
+    if (hasDirectResolvedInDb) {
+      for (const mirror of existingPlayableMirrors) {
+        candidateMirrors.push({
+          id: `ep-${mirror.id}`,
+          serverName: mirror.serverName,
+          language: mirror.language,
+          rawUrl: mirror.rawUrl,
+          format: mirror.format,
+          quality: mirror.quality,
+          priority: mirror.priority,
+        });
+      }
+    } else if (tmdbId && this.mirrorResolver) {
+      const resolvedCandidates =
+        await this.seriesOperationCoalescer.executeSingleFlight(
+          `episode-mirrors:${episode.id}`,
+          async () => {
+            try {
+              const imdbId = await this.tmdbGateway
+                .fetchTvImdbId(tmdbId)
+                .catch(() => null);
+              const resolvedMirrors =
+                await this.mirrorResolver!.resolveDefaultMirrorsForTvEpisode(
+                  tmdbId,
+                  seasonNumber,
+                  episodeNumber,
+                  imdbId
+                );
+
+              const effectiveMirrors =
+                resolvedMirrors.length > 0
+                  ? resolvedMirrors
+                  : this.construirMirrorsDeContingenciaParaEpisodio(
+                      tmdbId,
+                      seasonNumber,
+                      episodeNumber,
+                      imdbId
+                    ).map((m) => ({
+                      serverName: m.serverName,
+                      language: m.language,
+                      rawUrl: m.rawUrl,
+                      format: m.format,
+                      quality: m.quality,
+                      priority: m.priority,
+                    }));
+
+              const hasNewlyResolvedDirect = effectiveMirrors.some(
+                (mirror) =>
+                  isStreamwish({
+                    serverName: mirror.serverName,
+                    url: mirror.rawUrl,
+                  }) && !isMultiEmbedAggregatorUrl(mirror.rawUrl)
+              );
+
+              let persistedEpisodeMirrors = existingPlayableMirrors;
+              if (
+                hasNewlyResolvedDirect ||
+                (existingPlayableMirrors.length === 0 &&
+                  effectiveMirrors.length > 0)
+              ) {
+                try {
+                  persistedEpisodeMirrors =
+                    await this.seriesRepository.saveEpisodeMirrors(
+                      episode.id,
+                      effectiveMirrors
+                    );
+                } catch {
+                  // No interrumpir la reproducción si falla el guardado en caché
+                }
+              }
+
+              if (persistedEpisodeMirrors.length > 0 && hasNewlyResolvedDirect) {
+                return persistedEpisodeMirrors.map((mirror) => ({
+                  id: `ep-${mirror.id}`,
+                  serverName: mirror.serverName,
+                  language: mirror.language,
+                  rawUrl: mirror.rawUrl,
+                  format: mirror.format,
+                  quality: mirror.quality,
+                  priority: mirror.priority,
+                }));
+              }
+
+              return effectiveMirrors.map((mirror) => ({
+                serverName: mirror.serverName,
+                language: mirror.language || "Latino",
+                rawUrl: mirror.rawUrl,
+                format: mirror.format,
+                quality: mirror.quality || "1080p",
+                priority: mirror.priority,
+              }));
+            } catch (error) {
+              console.warn(
+                `[SeriesService] Error resolviendo mirrors de episodio ${episode.id} (TMDB ${tmdbId} S${seasonNumber}E${episodeNumber}), aplicando contingencia:`,
+                error
+              );
+              if (existingPlayableMirrors.length > 0) {
+                return existingPlayableMirrors.map((mirror) => ({
+                  id: `ep-${mirror.id}`,
+                  serverName: mirror.serverName,
+                  language: mirror.language,
+                  rawUrl: mirror.rawUrl,
+                  format: mirror.format,
+                  quality: mirror.quality,
+                  priority: mirror.priority,
+                }));
+              }
+              return this.construirMirrorsDeContingenciaParaEpisodio(
+                tmdbId,
+                seasonNumber,
+                episodeNumber
+              );
+            }
+          }
+        );
+
+      candidateMirrors.push(...resolvedCandidates);
+    } else if (tmdbId) {
+      const imdbId = await this.tmdbGateway
+        .fetchTvImdbId(tmdbId)
+        .catch(() => null);
+      candidateMirrors.push(
+        ...this.construirMirrorsDeContingenciaParaEpisodio(
+          tmdbId,
+          seasonNumber,
+          episodeNumber,
+          imdbId
+        )
+      );
+    }
+
+    // Garantía de cero streams vacíos: recupera espejos degradados o genera contingencia
+    if (candidateMirrors.length === 0) {
+      if (episode.mirrors.length > 0) {
+        for (const mirror of episode.mirrors) {
+          candidateMirrors.push({
+            id: `ep-${mirror.id}`,
+            serverName: mirror.serverName,
+            language: mirror.language,
+            rawUrl: mirror.rawUrl,
+            format: mirror.format,
+            quality: mirror.quality,
+            priority: mirror.priority,
+          });
+        }
+      } else if (tmdbId) {
+        candidateMirrors.push(
+          ...this.construirMirrorsDeContingenciaParaEpisodio(
+            tmdbId,
+            seasonNumber,
+            episodeNumber
+          )
+        );
+      }
+    }
+
+    return candidateMirrors;
+  }
+
+  /**
    * Obtiene los datos completos de reproducción de un episodio (`EpisodePlaybackDto`),
    * incluyendo navegación al capítulo anterior/siguiente, lista de temporadas y streams firmados.
    *
@@ -557,144 +885,13 @@ export class SeriesService {
     const seasonNumber = currentSeason.seasonNumber;
     const episodeNumber = episode.episodeNumber;
 
-    const candidateMirrors: CandidateEpisodeMirror[] = [];
-
-    // 1. Enlace directo videoUrl si fue cargado en el episodio
-    if (episode.videoUrl && episode.videoUrl.trim() !== "") {
-      const cleanVideoUrl = episode.videoUrl.trim();
-      const videoBelongsToStreamwish = isStreamwish({ url: cleanVideoUrl });
-      candidateMirrors.push({
-        id: `ep-direct-${episode.id}`,
-        serverName: videoBelongsToStreamwish
-          ? "Streamwish-Lat"
-          : "Direct-Video-Lat",
-        language: "Latino",
-        rawUrl: cleanVideoUrl,
-        format: cleanVideoUrl.includes(".m3u8")
-          ? MirrorFormat.HLS
-          : MirrorFormat.EMBED,
-        quality: "1080p",
-        priority: videoBelongsToStreamwish ? 1 : 50,
-      });
-    }
-
-    // 2. Mirrors persistidos en BD (si ya cuenta con un Streamwish directo o servidor extraíble limpio)
-    const existingPlayableMirrors = episode.getPlayableMirrors();
-    const hasDirectResolvedInDb = existingPlayableMirrors.some(
-      (mirror) =>
-        !isMultiEmbedAggregatorUrl(mirror.rawUrl) &&
-        (isStreamwish({ serverName: mirror.serverName, url: mirror.rawUrl }) ||
-          (FALLBACK_IF_EMPTY &&
-            isExtractableCleanHost({
-              serverName: mirror.serverName,
-              url: mirror.rawUrl,
-            })))
-    );
-
-    if (hasDirectResolvedInDb) {
-      for (const mirror of existingPlayableMirrors) {
-        candidateMirrors.push({
-          id: `ep-${mirror.id}`,
-          serverName: mirror.serverName,
-          language: mirror.language,
-          rawUrl: mirror.rawUrl,
-          format: mirror.format,
-          quality: mirror.quality,
-          priority: mirror.priority,
-        });
-      }
-    } else if (tmdbId && this.mirrorResolver) {
-      const imdbId = await this.tmdbGateway.fetchTvImdbId(tmdbId);
-      const resolvedMirrors =
-        await this.mirrorResolver.resolveDefaultMirrorsForTvEpisode(
-          tmdbId,
-          seasonNumber,
-          episodeNumber,
-          imdbId
-        );
-
-      const hasNewlyResolvedDirect = resolvedMirrors.some(
-        (mirror) =>
-          isStreamwish({ serverName: mirror.serverName, url: mirror.rawUrl }) &&
-          !isMultiEmbedAggregatorUrl(mirror.rawUrl)
+    const candidateMirrors =
+      await this.resolverMirrorsDeEpisodioConRespaldoSeguro(
+        episode,
+        tmdbId,
+        seasonNumber,
+        episodeNumber
       );
-
-      let persistedEpisodeMirrors = existingPlayableMirrors;
-      if (
-        hasNewlyResolvedDirect ||
-        (existingPlayableMirrors.length === 0 && resolvedMirrors.length > 0)
-      ) {
-        try {
-          persistedEpisodeMirrors =
-            await this.seriesRepository.saveEpisodeMirrors(
-              episode.id,
-              resolvedMirrors
-            );
-        } catch {
-          // No interrumpir la reproducción si falla el guardado en caché
-        }
-      }
-
-      if (persistedEpisodeMirrors.length > 0 && hasNewlyResolvedDirect) {
-        for (const mirror of persistedEpisodeMirrors) {
-          candidateMirrors.push({
-            id: `ep-${mirror.id}`,
-            serverName: mirror.serverName,
-            language: mirror.language,
-            rawUrl: mirror.rawUrl,
-            format: mirror.format,
-            quality: mirror.quality,
-            priority: mirror.priority,
-          });
-        }
-      } else {
-        for (const mirror of resolvedMirrors) {
-          candidateMirrors.push({
-            serverName: mirror.serverName,
-            language: mirror.language || "Latino",
-            rawUrl: mirror.rawUrl,
-            format: mirror.format,
-            quality: mirror.quality || "1080p",
-            priority: mirror.priority,
-          });
-        }
-      }
-    } else if (tmdbId) {
-      const imdbId = await this.tmdbGateway.fetchTvImdbId(tmdbId);
-
-      if (imdbId) {
-        const paddedEpisode = String(episodeNumber).padStart(2, "0");
-        const embed69EpisodeSlug = `${imdbId}-${seasonNumber}x${paddedEpisode}`;
-
-        candidateMirrors.push(
-          {
-            serverName: "Embed69-Fallback-Lat",
-            language: "Latino",
-            rawUrl: `https://embed69.org/f/${embed69EpisodeSlug}?lang=LAT&prefer=streamwish`,
-            format: MirrorFormat.EMBED,
-            quality: "1080p",
-            priority: 70,
-          },
-          {
-            serverName: "Embed69-Fallback-Sub",
-            language: "Inglés (Sub)",
-            rawUrl: `https://embed69.org/f/${embed69EpisodeSlug}?lang=SUB&prefer=streamwish`,
-            format: MirrorFormat.EMBED,
-            quality: "1080p",
-            priority: 71,
-          }
-        );
-      }
-
-      candidateMirrors.push({
-        serverName: "Backup-Sub",
-        language: "Inglés (Sub)",
-        rawUrl: `https://vidsrc.me/embed/tv?tmdb=${tmdbId}&season=${seasonNumber}&episode=${episodeNumber}&ds_lang=es`,
-        format: MirrorFormat.EMBED,
-        quality: "1080p",
-        priority: 99,
-      });
-    }
 
     const prioritizedMirrors = filterAndPrioritizeMirrors(candidateMirrors, {
       strictOnly: STRICT_STREAMWISH_ONLY,
@@ -738,12 +935,19 @@ export class SeriesService {
 
     let savedProgressSeconds = 0;
     if (userId) {
-      const historyRecord = await this.historyRepository.findEpisodeProgress(
-        userId,
-        episode.id
-      );
-      if (historyRecord && !historyRecord.completed) {
-        savedProgressSeconds = historyRecord.progressSeconds;
+      try {
+        const historyRecord = await this.historyRepository.findEpisodeProgress(
+          userId,
+          episode.id
+        );
+        if (historyRecord && !historyRecord.completed) {
+          savedProgressSeconds = historyRecord.progressSeconds;
+        }
+      } catch (historyError) {
+        console.warn(
+          `[SeriesService] Error leyendo progreso del episodio ${episode.id}:`,
+          historyError
+        );
       }
     }
 

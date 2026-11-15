@@ -2,20 +2,23 @@
 
 import React from "react";
 import Link from "next/link";
-import { Play, Star, Clock, Sparkles } from "lucide-react";
+import { Play, Star, Clock, Sparkles, Plus, Check } from "lucide-react";
 import { CatalogCardDto } from "@/application/dto/CatalogFeedDto";
+import { useMembership } from "@/components/MembershipProvider";
 
 interface HeroBannerProps {
   movie: CatalogCardDto;
 }
 
 export default function HeroBanner({ movie }: HeroBannerProps) {
+  const { isInMyList, toggleMyListItem } = useMembership();
+  const inMyList = isInMyList(movie.id);
   const bgImage = movie.backdropUrl || movie.posterUrl;
   const isSeries = movie.mediaType === "SERIES";
   const watchHref = isSeries ? `/series/${movie.id}` : `/watch/${movie.id}`;
 
   return (
-    <section className="relative w-full h-[64vh] sm:h-[74vh] min-h-[420px] sm:min-h-[500px] flex items-end pb-12 sm:pb-16 overflow-hidden">
+    <section className="relative w-full min-h-[460px] sm:min-h-[520px] sm:h-[74vh] flex items-end pt-28 sm:pt-24 pb-14 sm:pb-16 overflow-hidden">
       <div
         className="absolute inset-0 bg-cover bg-center scale-105 transition-transform duration-1000"
         style={{ backgroundImage: `url(${bgImage})` }}
@@ -63,14 +66,36 @@ export default function HeroBanner({ movie }: HeroBannerProps) {
             ))}
           </div>
 
-          <div className="pt-1 sm:pt-2 flex flex-wrap items-center gap-3">
+          <div className="pt-1 sm:pt-2 flex flex-wrap items-center gap-2.5 sm:gap-3">
             <Link
-              className="inline-flex items-center justify-center gap-2 w-full sm:w-auto px-7 py-3 rounded-lg bg-netflix-red text-white font-bold text-sm hover:bg-red-700 active:scale-[0.99] transition shadow-lg"
+              className="inline-flex items-center justify-center gap-2 w-full sm:w-auto min-h-[44px] px-7 py-3 rounded-lg bg-netflix-red text-white font-bold text-sm hover:bg-red-700 active:scale-[0.99] transition shadow-lg"
               href={watchHref}
             >
               <Play className="w-5 h-5 fill-white" />
               Ver ahora
             </Link>
+
+            <button
+              type="button"
+              onClick={() => toggleMyListItem(movie)}
+              className={`inline-flex items-center justify-center gap-2 w-full sm:w-auto min-h-[44px] px-5 py-3 rounded-lg border text-sm font-bold transition shadow-lg ${
+                inMyList
+                  ? "bg-white/15 border-emerald-400/50 text-emerald-300 hover:bg-white/20"
+                  : "bg-zinc-900/85 border-white/20 text-white hover:bg-white/15"
+              }`}
+            >
+              {inMyList ? (
+                <>
+                  <Check className="w-4 h-4" />
+                  <span>En Mi Lista</span>
+                </>
+              ) : (
+                <>
+                  <Plus className="w-4 h-4" />
+                  <span>Mi Lista</span>
+                </>
+              )}
+            </button>
           </div>
         </div>
       </div>

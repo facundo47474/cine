@@ -1,8 +1,8 @@
 "use client";
 
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import Hls from "hls.js";
-import { ShieldCheck, ExternalLink, X, AlertTriangle } from "lucide-react";
+import { ShieldCheck, ExternalLink, X } from "lucide-react";
 import { isStreamwish } from "@/domain/utils/streamwishMatcher";
 
 export type SmartPlayerStatus = "loading" | "playing_native" | "playing_iframe";
@@ -48,6 +48,8 @@ export interface SmartPlayerProps {
   onStatusChange?: (status: SmartPlayerStatus) => void;
   onNativeStreamReady?: (stream: ExtractedNativeStream | null) => void;
   hideInlineHelperBar?: boolean;
+  modoEscudoActivo?: boolean;
+  onRequestModoEscudo?: () => void;
   videoElementRef?: React.MutableRefObject<HTMLVideoElement | null>;
   iframeElementRef?: React.MutableRefObject<HTMLIFrameElement | null>;
 }
@@ -158,10 +160,18 @@ export async function detectBraveOrAdblock(): Promise<boolean> {
 }
 
 /**
- * Barra Contextual No Intrusiva (Smart Adblock Helper)
- * Se muestra debajo del reproductor únicamente cuando está en modo iframe y no se detectó Brave/Adblock.
+ * Barra Contextual No Intrusiva (Smart Adblock Helper / Modo Escudo)
+ * Prioriza ofrecer el Modo Escudo (reproductor nativo limpio de Piloto Pro) cuando el usuario está en modo iframe.
  */
-export function SmartAdblockHelperBar({ active }: { active: boolean }) {
+export function SmartAdblockHelperBar({
+  active,
+  modoEscudoActivo = true,
+  onActivateModoEscudo,
+}: {
+  active: boolean;
+  modoEscudoActivo?: boolean;
+  onActivateModoEscudo?: () => void;
+}) {
   const [env, setEnv] = useState<SmartPlayerEnv>("desktop-chrome");
   const [hasProtection, setHasProtection] = useState<boolean>(true);
   const [dismissed, setDismissed] = useState<boolean>(false);
@@ -212,82 +222,105 @@ export function SmartAdblockHelperBar({ active }: { active: boolean }) {
     window.location.href = intentUrl;
   }, []);
 
-  if (!active || !checked || hasProtection || dismissed) {
+  const showModoEscudoPromo = Boolean(!modoEscudoActivo && onActivateModoEscudo);
+
+  if (!active || (!showModoEscudoPromo && (!checked || hasProtection || dismissed))) {
     return null;
   }
 
   return (
-    <div className="w-full rounded-xl bg-zinc-900/95 border border-white/10 px-3.5 py-2.5 sm:px-4 sm:py-3 shadow-lg backdrop-blur-md flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5 text-xs">
-      <div className="flex items-center gap-2.5 min-w-0 pr-6 sm:pr-0">
+    <div className="relative w-full rounded-xl bg-zinc-900/95 border border-white/10 px-3.5 py-3 sm:px-4 shadow-lg backdrop-blur-md flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
+      <div className="flex items-start sm:items-center gap-2.5 min-w-0 pr-8 sm:pr-0">
         <div className="w-7 h-7 rounded-lg bg-netflix-red/15 border border-netflix-red/30 flex items-center justify-center flex-shrink-0">
           <ShieldCheck className="w-4 h-4 text-netflix-red" />
         </div>
         <p className="text-zinc-300 font-medium leading-snug">
-          {(env === "desktop-chrome" || env === "desktop-firefox") &&
-            "¿Molesto por los anuncios del servidor? Instala la extensión oficial gratuita para bloquearlos."}
-          {env === "ios-safari" &&
-            "Bloquea los anuncios en Safari activando la extensión gratuita oficial."}
-          {env === "android" &&
-            "Elimina las ventanas emergentes del reproductor con un toque."}
+          {showModoEscudoPromo ? (
+            <>
+              ¿Molesto con las ventanas emergentes del servidor externo? Activá el{" "}
+              <strong className="text-white">Modo Escudo</strong> para reproducir en
+              nuestro reproductor nativo sin anuncios.
+            </>
+          ) : (
+            <>
+              {(env === "desktop-chrome" || env === "desktop-firefox") &&
+                "¿Molesto por los anuncios del servidor? Instala la extensión oficial gratuita para bloquearlos."}
+              {env === "ios-safari" &&
+                "Bloquea los anuncios en Safari activando la extensión gratuita oficial."}
+              {env === "android" &&
+                "Elimina las ventanas emergentes del reproductor con un toque."}
+            </>
+          )}
         </p>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto justify-end flex-shrink-0">
-        {env === "desktop-chrome" && (
+      <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2 w-full sm:w-auto sm:justify-end flex-shrink-0">
+        {showModoEscudoPromo && onActivateModoEscudo && (
+          <button
+            type="button"
+            onClick={onActivateModoEscudo}
+            className="inline-flex items-center justify-center gap-1.5 w-full sm:w-auto px-3.5 py-2 sm:py-1.5 rounded-lg bg-netflix-red hover:bg-red-700 text-white font-bold text-xs transition shadow-sm"
+          >
+            <ShieldCheck className="w-3.5 h-3.5 flex-shrink-0" />
+            <span>Activar Modo Escudo • PRO</span>
+          </button>
+        )}
+
+        {!showModoEscudoPromo && env === "desktop-chrome" && (
           <a
             href="https://chromewebstore.google.com/detail/ublock-origin-lite/ddkjiahejlhfcafbddmgiahcphecmpfh"
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-netflix-red hover:bg-red-700 text-white font-bold text-xs transition shadow-sm"
+            className="inline-flex items-center justify-center gap-1.5 w-full sm:w-auto px-3 py-2 sm:py-1.5 rounded-lg bg-netflix-red hover:bg-red-700 text-white font-bold text-xs transition shadow-sm"
           >
             <span>Instalar uBlock Origin Lite (Chrome Store)</span>
-            <ExternalLink className="w-3.5 h-3.5" />
+            <ExternalLink className="w-3.5 h-3.5 flex-shrink-0" />
           </a>
         )}
 
-        {env === "desktop-firefox" && (
+        {!showModoEscudoPromo && env === "desktop-firefox" && (
           <a
             href="https://addons.mozilla.org/es/firefox/addon/ublock-origin/"
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-netflix-red hover:bg-red-700 text-white font-bold text-xs transition shadow-sm"
+            className="inline-flex items-center justify-center gap-1.5 w-full sm:w-auto px-3 py-2 sm:py-1.5 rounded-lg bg-netflix-red hover:bg-red-700 text-white font-bold text-xs transition shadow-sm"
           >
             <span>Instalar uBlock Origin (Firefox)</span>
-            <ExternalLink className="w-3.5 h-3.5" />
+            <ExternalLink className="w-3.5 h-3.5 flex-shrink-0" />
           </a>
         )}
 
-        {env === "ios-safari" && (
+        {!showModoEscudoPromo && env === "ios-safari" && (
           <a
             href="https://apps.apple.com/app/ublock-origin-lite/id6745342698"
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-netflix-red hover:bg-red-700 text-white font-bold text-xs transition shadow-sm"
+            className="inline-flex items-center justify-center gap-1.5 w-full sm:w-auto px-3 py-2 sm:py-1.5 rounded-lg bg-netflix-red hover:bg-red-700 text-white font-bold text-xs transition shadow-sm"
           >
             <span>Descargar extensión uBlock Lite (App Store)</span>
-            <ExternalLink className="w-3.5 h-3.5" />
+            <ExternalLink className="w-3.5 h-3.5 flex-shrink-0" />
           </a>
         )}
 
-        {env === "android" && (
+        {!showModoEscudoPromo && env === "android" && (
           <>
             <button
               type="button"
               onClick={handleOpenInBraveAndroid}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-netflix-red hover:bg-red-700 text-white font-bold text-xs transition shadow-sm"
+              className="inline-flex items-center justify-center gap-1.5 w-full sm:w-auto px-3 py-2 sm:py-1.5 rounded-lg bg-netflix-red hover:bg-red-700 text-white font-bold text-xs transition shadow-sm"
             >
               <span>Abrir directo en Brave</span>
-              <ExternalLink className="w-3.5 h-3.5" />
+              <ExternalLink className="w-3.5 h-3.5 flex-shrink-0" />
             </button>
 
             <a
               href="https://addons.mozilla.org/es/android/addon/ublock-origin/"
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold text-xs border border-white/10 transition"
+              className="inline-flex items-center justify-center gap-1.5 w-full sm:w-auto px-3 py-2 sm:py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold text-xs border border-white/10 transition"
             >
               <span>Usar extensión en Firefox Android</span>
-              <ExternalLink className="w-3.5 h-3.5 opacity-80" />
+              <ExternalLink className="w-3.5 h-3.5 opacity-80 flex-shrink-0" />
             </a>
           </>
         )}
@@ -297,7 +330,7 @@ export function SmartAdblockHelperBar({ active }: { active: boolean }) {
           onClick={handleDismiss}
           title="Ocultar sugerencia permanentemente"
           aria-label="Cerrar sugerencia"
-          className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-white/10 transition ml-auto sm:ml-0"
+          className="absolute top-2.5 right-2.5 sm:static p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-white/10 transition"
         >
           <X className="w-4 h-4" />
         </button>
@@ -326,6 +359,8 @@ export default function SmartPlayer({
   onStatusChange,
   onNativeStreamReady,
   hideInlineHelperBar = false,
+  modoEscudoActivo = true,
+  onRequestModoEscudo,
   videoElementRef,
   iframeElementRef,
 }: SmartPlayerProps) {
@@ -333,7 +368,7 @@ export default function SmartPlayer({
   const [streamData, setStreamData] = useState<ExtractorResponseData | null>(
     null
   );
-  const [shieldActive, setShieldActive] = useState<boolean>(true);
+  const [shieldActive, setShieldActive] = useState<boolean>(modoEscudoActivo);
 
   const internalVideoRef = useRef<HTMLVideoElement | null>(null);
   const internalIframeRef = useRef<HTMLIFrameElement | null>(null);
@@ -413,9 +448,9 @@ export default function SmartPlayer({
     updateStatus("playing_iframe");
   }, [destroyHlsInstance, updateStatus]);
 
-  // Escudo anti-anuncios y neutralizador de popups en modo fallback iframe
+  // Escudo anti-anuncios y neutralizador de popups en modo fallback iframe (solo cuentas PRO)
   useEffect(() => {
-    if (status !== "playing_iframe") return;
+    if (status !== "playing_iframe" || !modoEscudoActivo) return;
 
     const originalWindowOpen = window.open;
     window.open = () => null;
@@ -425,7 +460,7 @@ export default function SmartPlayer({
         setTimeout(() => {
           try {
             window.focus();
-          } catch {}
+          } catch { }
         }, 30);
       }
     };
@@ -436,11 +471,25 @@ export default function SmartPlayer({
       window.open = originalWindowOpen;
       window.removeEventListener("blur", handleWindowBlur);
     };
-  }, [status]);
+  }, [status, modoEscudoActivo]);
 
-  // 1. Al montar o cambiar embedUrl, consultar /api/extractor inmediatamente
+  // 1. Al montar, cambiar embedUrl o conmutar Modo Escudo: usar extractor solo si Modo Escudo está activo
   useEffect(() => {
     if (!embedUrl) return;
+
+    if (!modoEscudoActivo) {
+      destroyHlsInstance();
+      initialSeekDoneRef.current = false;
+      setShieldActive(false);
+      setStreamData({
+        success: false,
+        fallbackUrl: embedUrl,
+        isDirty,
+      });
+      onNativeStreamReadyRef.current?.(null);
+      updateStatus("playing_iframe");
+      return;
+    }
 
     let cancelled = false;
     const controller = new AbortController();
@@ -529,6 +578,7 @@ export default function SmartPlayer({
   }, [
     embedUrl,
     isDirty,
+    modoEscudoActivo,
     destroyHlsInstance,
     switchToImmediateIframe,
     updateStatus,
@@ -593,7 +643,7 @@ export default function SmartPlayer({
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           applyInitialResume();
-          video.play().catch(() => {});
+          video.play().catch(() => { });
         });
 
         let mediaRecoveryAttempted = false;
@@ -616,7 +666,7 @@ export default function SmartPlayer({
         // HLS nativo en Safari iOS / macOS
         video.src = proxiedStreamUrl;
         video.addEventListener("loadedmetadata", applyInitialResume);
-        video.play().catch(() => {});
+        video.play().catch(() => { });
       } else {
         switchToImmediateIframe();
       }
@@ -624,7 +674,7 @@ export default function SmartPlayer({
       // Archivo directo MP4 a través de /api/stream-proxy
       video.src = proxiedStreamUrl;
       video.addEventListener("loadedmetadata", applyInitialResume);
-      video.play().catch(() => {});
+      video.play().catch(() => { });
     }
 
     return () => {
@@ -633,13 +683,24 @@ export default function SmartPlayer({
     };
   }, [status, streamData, destroyHlsInstance, switchToImmediateIframe]);
 
-  const targetIframeUrl = streamData?.fallbackUrl || embedUrl;
+  const rawTargetIframeUrl = streamData?.fallbackUrl || embedUrl;
+  const targetIframeUrl = useMemo(() => {
+    if (
+      !modoEscudoActivo &&
+      rawTargetIframeUrl &&
+      rawTargetIframeUrl.includes("/api/stream/")
+    ) {
+      const separator = rawTargetIframeUrl.includes("?") ? "&" : "?";
+      return `${rawTargetIframeUrl}${separator}escudo=0`;
+    }
+    return rawTargetIframeUrl;
+  }, [rawTargetIframeUrl, modoEscudoActivo]);
   const resolvedIsDirty = Boolean(
     isDirty ||
-      streamData?.isDirty ||
-      (targetIframeUrl &&
-        !targetIframeUrl.startsWith("/api/stream/") &&
-        !isStreamwish({ url: targetIframeUrl }))
+    streamData?.isDirty ||
+    (targetIframeUrl &&
+      !targetIframeUrl.startsWith("/api/stream/") &&
+      !isStreamwish({ url: targetIframeUrl }))
   );
 
   const playerViewport = (
@@ -663,11 +724,6 @@ export default function SmartPlayer({
           ref={setVideoRefs}
           controls
           playsInline
-          disableRemotePlayback={Boolean(
-            streamData?.type === "hls" &&
-              typeof window !== "undefined" &&
-              Hls.isSupported()
-          )}
           x-webkit-airplay="allow"
           poster={streamData?.posterUrl}
           className="w-full h-full bg-black object-contain"
@@ -693,23 +749,17 @@ export default function SmartPlayer({
         />
       )}
 
-      {/* ESTADO 3: Reproducción inmediata en Iframe con Escudo Anti-Anuncios */}
+      {/* ESTADO 3: Reproducción en Iframe (Modo Escudo solo en cuentas PRO) */}
       {status === "playing_iframe" && (
         <div className="relative w-full h-full">
-          {resolvedIsDirty && (
-            <div className="pointer-events-none absolute top-3 left-3 z-30 inline-flex items-center gap-1.5 rounded-lg bg-amber-500/90 px-2.5 py-1 text-[11px] font-bold text-black shadow-lg backdrop-blur-sm">
-              <AlertTriangle className="w-3.5 h-3.5" />
-              <span>Servidor alternativo · Bloqueo estricto activo</span>
-            </div>
-          )}
           <iframe
             ref={setIframeRefs}
-            key={`${targetIframeUrl}-${resolvedIsDirty ? "sandboxed" : "clean"}`}
+            key={`${targetIframeUrl}-${modoEscudoActivo && resolvedIsDirty ? "sandboxed" : "clean"}`}
             src={targetIframeUrl}
             title={title || "Reproductor de video"}
             className="w-full h-full border-0"
             sandbox={
-              resolvedIsDirty
+              modoEscudoActivo && resolvedIsDirty
                 ? "allow-scripts allow-same-origin allow-presentation allow-forms"
                 : undefined
             }
@@ -717,7 +767,7 @@ export default function SmartPlayer({
             allowFullScreen
             onError={() => onFatalError?.()}
           />
-          {shieldActive && (
+          {modoEscudoActivo && shieldActive && (
             <div
               onClick={() => {
                 setShieldActive(false);
@@ -737,14 +787,18 @@ export default function SmartPlayer({
     </div>
   );
 
-  if (hideInlineHelperBar) {
+  if (hideInlineHelperBar || !modoEscudoActivo) {
     return playerViewport;
   }
 
   return (
     <div className="w-full space-y-2.5">
       {playerViewport}
-      <SmartAdblockHelperBar active={status === "playing_iframe"} />
+      <SmartAdblockHelperBar
+        active={status === "playing_iframe"}
+        modoEscudoActivo={modoEscudoActivo}
+        onActivateModoEscudo={onRequestModoEscudo}
+      />
     </div>
   );
 }

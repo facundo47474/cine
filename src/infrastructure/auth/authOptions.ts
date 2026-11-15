@@ -108,26 +108,37 @@ export const authOptions: NextAuthOptions = {
     },
 
     /**
-     * Adjunta el UUID interno del usuario (`userId`) dentro del token JWT.
+     * Adjunta el UUID interno (`userId`), correo y nombre del usuario dentro del token JWT.
      */
     async jwt({ token, user }) {
-      if (user?.email) {
+      const lookupEmail = user?.email ?? token.email;
+      if (lookupEmail && (!token.userId || !token.email || user?.email)) {
         const dbUser = await prisma.user.findUnique({
-          where: { email: user.email },
+          where: { email: String(lookupEmail) },
         });
         if (dbUser) {
           token.userId = dbUser.id;
+          token.email = dbUser.email;
+          token.name = dbUser.name;
         }
       }
       return token;
     },
 
     /**
-     * Propaga el `userId` del token JWT hacia el objeto `session.user` accesible en cliente y servidor.
+     * Propaga `userId`, `email` y `name` del token JWT hacia `session.user` accesible en cliente y servidor.
      */
     async session({ session, token }) {
-      if (session.user && token.userId) {
-        (session.user as { id?: string }).id = String(token.userId);
+      if (session.user) {
+        if (token.userId) {
+          (session.user as { id?: string }).id = String(token.userId);
+        }
+        if (token.email) {
+          session.user.email = String(token.email);
+        }
+        if (token.name) {
+          session.user.name = String(token.name);
+        }
       }
       return session;
     },

@@ -2,6 +2,8 @@ import dns from "dns";
 import { NextRequest, NextResponse } from "next/server";
 import { tokenCryptoService } from "@/infrastructure/container";
 import { prisma } from "@/infrastructure/database/prismaClient";
+import { getAuthenticatedUserSession } from "@/infrastructure/auth/sessionHelper";
+import { prismaMembershipRepository } from "@/infrastructure/repositories/PrismaMembershipRepository";
 import {
   FALLBACK_IF_EMPTY,
   STRICT_STREAMWISH_ONLY,
@@ -308,6 +310,29 @@ export async function GET(request: NextRequest) {
         isStreamwish: false,
         isDirty: false,
         reason: "Parámetro 'url' requerido.",
+      },
+      { status: 200 }
+    );
+  }
+
+  const auth = await getAuthenticatedUserSession();
+  const membership = auth
+    ? await prismaMembershipRepository.getMembershipByUserId(
+        auth.userId,
+        auth.email
+      )
+    : null;
+
+  if (!membership?.isModoEscudoActive) {
+    return NextResponse.json(
+      {
+        success: false,
+        fallbackUrl: inputUrl,
+        isStreamwish: false,
+        isDirty: false,
+        shieldRequired: true,
+        reason:
+          "El Modo Escudo requiere membresía Piloto Pro activa para usar el reproductor nativo.",
       },
       { status: 200 }
     );

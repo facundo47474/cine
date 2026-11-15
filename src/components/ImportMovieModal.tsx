@@ -106,8 +106,8 @@ export default function ImportMovieModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 overflow-y-auto">
-      <div className="bg-zinc-900 border border-white/15 rounded-xl max-w-xl w-full p-6 space-y-5 shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-3 sm:p-4 overflow-y-auto">
+      <div className="bg-zinc-900 border border-white/15 rounded-xl max-w-xl w-full p-4 sm:p-6 max-h-[90dvh] overflow-y-auto space-y-5 shadow-2xl">
         <div className="flex items-center justify-between border-b border-white/10 pb-3">
           <div className="flex items-center gap-2">
             <Film className="w-5 h-5 text-netflix-red" />
@@ -242,7 +242,7 @@ export default function ImportMovieModal({
                   key={idx}
                   className="p-3 rounded-lg bg-black/60 border border-white/10 space-y-2"
                 >
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                     <input
                       type="text"
                       value={m.serverName}

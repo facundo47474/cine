@@ -1,25 +1,46 @@
 import { NextRequest, NextResponse } from "next/server";
 import { watchHistoryService } from "@/infrastructure/container";
-import { getAuthenticatedUserId } from "@/infrastructure/auth/sessionHelper";
+import {
+  getAuthenticatedUserId,
+  getAuthenticatedUserSession,
+} from "@/infrastructure/auth/sessionHelper";
+import { prismaMembershipRepository } from "@/infrastructure/repositories/PrismaMembershipRepository";
+import { FREE_CONTINUE_WATCHING_LIMIT } from "@/domain/services/MembershipPolicy";
 
 export const dynamic = "force-dynamic";
 
 /**
- * Obtiene la lista "Continuar viendo" del usuario autenticado (`GET /api/history`).
+ * Obtiene la lista "Continuar viendo" del usuario autenticado (`GET /api/history`),
+ * aplicando el límite del plan gratuito cuando no cuenta con Sincronización Cloud Pro.
  */
 export async function GET() {
   try {
-    const userId = await getAuthenticatedUserId();
+    const auth = await getAuthenticatedUserSession();
 
-    if (!userId) {
+    if (!auth) {
       return NextResponse.json(
         { ok: false, error: "Debes iniciar sesión." },
         { status: 401 }
       );
     }
 
-    const items = await watchHistoryService.getContinueWatching(userId);
-    return NextResponse.json({ ok: true, items });
+    const [items, membership] = await Promise.all([
+      watchHistoryService.getContinueWatching(auth.userId),
+      prismaMembershipRepository.getMembershipByUserId(auth.userId, auth.email),
+    ]);
+
+    const visibleItems = membership.entitlements.hasUnlimitedCloudSync
+      ? items
+      : items.slice(0, FREE_CONTINUE_WATCHING_LIMIT);
+
+    return NextResponse.json({
+      ok: true,
+      items: visibleItems,
+      totalCount: items.length,
+      isLimitedByFreePlan:
+        !membership.entitlements.hasUnlimitedCloudSync &&
+        items.length > FREE_CONTINUE_WATCHING_LIMIT,
+    });
   } catch (error) {
     console.error("[GET /api/history] Error:", error);
     return NextResponse.json(

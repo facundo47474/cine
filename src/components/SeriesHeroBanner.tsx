@@ -2,14 +2,17 @@
 
 import React from "react";
 import Link from "next/link";
-import { Play, Star, Sparkles, Layers } from "lucide-react";
+import { Play, Star, Sparkles, Layers, Plus, Check } from "lucide-react";
 import { SeriesDetailsDto } from "@/application/dto/SeriesDto";
+import { useMembership } from "@/components/MembershipProvider";
 
 interface SeriesHeroBannerProps {
   series: SeriesDetailsDto;
 }
 
 export default function SeriesHeroBanner({ series }: SeriesHeroBannerProps) {
+  const { isInMyList, toggleMyListItem } = useMembership();
+  const inMyList = isInMyList(series.id);
   const bgImage = series.backdropUrl || series.posterUrl;
   const resume = series.resume;
 
@@ -23,7 +26,7 @@ export default function SeriesHeroBanner({ series }: SeriesHeroBannerProps) {
       : `${series.totalSeasons} Temporadas`;
 
   return (
-    <section className="relative w-full h-[65vh] sm:h-[75vh] min-h-[460px] sm:min-h-[540px] flex items-end pb-12 sm:pb-16 overflow-hidden">
+    <section className="relative w-full min-h-[480px] sm:min-h-[540px] sm:h-[75vh] flex items-end pt-28 sm:pt-24 pb-12 sm:pb-16 overflow-hidden">
       {/* Fondo inmersivo */}
       <div
         className="absolute inset-0 bg-cover bg-center scale-105 transition-transform duration-1000"
@@ -79,10 +82,10 @@ export default function SeriesHeroBanner({ series }: SeriesHeroBannerProps) {
 
           {/* CTA Inteligente */}
           <div className="pt-2 sm:pt-3 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
-            <div className="relative group inline-block">
+            <div className="relative group w-full sm:w-auto inline-block">
               <Link
                 href={playHref}
-                className="inline-flex items-center justify-center gap-2.5 w-full sm:w-auto px-8 py-3.5 rounded-lg bg-white text-black font-black text-sm sm:text-base hover:bg-white/90 active:scale-[0.98] transition shadow-xl"
+                className="inline-flex items-center justify-center gap-2.5 w-full sm:w-auto min-h-[44px] px-8 py-3.5 rounded-lg bg-white text-black font-black text-sm sm:text-base hover:bg-white/90 active:scale-[0.98] transition shadow-xl"
               >
                 <Play className="w-5 h-5 fill-black" />
                 {resume?.label || "Reproducir T1:E1"}
@@ -98,6 +101,45 @@ export default function SeriesHeroBanner({ series }: SeriesHeroBannerProps) {
                 </div>
               )}
             </div>
+
+            <button
+              type="button"
+              onClick={() =>
+                toggleMyListItem({
+                  id: series.id,
+                  tmdbId: series.tmdbId,
+                  mediaType: "SERIES",
+                  title: series.title,
+                  originalTitle: series.originalTitle,
+                  synopsis: series.synopsis,
+                  posterUrl: series.posterUrl,
+                  backdropUrl: series.backdropUrl,
+                  releaseYear: series.releaseYear,
+                  durationMins: series.currentSeasonEpisodes[0]?.duration || 45,
+                  rating: series.rating,
+                  qualityBadge: series.qualityBadge || "HD",
+                  genres: series.genres,
+                  isLocalVip: true,
+                })
+              }
+              className={`inline-flex items-center justify-center gap-2 w-full sm:w-auto min-h-[44px] px-5 py-3.5 rounded-lg border text-sm font-bold transition shadow-xl ${
+                inMyList
+                  ? "bg-white/15 border-emerald-400/50 text-emerald-300 hover:bg-white/20"
+                  : "bg-zinc-900/85 border-white/20 text-white hover:bg-white/15"
+              }`}
+            >
+              {inMyList ? (
+                <>
+                  <Check className="w-4 h-4" />
+                  <span>En Mi Lista</span>
+                </>
+              ) : (
+                <>
+                  <Plus className="w-4 h-4" />
+                  <span>Mi Lista</span>
+                </>
+              )}
+            </button>
           </div>
         </div>
       </div>

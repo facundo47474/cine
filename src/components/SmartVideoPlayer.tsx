@@ -11,23 +11,20 @@ import Hls from "hls.js";
 import {
   AlertTriangle,
   Cast,
-  Maximize2,
-  Minimize2,
   FastForward,
   Play,
   Tv,
   X,
-  Layers,
-  Sparkles,
 } from "lucide-react";
 import { SignedMirrorStreamDto } from "@/application/dto/PlaybackStreamDto";
 import { MirrorFormat } from "@/domain/enums/MirrorFormat";
-import { PresentationConnection } from "@/types/cast";
+import { CastContextInstance, PresentationConnection } from "@/types/cast";
 import SmartPlayer, {
   ExtractedNativeStream,
-  SmartAdblockHelperBar,
+  ExtractorResponseData,
   SmartPlayerStatus,
 } from "@/components/video/SmartPlayer";
+import { useMembership } from "@/components/MembershipProvider";
 import {
   FALLBACK_IF_EMPTY,
   STRICT_STREAMWISH_ONLY,
@@ -81,15 +78,6 @@ interface SmartVideoPlayerProps {
   }[];
   onEpisodeSelect?: (episodeId: string) => void;
   onDurationChange?: (durationSeconds: number) => void;
-}
-
-interface FullscreenContainerElement extends HTMLDivElement {
-  webkitRequestFullscreen?: () => Promise<void> | void;
-}
-
-interface FullscreenDocument extends Document {
-  webkitFullscreenElement?: Element | null;
-  webkitExitFullscreen?: () => Promise<void> | void;
 }
 
 interface ExtractedTimeTelemetry {
@@ -175,6 +163,194 @@ function extractTimeTelemetry(rawData: unknown): ExtractedTimeTelemetry | null {
   }
 }
 
+type GoogleCastLoadOutcome =
+  | { status: "connected"; deviceName: string }
+  | { status: "cancelled" }
+  | { status: "failed" };
+
+/**
+ * Construye una URL absoluta hacia `/api/stream-proxy` incluyendo un sufijo `ext=.m3u8`/`.mp4`
+ * porque Chromecast Default Media Receiver exige pistas de formato explícitas en URLs proxy.
+ */
+function construirUrlProxyCastConExtension(
+  proxiedUrl: string,
+  streamType: "hls" | "mp4"
+): string {
+  const absoluteUrl = new URL(proxiedUrl, window.location.origin);
+  if (!absoluteUrl.searchParams.has("ext")) {
+    absoluteUrl.searchParams.set("ext", streamType === "mp4" ? ".mp4" : ".m3u8");
+  }
+  return absoluteUrl.toString();
+}
+
+/**
+ * Ordena las URLs candidatas (proxy CORS/Referer vs CDN directa) según si el origen es loopback;
+ * en `localhost`/`127.0.0.1` un Chromecast físico no puede alcanzar el proxy local, por lo que se
+ * prioriza primero la CDN HTTPS directa y luego el proxy.
+ */
+function construirCandidatosUrlCast(
+  nativeStream: ExtractedNativeStream
+): string[] {
+  const proxiedWithExt = construirUrlProxyCastConExtension(
+    nativeStream.proxiedUrl,
+    nativeStream.type
+  );
+  const directHttpUrl = /^https?:\/\//i.test(nativeStream.streamUrl)
+    ? nativeStream.streamUrl
+    : "";
+  const isLoopbackHost = /^(localhost|127\.0\.0\.1)$/i.test(
+    window.location.hostname
+  );
+
+  const rawCandidates = isLoopbackHost
+    ? [directHttpUrl, proxiedWithExt]
+    : [proxiedWithExt, directHttpUrl];
+
+  return Array.from(
+    new Set(
+      rawCandidates.filter((urlCandidate) => /^https?:\/\//i.test(urlCandidate))
+    )
+  );
+}
+
+/**
+ * Extrae bajo demanda el manifiesto `.m3u8` o `.mp4` real si el usuario presiona "Transmitir a TV"
+ * antes de que finalice la extracción o mientras el túnel iframe está activo.
+ */
+async function resolverStreamNativoBajoDemandaParaCast(
+  embedOrTunnelUrl: string
+): Promise<ExtractedNativeStream | null> {
+  if (!embedOrTunnelUrl) return null;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+  try {
+    const response = await fetch(
+      `/api/extractor?url=${encodeURIComponent(embedOrTunnelUrl)}`,
+      { signal: controller.signal, cache: "no-store" }
+    );
+    if (!response.ok) return null;
+
+    const data = (await response.json()) as ExtractorResponseData;
+    if (!data.success || !data.streamUrl) return null;
+
+    return {
+      streamUrl: data.streamUrl,
+      proxiedUrl: `/api/stream-proxy?url=${encodeURIComponent(
+        data.streamUrl
+      )}&referer=${encodeURIComponent(data.referer || "")}`,
+      type: data.type || "hls",
+      referer: data.referer,
+      posterUrl: data.posterUrl,
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Inicia una sesión de Google Cast enviando exclusivamente el `MediaInfo` del video
+ * (con `streamType`, formato HLS TS e imagen/poster) y cierra la sesión si falla para no dejar
+ * una sesión vacía o mirroring de toda la pantalla.
+ */
+async function cargarStreamEnSesionGoogleCast(params: {
+  castContext: CastContextInstance;
+  candidateUrls: string[];
+  contentType: string;
+  title: string;
+  posterUrl?: string;
+  currentTimeSeconds: number;
+}): Promise<GoogleCastLoadOutcome> {
+  const {
+    castContext,
+    candidateUrls,
+    contentType,
+    title,
+    posterUrl,
+    currentTimeSeconds,
+  } = params;
+  const chromeCast = window.chrome?.cast;
+  if (!chromeCast || candidateUrls.length === 0) {
+    return { status: "failed" };
+  }
+
+  try {
+    await castContext.requestSession();
+  } catch (err) {
+    const errCode =
+      typeof err === "string"
+        ? err
+        : (err as { code?: string; name?: string } | null)?.code ||
+          (err as { code?: string; name?: string } | null)?.name ||
+          "";
+    if (errCode === "cancel" || errCode === "AbortError") {
+      return { status: "cancelled" };
+    }
+    return { status: "failed" };
+  }
+
+  const session = castContext.getCurrentSession();
+  if (!session) {
+    return { status: "failed" };
+  }
+
+  const isHlsContent = contentType === "application/x-mpegurl";
+
+  for (const candidateUrl of candidateUrls) {
+    try {
+      const mediaInfo = new chromeCast.media.MediaInfo(
+        candidateUrl,
+        contentType
+      );
+      if (chromeCast.media.StreamType?.BUFFERED) {
+        mediaInfo.streamType = chromeCast.media.StreamType.BUFFERED;
+      }
+      if (isHlsContent) {
+        if (chromeCast.media.HlsSegmentFormat?.TS) {
+          mediaInfo.hlsSegmentFormat = chromeCast.media.HlsSegmentFormat.TS;
+        }
+        if (chromeCast.media.HlsVideoSegmentFormat?.MPEG2_TS) {
+          mediaInfo.hlsVideoSegmentFormat =
+            chromeCast.media.HlsVideoSegmentFormat.MPEG2_TS;
+        }
+      }
+
+      const metadata = new chromeCast.media.GenericMediaMetadata();
+      metadata.title = title;
+      if (posterUrl && /^https?:\/\//i.test(posterUrl) && chromeCast.Image) {
+        metadata.images = [new chromeCast.Image(posterUrl)];
+      }
+      mediaInfo.metadata = metadata;
+
+      const loadRequest = new chromeCast.media.LoadRequest(mediaInfo);
+      loadRequest.autoplay = true;
+      loadRequest.currentTime = Math.max(0, currentTimeSeconds);
+
+      await session.loadMedia(loadRequest);
+      return {
+        status: "connected",
+        deviceName: session.getCastDevice()?.friendlyName || "tu Smart TV",
+      };
+    } catch {
+      // Intenta la siguiente URL candidata antes de cerrar la sesión
+    }
+  }
+
+  // Cierre limpio si todas las URLs candidatas fallaron para evitar mirroring vacío
+  try {
+    if (castContext.getCurrentSession()) {
+      castContext.endCurrentSession(true);
+    }
+  } catch {
+    // Silencioso
+  }
+
+  return { status: "failed" };
+}
+
 export default function SmartVideoPlayer({
   movieId,
   movieTitle,
@@ -191,15 +367,13 @@ export default function SmartVideoPlayer({
   introStart,
   introEnd,
   nextEpisode,
-  previousEpisode,
-  allSeasons,
   onEpisodeSelect,
   onDurationChange,
 }: SmartVideoPlayerProps) {
-  const containerRef = useRef<FullscreenContainerElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const presentationConnectionRef = useRef<PresentationConnection | null>(null);
+  const { isPro, isModoEscudoActive, openUpgradeModal } = useMembership();
 
   const fallbackDurationSec = Math.max(600, (durationMins || 120) * 60);
   const [playbackStarted, setPlaybackStarted] = useState<boolean>(
@@ -226,10 +400,6 @@ export default function SmartVideoPlayer({
   // Estados interactivos para TV Series (Fase 4)
   const [dismissedNextOverlay, setDismissedNextOverlay] = useState<boolean>(false);
   const [nextCountdown, setNextCountdown] = useState<number>(5);
-  const [showEpisodesDrawer, setShowEpisodesDrawer] = useState<boolean>(false);
-  const [drawerSeasonNumber, setDrawerSeasonNumber] = useState<number>(
-    seasonNumber || 1
-  );
 
   useEffect(() => {
     const cleanInit = Math.max(0, Math.floor(initialProgressSeconds || 0));
@@ -290,7 +460,6 @@ export default function SmartVideoPlayer({
     orderedStreams.length === 0
   );
   const [shieldActive, setShieldActive] = useState<boolean>(true);
-  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [isCasting, setIsCasting] = useState<boolean>(false);
   const [castDeviceName, setCastDeviceName] = useState<string | null>(null);
   const [castNotice, setCastNotice] = useState<string | null>(null);
@@ -329,33 +498,36 @@ export default function SmartVideoPlayer({
     orderedStreams[activeIndex];
 
   /**
+   * Garantiza que `CastContext` esté configurado con el Default Media Receiver
+   * antes de abrir cualquier selector para enviar solo el stream del reproductor.
+   */
+  const asegurarContextoGoogleCastInicializado = useCallback((): boolean => {
+    try {
+      const castFramework = window.cast?.framework;
+      const chromeCast = window.chrome?.cast;
+      if (!castFramework || !chromeCast) return false;
+
+      castFramework.CastContext.getInstance().setOptions({
+        receiverApplicationId: chromeCast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
+        autoJoinPolicy: chromeCast.AutoJoinPolicy.ORIGIN_SCOPED,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  /**
    * Carga e inicialización automática del SDK Oficial de Google Cast.
    */
   useEffect(() => {
-    const initializeCastContext = () => {
-      try {
-        const castFramework = window.cast?.framework;
-        const chromeCast = window.chrome?.cast;
-        if (!castFramework || !chromeCast) return;
-
-        castFramework.CastContext.getInstance().setOptions({
-          receiverApplicationId:
-            chromeCast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
-          autoJoinPolicy: chromeCast.AutoJoinPolicy.ORIGIN_SCOPED,
-        });
-      } catch {
-        // Silencioso en navegadores que no implementan Google Cast
-      }
-    };
-
     window.__onGCastApiAvailable = (isAvailable: boolean) => {
       if (isAvailable) {
-        initializeCastContext();
+        asegurarContextoGoogleCastInicializado();
       }
     };
 
-    if (window.cast?.framework && window.chrome?.cast) {
-      initializeCastContext();
+    if (asegurarContextoGoogleCastInicializado()) {
       return;
     }
 
@@ -368,16 +540,11 @@ export default function SmartVideoPlayer({
       script.async = true;
       document.head.appendChild(script);
     }
-  }, []);
-
-  const isPrimaryServerActive = Boolean(
-    currentStream &&
-      currentStream.isStreamwish &&
-      !currentStream.isDirty &&
-      !tunnelUsingSecondary
-  );
+  }, [asegurarContextoGoogleCastInicializado]);
 
   useEffect(() => {
+    if (!isModoEscudoActive) return;
+
     const originalWindowOpen = window.open;
     window.open = () => null;
 
@@ -395,57 +562,11 @@ export default function SmartVideoPlayer({
       window.open = originalWindowOpen;
       window.removeEventListener("blur", handleWindowBlur);
     };
-  }, []);
-
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      const doc = document as FullscreenDocument;
-      setIsFullscreen(
-        Boolean(doc.fullscreenElement || doc.webkitFullscreenElement)
-      );
-    };
-
-    document.addEventListener("fullscreenchange", handleFullscreenChange);
-    document.addEventListener(
-      "webkitfullscreenchange",
-      handleFullscreenChange as EventListener
-    );
-
-    return () => {
-      document.removeEventListener("fullscreenchange", handleFullscreenChange);
-      document.removeEventListener(
-        "webkitfullscreenchange",
-        handleFullscreenChange as EventListener
-      );
-    };
-  }, []);
-
-  const handleToggleFullscreen = useCallback(async () => {
-    const container = containerRef.current;
-    const doc = document as FullscreenDocument;
-
-    if (!container) return;
-
-    try {
-      if (doc.fullscreenElement || doc.webkitFullscreenElement) {
-        if (doc.exitFullscreen) {
-          await doc.exitFullscreen();
-        } else if (doc.webkitExitFullscreen) {
-          await doc.webkitExitFullscreen();
-        }
-      } else if (container.requestFullscreen) {
-        await container.requestFullscreen();
-      } else if (container.webkitRequestFullscreen) {
-        await container.webkitRequestFullscreen();
-      }
-    } catch {
-      // Silencioso
-    }
-  }, []);
+  }, [isModoEscudoActive]);
 
   /**
-   * Flujo de Transmisión de SOLO el video/reproductor (AirPlay + Google Cast MediaInfo + RemotePlayback).
-   * Evita iniciar sesiones vacías o mirroring de toda la pantalla/pestaña.
+   * Flujo de Transmisión exclusivo del reproductor de video (AirPlay + Google Cast MediaInfo + RemotePlayback).
+   * Garantiza transmitir únicamente el stream `.m3u8`/`.mp4` o `<video>`, nunca toda la pantalla/pestaña.
    */
   const handleCastClick = useCallback(async () => {
     setCastNotice(null);
@@ -469,12 +590,17 @@ export default function SmartVideoPlayer({
 
     if (!currentStream) return;
 
+    if (!isPro) {
+      openUpgradeModal("transmitir_tv");
+      return;
+    }
+
     const videoEl = videoRef.current;
     const castDisplayTitle = seriesTitle
       ? `${seriesTitle} - T${seasonNumber || 1}:E${episodeNumber || 1} ${episodeTitle || movieTitle}`
       : movieTitle;
 
-    // 1. Apple AirPlay nativo sobre <video> en Safari / iOS / macOS
+    // 1. Apple AirPlay nativo directo sobre <video> en Safari / iOS / macOS
     if (videoEl && typeof videoEl.webkitShowPlaybackTargetPicker === "function") {
       try {
         videoEl.webkitShowPlaybackTargetPicker();
@@ -484,92 +610,68 @@ export default function SmartVideoPlayer({
       }
     }
 
-    // 2. Google Cast SDK directo con la URL real del video (.m3u8 o .mp4), jamás tab/screen mirroring
-    let directMediaUrl: string | null = null;
-    let directContentType = "application/x-mpegurl";
+    // 2. Resolver el stream nativo real (.m3u8 o .mp4), incluso bajo demanda desde iframe/túnel
+    let activeNativeStream = extractedNativeStream;
+    if (!activeNativeStream && currentStream.format === MirrorFormat.EMBED) {
+      activeNativeStream = await resolverStreamNativoBajoDemandaParaCast(
+        currentStream.streamUrl
+      );
+      if (activeNativeStream) {
+        setExtractedNativeStream(activeNativeStream);
+      }
+    }
 
-    if (extractedNativeStream) {
-      const isLocalDev =
-        /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname) ||
-        window.location.protocol !== "https:";
-      directMediaUrl =
-        !isLocalDev || !/^https:\/\//i.test(extractedNativeStream.streamUrl)
-          ? new URL(
-              extractedNativeStream.proxiedUrl,
-              window.location.origin
-            ).toString()
-          : extractedNativeStream.streamUrl;
+    let candidateUrls: string[] = [];
+    let directContentType = "application/x-mpegurl";
+    let castPosterUrl: string | undefined;
+
+    if (activeNativeStream) {
+      candidateUrls = construirCandidatosUrlCast(activeNativeStream);
       directContentType =
-        extractedNativeStream.type === "mp4"
+        activeNativeStream.type === "mp4"
           ? "video/mp4"
           : "application/x-mpegurl";
+      castPosterUrl = activeNativeStream.posterUrl;
     } else if (currentStream.format !== MirrorFormat.EMBED) {
-      directMediaUrl = new URL(
-        currentStream.streamUrl,
-        window.location.origin
-      ).toString();
+      candidateUrls = [
+        new URL(currentStream.streamUrl, window.location.origin).toString(),
+      ];
       directContentType =
         currentStream.format === MirrorFormat.HLS
           ? "application/x-mpegurl"
           : "video/mp4";
     }
 
-    if (directMediaUrl && window.cast?.framework && window.chrome?.cast) {
-      const castContext = window.cast.framework.CastContext.getInstance();
-      try {
-        await castContext.requestSession();
-        const session = castContext.getCurrentSession();
+    // 3. Google Cast SDK oficial con MediaInfo del video (re-asegurando options para evitar tab mirroring)
+    if (
+      candidateUrls.length > 0 &&
+      asegurarContextoGoogleCastInicializado() &&
+      window.cast?.framework
+    ) {
+      const castResult = await cargarStreamEnSesionGoogleCast({
+        castContext: window.cast.framework.CastContext.getInstance(),
+        candidateUrls,
+        contentType: directContentType,
+        title: castDisplayTitle,
+        posterUrl: castPosterUrl,
+        currentTimeSeconds:
+          currentProgressRef.current || lastSavedSecRef.current || 0,
+      });
 
-        if (session) {
-          const mediaInfo = new window.chrome.cast.media.MediaInfo(
-            directMediaUrl,
-            directContentType
-          );
-          const metadata = new window.chrome.cast.media.GenericMediaMetadata();
-          metadata.title = castDisplayTitle;
-          mediaInfo.metadata = metadata;
+      if (castResult.status === "connected") {
+        videoEl?.pause();
+        setCastDeviceName(castResult.deviceName);
+        setIsCasting(true);
+        return;
+      }
 
-          const loadRequest = new window.chrome.cast.media.LoadRequest(
-            mediaInfo
-          );
-          loadRequest.autoplay = true;
-          loadRequest.currentTime =
-            currentProgressRef.current || lastSavedSecRef.current || 0;
-
-          await session.loadMedia(loadRequest);
-          videoEl?.pause();
-          setCastDeviceName(
-            session.getCastDevice()?.friendlyName || "tu Smart TV"
-          );
-          setIsCasting(true);
-          return;
-        }
-      } catch (err) {
-        // Si se abrió sesión pero falló loadMedia, la cerramos para NO duplicar ni transmitir pantalla completa
-        try {
-          if (castContext.getCurrentSession()) {
-            castContext.endCurrentSession(true);
-          }
-        } catch {
-          // Silencioso
-        }
-        const errCode =
-          typeof err === "string"
-            ? err
-            : (err as { code?: string; name?: string } | null)?.code ||
-              (err as { code?: string; name?: string } | null)?.name ||
-              "";
-        if (errCode === "cancel" || errCode === "AbortError") {
-          return;
-        }
+      if (castResult.status === "cancelled") {
+        return;
       }
     }
 
-    // 3. Remote Playback API nativo sobre <video> directo (no-blob: MP4 o HLS nativo)
-    if (
-      videoEl?.remote?.prompt &&
-      !videoEl.currentSrc?.startsWith("blob:")
-    ) {
+    // 4. Remote Playback API nativo sobre <video> (sin bloquear fuentes blob:/MSE de hls.js)
+    if (videoEl?.remote?.prompt) {
       try {
         await videoEl.remote.prompt();
         return;
@@ -579,7 +681,7 @@ export default function SmartVideoPlayer({
       }
     }
 
-    // 4. Túnel interno /api/stream/[token] con video HLS nativo (#pilotoVideo)
+    // 5. Túnel interno /api/stream/[token] con video HLS nativo (#pilotoVideo)
     if (
       smartPlayerStatus === "playing_iframe" &&
       currentStream.streamUrl.includes("/api/stream/") &&
@@ -596,12 +698,14 @@ export default function SmartVideoPlayer({
     }
 
     setCastNotice(
-      extractedNativeStream
-        ? "No se encontró un Chromecast o receptor AirPlay disponible desde este navegador."
+      activeNativeStream
+        ? "No se encontró un Chromecast o receptor AirPlay compatible desde este navegador."
         : "Este servidor en modo iframe no permite enviar solo el video; probá otro servidor."
     );
   }, [
     isCasting,
+    isPro,
+    openUpgradeModal,
     currentStream,
     extractedNativeStream,
     smartPlayerStatus,
@@ -610,6 +714,7 @@ export default function SmartVideoPlayer({
     seasonNumber,
     episodeNumber,
     episodeTitle,
+    asegurarContextoGoogleCastInicializado,
   ]);
 
   /**
@@ -760,7 +865,16 @@ export default function SmartVideoPlayer({
 
     const handleTunnelMessage = (event: MessageEvent) => {
       const payload = event.data as
-        | { type?: string; mirrorId?: string }
+        | {
+            type?: string;
+            mirrorId?: string;
+            streamUrl?: string;
+            proxiedUrl?: string;
+            streamType?: "hls" | "mp4";
+            referer?: string;
+            posterUrl?: string;
+            durationSeconds?: number;
+          }
         | undefined;
       if (
         payload?.type === "PILOTO_STREAM_ERROR" &&
@@ -775,6 +889,40 @@ export default function SmartVideoPlayer({
         (!payload.mirrorId || payload.mirrorId === currentStream.mirrorId)
       ) {
         setTunnelUsingSecondary(true);
+        return;
+      }
+
+      if (
+        payload?.type === "PILOTO_NATIVE_HLS_READY" &&
+        (!payload.mirrorId || payload.mirrorId === currentStream.mirrorId) &&
+        typeof payload.streamUrl === "string" &&
+        payload.streamUrl
+      ) {
+        const resolvedReferer = payload.referer || "";
+        const resolvedProxiedUrl =
+          typeof payload.proxiedUrl === "string" && payload.proxiedUrl
+            ? payload.proxiedUrl
+            : `/api/stream-proxy?url=${encodeURIComponent(
+                payload.streamUrl
+              )}&referer=${encodeURIComponent(resolvedReferer)}`;
+
+        setExtractedNativeStream({
+          streamUrl: payload.streamUrl,
+          proxiedUrl: resolvedProxiedUrl,
+          type: payload.streamType === "mp4" ? "mp4" : "hls",
+          referer: resolvedReferer || undefined,
+          posterUrl: payload.posterUrl,
+        });
+
+        if (
+          typeof payload.durationSeconds === "number" &&
+          payload.durationSeconds > 60
+        ) {
+          const cleanDur = Math.floor(payload.durationSeconds);
+          totalDurationRef.current = cleanDur;
+          setDurationState(cleanDur);
+          onDurationChange?.(cleanDur);
+        }
         return;
       }
 
@@ -809,7 +957,7 @@ export default function SmartVideoPlayer({
 
     window.addEventListener("message", handleTunnelMessage);
     return () => window.removeEventListener("message", handleTunnelMessage);
-  }, [currentStream, handleStreamError, saveWatchProgress]);
+  }, [currentStream, handleStreamError, saveWatchProgress, onDurationChange]);
 
   // Inicialización de reproducción directa MP4 / HLS
   useEffect(() => {
@@ -889,6 +1037,10 @@ export default function SmartVideoPlayer({
   );
 
   const handleSkipIntro = () => {
+    if (!isPro) {
+      openUpgradeModal("modo_maraton");
+      return;
+    }
     if (introEnd === null || introEnd === undefined) return;
     currentProgressRef.current = introEnd;
     setCurrentTimeState(introEnd);
@@ -934,7 +1086,7 @@ export default function SmartVideoPlayer({
   }, [nextEpisode, onEpisodeSelect]);
 
   useEffect(() => {
-    if (!isNearEnd || !nextEpisode) return;
+    if (!isNearEnd || !nextEpisode || !isPro) return;
 
     const interval = setInterval(() => {
       setNextCountdown((prev) => {
@@ -948,7 +1100,7 @@ export default function SmartVideoPlayer({
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [isNearEnd, nextEpisode, handleGoToNextEpisode]);
+  }, [isNearEnd, nextEpisode, isPro, handleGoToNextEpisode]);
 
   if (allMirrorsDown || !currentStream) {
     return (
@@ -970,17 +1122,16 @@ export default function SmartVideoPlayer({
   return (
     <div className="w-full space-y-2.5">
       <div
-        ref={containerRef}
         onMouseEnter={() => {
           if (shieldActive) {
             setShieldActive(false);
             setPlaybackStarted(true);
           }
         }}
-        className="group relative w-full aspect-video rounded-2xl overflow-hidden bg-black border border-white/10 shadow-2xl"
+        className="group relative w-full aspect-video rounded-xl sm:rounded-2xl overflow-hidden bg-black border border-white/10 shadow-2xl"
       >
       {/* 1. Header flotante del Reproductor (Fase 4.1) */}
-      <div className="absolute top-0 inset-x-0 p-4 sm:p-6 bg-gradient-to-b from-black/85 via-black/40 to-transparent z-20 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-between">
+      <div className="absolute top-0 inset-x-0 p-3 sm:p-6 pr-24 sm:pr-48 bg-gradient-to-b from-black/85 via-black/40 to-transparent z-20 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-between">
         <div className="min-w-0 max-w-xl">
           {isSeriesPlayer ? (
             <div className="space-y-0.5">
@@ -1045,6 +1196,8 @@ export default function SmartVideoPlayer({
               tunnelUsingSecondary
           )}
           hideInlineHelperBar={true}
+          modoEscudoActivo={isModoEscudoActive}
+          onRequestModoEscudo={() => openUpgradeModal("modo_escudo")}
           onStatusChange={setSmartPlayerStatus}
           onNativeStreamReady={setExtractedNativeStream}
           videoElementRef={videoRef}
@@ -1123,31 +1276,51 @@ export default function SmartVideoPlayer({
       )}
 
       {/* 2. Botón "Saltar Intro" estilo Netflix (Fase 4.2) */}
-      {showSkipIntro && (
-        <div className="absolute bottom-16 sm:bottom-20 right-4 sm:right-8 z-30 animate-fade-in">
+      {showSkipIntro && !isNearEnd && (
+        <div className="absolute bottom-12 sm:bottom-20 right-3 sm:right-8 z-30 animate-fade-in">
           <button
             type="button"
             onClick={handleSkipIntro}
-            className="inline-flex items-center gap-2 px-5 py-2.5 rounded bg-zinc-900/90 hover:bg-white hover:text-black border border-white/40 text-white font-bold text-xs sm:text-sm tracking-wide shadow-2xl backdrop-blur-md transition-all active:scale-95"
+            className="inline-flex items-center gap-2 px-3.5 py-2 sm:px-5 sm:py-2.5 rounded bg-zinc-900/90 hover:bg-white hover:text-black border border-white/40 text-white font-bold text-xs sm:text-sm tracking-wide shadow-2xl backdrop-blur-md transition-all active:scale-95"
           >
             <FastForward className="w-4 h-4" />
             <span>Saltar intro</span>
+            {!isPro && (
+              <span className="px-1.5 py-0.5 rounded bg-netflix-red text-white text-[9px] font-black uppercase">
+                PRO
+              </span>
+            )}
           </button>
         </div>
       )}
 
       {/* 3. Botón "Siguiente Episodio" y Autoplay (Fase 4.3) */}
       {isNearEnd && nextEpisode && (
-        <div className="absolute bottom-16 sm:bottom-12 right-4 sm:right-8 z-30 max-w-xs sm:max-w-sm w-full bg-zinc-900/95 border border-white/20 rounded-xl p-3 sm:p-4 shadow-2xl backdrop-blur-md animate-fade-in">
-          <div className="flex items-center justify-between pb-2 mb-2 border-b border-white/10 text-xs">
-            <span className="font-bold text-white flex items-center gap-1.5">
-              <Sparkles className="w-3.5 h-3.5 text-netflix-red" />
-              Siguiente episodio en {nextCountdown}s
+        <div className="absolute inset-x-2.5 bottom-11 sm:bottom-12 sm:left-auto sm:right-8 z-30 sm:w-full sm:max-w-sm bg-zinc-900/95 border border-white/20 rounded-xl p-2.5 sm:p-4 shadow-2xl backdrop-blur-md animate-fade-in">
+          <div className="flex items-center justify-between pb-1.5 sm:pb-2 mb-1.5 sm:mb-2 border-b border-white/10 text-xs">
+            <span className="font-bold text-white flex items-center gap-1.5 min-w-0">
+              <FastForward className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
+              {isPro ? (
+                <span>Siguiente episodio en {nextCountdown}s</span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => openUpgradeModal("modo_maraton")}
+                  className="text-left hover:underline flex items-center gap-1.5"
+                >
+                  <span>Autoplay automático</span>
+                  <span className="px-1.5 py-0.5 rounded bg-emerald-600 text-white text-[9px] font-black uppercase">
+                    PRO
+                  </span>
+                </button>
+              )}
             </span>
             <button
+              type="button"
               onClick={() => setDismissedNextOverlay(true)}
               className="text-zinc-400 hover:text-white p-1"
               title="Cancelar"
+              aria-label="Cancelar reproducción automática"
             >
               <X className="w-4 h-4" />
             </button>
@@ -1155,7 +1328,7 @@ export default function SmartVideoPlayer({
 
           <div className="flex items-center gap-3">
             {nextEpisode.thumbnailUrl && (
-              <div className="relative aspect-video w-24 rounded-md overflow-hidden bg-zinc-800 flex-shrink-0">
+              <div className="hidden sm:block relative aspect-video w-24 rounded-md overflow-hidden bg-zinc-800 flex-shrink-0">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   src={nextEpisode.thumbnailUrl}
@@ -1171,7 +1344,7 @@ export default function SmartVideoPlayer({
             </div>
           </div>
 
-          <div className="mt-3 flex items-center gap-2">
+          <div className="mt-2.5 sm:mt-3 flex items-center gap-2">
             <button
               type="button"
               onClick={handleGoToNextEpisode}
@@ -1191,131 +1364,29 @@ export default function SmartVideoPlayer({
         </div>
       )}
 
-      {/* 4. Selector de Episodios Drawer dentro del Player (Fase 4.4) */}
-      {showEpisodesDrawer && allSeasons && (
-        <div className="absolute right-0 top-0 bottom-0 w-80 sm:w-96 max-w-[90%] bg-zinc-950/95 border-l border-white/10 backdrop-blur-xl z-40 p-4 flex flex-col shadow-2xl animate-fade-in">
-          <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
-            <h3 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
-              <Layers className="w-4 h-4 text-netflix-red" />
-              Episodios
-            </h3>
-            <button
-              type="button"
-              onClick={() => setShowEpisodesDrawer(false)}
-              className="p-1 rounded-full text-zinc-400 hover:text-white hover:bg-white/10 transition"
-              title="Cerrar"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-
-          {/* Selector de temporada en Drawer */}
-          <div className="py-3">
-            <select
-              value={drawerSeasonNumber}
-              onChange={(e) => setDrawerSeasonNumber(Number(e.target.value))}
-              className="w-full bg-zinc-900 border border-zinc-700 text-white text-xs font-bold py-2 px-3 rounded-md focus:outline-none focus:ring-1 focus:ring-netflix-red"
-            >
-              {allSeasons.map((s) => (
-                <option key={s.seasonNumber} value={s.seasonNumber}>
-                  {s.title && !/^season\s+\d+$/i.test(s.title.trim())
-                    ? s.title
-                    : `Temporada ${s.seasonNumber}`}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Lista de episodios */}
-          <div className="flex-1 overflow-y-auto space-y-2 pr-1">
-            {(
-              allSeasons.find((s) => s.seasonNumber === drawerSeasonNumber)
-                ?.episodes || []
-            ).map((ep) => {
-              const isCurrent = ep.id === episodeId;
-              return (
-                <button
-                  key={ep.id}
-                  type="button"
-                  onClick={() => {
-                    setShowEpisodesDrawer(false);
-                    if (onEpisodeSelect) onEpisodeSelect(ep.id);
-                    else window.location.href = `/watch/episode/${ep.id}`;
-                  }}
-                  className={`w-full flex items-center gap-3 p-2 rounded-lg text-left transition ${
-                    isCurrent
-                      ? "bg-netflix-red/20 border border-netflix-red/50 text-white"
-                      : "hover:bg-zinc-800/60 text-zinc-300 hover:text-white"
-                  }`}
-                >
-                  <div className="relative aspect-video w-20 rounded overflow-hidden bg-zinc-800 flex-shrink-0">
-                    {ep.thumbnailUrl ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={ep.thumbnailUrl}
-                        alt={ep.title}
-                        className="w-full h-full object-cover"
-                      />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center text-xs font-bold text-zinc-500">
-                        {ep.episodeNumber}
-                      </div>
-                    )}
-                    {isCurrent && (
-                      <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
-                        <Play className="w-4 h-4 text-netflix-red fill-netflix-red" />
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-bold truncate">
-                      {ep.episodeNumber}. {ep.title}
-                    </p>
-                    <p className="text-[10px] text-zinc-500">{ep.duration}m</p>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
       {castNotice && (
-        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-30 max-w-[90%] flex items-center gap-2 rounded-lg bg-zinc-950/95 border border-white/15 px-3 py-2 text-xs font-medium text-zinc-200 shadow-xl backdrop-blur-md">
+        <div className="absolute top-12 sm:top-14 left-2.5 right-2.5 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 z-30 sm:max-w-[90%] flex items-center gap-2 rounded-lg bg-zinc-950/95 border border-white/15 px-3 py-2 text-xs font-medium text-zinc-200 shadow-xl backdrop-blur-md">
           <Cast className="w-3.5 h-3.5 text-netflix-red flex-shrink-0" />
           <span className="truncate sm:whitespace-normal">{castNotice}</span>
           <button
             type="button"
             onClick={() => setCastNotice(null)}
             aria-label="Cerrar aviso"
-            className="text-zinc-400 hover:text-white p-0.5"
+            className="text-zinc-400 hover:text-white p-0.5 ml-auto flex-shrink-0"
           >
             <X className="w-3.5 h-3.5" />
           </button>
         </div>
       )}
 
-      {/* Controles flotantes superiores integrados en el reproductor: Drawer de Episodios + Transmitir a TV + Pantalla Completa */}
-      <div className="absolute top-3 right-3 z-20 flex items-center gap-2 opacity-95 sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
-        {allSeasons && allSeasons.length > 0 && (
-          <button
-            type="button"
-            onClick={() => setShowEpisodesDrawer((prev) => !prev)}
-            title="Seleccionar episodio"
-            aria-label="Seleccionar episodio"
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-black/75 hover:bg-netflix-red text-white text-xs font-semibold border border-white/15 backdrop-blur-md shadow-lg transition"
-          >
-            <Layers className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Episodios</span>
-          </button>
-        )}
-
+      {/* Único control flotante sobre el reproductor: Transmitir a TV */}
+      <div className="absolute top-2.5 right-2.5 sm:top-3 sm:right-3 z-20 flex items-center justify-end opacity-95 sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
         <button
           type="button"
           onClick={handleCastClick}
           title={isCasting ? "Desconectar de la TV" : "Transmitir a TV"}
           aria-label={isCasting ? "Desconectar de la TV" : "Transmitir a TV"}
-          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-white text-xs font-semibold border border-white/15 backdrop-blur-md shadow-lg transition ${
+          className={`inline-flex items-center justify-center gap-1.5 h-8 px-2.5 sm:px-3 sm:py-1.5 rounded-lg text-white text-xs font-semibold border border-white/15 backdrop-blur-md shadow-lg transition ${
             isCasting
               ? "bg-netflix-red hover:bg-red-700"
               : "bg-black/75 hover:bg-netflix-red"
@@ -1325,44 +1396,16 @@ export default function SmartVideoPlayer({
           <span className="hidden sm:inline">
             {isCasting ? "Conectado a TV" : "Transmitir a TV"}
           </span>
+          {!isPro && !isCasting && (
+            <span className="px-1 py-0.5 rounded bg-emerald-600 text-white text-[9px] font-black uppercase leading-none">
+              PRO
+            </span>
+          )}
         </button>
-
-        {(isPrimaryServerActive || isFullscreen) && (
-          <button
-            type="button"
-            onClick={handleToggleFullscreen}
-            title={
-              isFullscreen ? "Salir de pantalla completa" : "Pantalla completa"
-            }
-            aria-label={
-              isFullscreen ? "Salir de pantalla completa" : "Pantalla completa"
-            }
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-black/75 hover:bg-netflix-red text-white text-xs font-semibold border border-white/15 backdrop-blur-md shadow-lg transition"
-          >
-            {isFullscreen ? (
-              <>
-                <Minimize2 className="w-3.5 h-3.5" />
-                <span>Salir</span>
-              </>
-            ) : (
-              <>
-                <Maximize2 className="w-3.5 h-3.5" />
-                <span>Pantalla completa</span>
-              </>
-            )}
-          </button>
-        )}
       </div>
       </div>
 
-      {/* Barra Contextual No Intrusiva (Smart Adblock Helper) debajo del reproductor */}
-      <SmartAdblockHelperBar
-        active={
-          !isCasting &&
-          currentStream.format === MirrorFormat.EMBED &&
-          smartPlayerStatus === "playing_iframe"
-        }
-      />
+      {/* Barra inferior eliminada para mantener la interfaz lo más simple posible */}
     </div>
   );
 }

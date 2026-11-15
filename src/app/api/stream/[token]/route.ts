@@ -8,6 +8,7 @@ import {
 } from "@/application/services/TokenCryptoService";
 import { MirrorFormat } from "@/domain/enums/MirrorFormat";
 import { authOptions } from "@/infrastructure/auth/authOptions";
+import { prismaMembershipRepository } from "@/infrastructure/repositories/PrismaMembershipRepository";
 import {
   apiRateLimiter,
   getClientIp,
@@ -164,6 +165,7 @@ function buildStreamTunnelPlayerHtml(params: {
   isTvMode: boolean;
   isSecondaryServer: boolean;
   isDirtyIframe: boolean;
+  shieldProtectionEnabled: boolean;
   resumeSeconds: number;
   streamwishHls: DirectHlsStreamInfo | null;
 }): string {
@@ -174,13 +176,23 @@ function buildStreamTunnelPlayerHtml(params: {
     isTvMode,
     isSecondaryServer,
     isDirtyIframe,
+    shieldProtectionEnabled,
     resumeSeconds,
     streamwishHls,
   } = params;
 
-  const sandboxAttribute = isDirtyIframe
-    ? 'sandbox="allow-scripts allow-same-origin allow-presentation allow-forms"'
-    : "";
+  const sandboxAttribute =
+    shieldProtectionEnabled && isDirtyIframe
+      ? 'sandbox="allow-scripts allow-same-origin allow-presentation allow-forms"'
+      : "";
+
+  const streamwishReferer = (() => {
+    try {
+      return `${new URL(targetIframeUrl).origin}/`;
+    } catch {
+      return targetIframeUrl;
+    }
+  })();
 
   return `<!DOCTYPE html>
 <html lang="es">
@@ -214,6 +226,9 @@ function buildStreamTunnelPlayerHtml(params: {
   </style>
   <script>
     (function() {
+      ${
+        shieldProtectionEnabled
+          ? `
       try {
         Object.defineProperty(window, "open", {
           value: function() { return null; },
@@ -239,7 +254,9 @@ function buildStreamTunnelPlayerHtml(params: {
         setTimeout(function() {
           try { window.focus(); } catch (e) {}
         }, 120);
-      });
+      });`
+          : ""
+      }
       window.addEventListener("message", function(event) {
         try {
           if (event.source && event.source !== window && event.source !== window.parent) {
@@ -347,6 +364,36 @@ function buildStreamTunnelPlayerHtml(params: {
         } catch (e) {}
       }
 
+      // Expone el stream HLS/MP4 directo al padre para Cast/AirPlay exclusivo del reproductor
+      try {
+        var mirrorIdValue = ${JSON.stringify(mirrorId)};
+        var streamRefererValue = ${JSON.stringify(streamwishReferer)};
+        var posterUrlValue = ${JSON.stringify(streamwishHls.posterUrl || "")};
+        var proxiedStreamUrl =
+          "/api/stream-proxy?url=" +
+          encodeURIComponent(hlsUrl) +
+          "&referer=" +
+          encodeURIComponent(streamRefererValue);
+
+        var streamTypeValue = ${JSON.stringify(
+          /\.mp4(\?|$)/i.test(streamwishHls.hlsUrl) ? "mp4" : "hls"
+        )};
+
+        window.parent.postMessage(
+          {
+            type: "PILOTO_NATIVE_HLS_READY",
+            mirrorId: mirrorIdValue,
+            streamUrl: hlsUrl,
+            proxiedUrl: proxiedStreamUrl,
+            streamType: streamTypeValue,
+            referer: streamRefererValue,
+            posterUrl: posterUrlValue || undefined,
+            durationSeconds: knownDurationSec > 0 ? knownDurationSec : undefined
+          },
+          "*"
+        );
+      } catch (e) {}
+
       video.addEventListener("loadedmetadata", reportTime);
       video.addEventListener("timeupdate", reportTime);
       video.addEventListener("seeked", reportTime);
@@ -430,6 +477,7 @@ export async function GET(
 ) {
   try {
     const isTvMode = request.nextUrl.searchParams.get("tv") === "1";
+    const requestedShield = request.nextUrl.searchParams.get("escudo") !== "0";
 
     const clientIp = getClientIp(request);
     const rateLimit = apiRateLimiter.checkLimit(
@@ -457,8 +505,12 @@ export async function GET(
     const rawToken = decodeURIComponent(params.token);
     const payload = tokenCryptoService.decryptStreamToken(rawToken);
 
+    let authenticatedUserId: string | undefined;
+    let authenticatedUserEmail: string | null = null;
     if (!isTvMode) {
       const session = await getServerSession(authOptions);
+      authenticatedUserId = (session?.user as { id?: string } | undefined)?.id;
+      authenticatedUserEmail = session?.user?.email ?? null;
       if (!session?.user) {
         return NextResponse.json(
           {
@@ -561,9 +613,21 @@ export async function GET(
       : urlWithResume;
     const escapedRawUrl = escapeHtmlAttribute(targetIframeUrl);
 
-    const streamwishHls = resolvedIsStreamwish
-      ? await extractDirectHlsFromStreamwishEmbed(finalEmbedUrl)
-      : null;
+    let serverAllowsShieldMode = false;
+    if (isTvMode) {
+      serverAllowsShieldMode = requestedShield;
+    } else if (requestedShield && authenticatedUserId) {
+      const membership = await prismaMembershipRepository.getMembershipByUserId(
+        authenticatedUserId,
+        authenticatedUserEmail
+      );
+      serverAllowsShieldMode = membership.isModoEscudoActive;
+    }
+
+    const streamwishHls =
+      resolvedIsStreamwish && serverAllowsShieldMode
+        ? await extractDirectHlsFromStreamwishEmbed(finalEmbedUrl)
+        : null;
 
     const html = buildStreamTunnelPlayerHtml({
       mirrorId: payload.mirrorId,
@@ -572,6 +636,7 @@ export async function GET(
       isTvMode,
       isSecondaryServer,
       isDirtyIframe,
+      shieldProtectionEnabled: serverAllowsShieldMode,
       resumeSeconds,
       streamwishHls,
     });

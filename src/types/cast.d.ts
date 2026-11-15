@@ -2,14 +2,24 @@ export interface CastDevice {
   friendlyName: string;
 }
 
+export interface CastImage {
+  url: string;
+  width?: number;
+  height?: number;
+}
+
 export interface CastMediaMetadata {
   title?: string;
   metadataType?: number;
+  images?: CastImage[];
 }
 
 export interface CastMediaInfo {
   contentId: string;
   contentType: string;
+  streamType?: string;
+  hlsSegmentFormat?: string;
+  hlsVideoSegmentFormat?: string;
   metadata?: CastMediaMetadata;
 }
 
@@ -75,6 +85,24 @@ declare global {
         };
         media: {
           DEFAULT_MEDIA_RECEIVER_APP_ID: string;
+          StreamType?: {
+            BUFFERED: string;
+            LIVE: string;
+            OTHER: string;
+          };
+          HlsSegmentFormat?: {
+            TS: string;
+            AAC: string;
+            AC3: string;
+            MP3: string;
+            TS_AAC: string;
+            E_AC3: string;
+            FMP4: string;
+          };
+          HlsVideoSegmentFormat?: {
+            MPEG2_TS: string;
+            FMP4: string;
+          };
           MediaInfo: new (
             contentId: string,
             contentType: string
@@ -82,6 +110,7 @@ declare global {
           GenericMediaMetadata: new () => CastMediaMetadata;
           LoadRequest: new (mediaInfo: CastMediaInfo) => CastLoadRequest;
         };
+        Image?: new (url: string) => CastImage;
       };
     };
     cast?: {

@@ -35,7 +35,7 @@ export default function SeasonSelector({
   isLoading = false,
 }: SeasonSelectorProps) {
   return (
-    <div className="flex items-center justify-between pb-4 border-b border-zinc-800">
+    <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-zinc-800">
       <div className="flex items-center gap-3">
         <h2 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
           Episodios
@@ -50,7 +50,7 @@ export default function SeasonSelector({
           value={selectedSeasonNumber}
           onChange={(e) => onSelectSeason(Number(e.target.value))}
           disabled={isLoading}
-          className="appearance-none bg-zinc-900 border border-zinc-700 hover:border-zinc-500 text-white text-sm font-semibold py-2 pl-4 pr-10 rounded-md focus:outline-none focus:ring-2 focus:ring-netflix-red transition cursor-pointer disabled:opacity-50"
+          className="appearance-none bg-zinc-900 border border-zinc-700 hover:border-zinc-500 text-white text-sm font-semibold py-2 pl-4 pr-10 max-w-[200px] sm:max-w-xs truncate rounded-md focus:outline-none focus:ring-2 focus:ring-netflix-red transition cursor-pointer disabled:opacity-50"
         >
           {seasons.map((season) => (
             <option

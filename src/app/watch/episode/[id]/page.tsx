@@ -12,9 +12,36 @@ import {
   ChevronLeft,
   Play,
   Layers,
+  ShieldCheck,
+  ShieldOff,
 } from "lucide-react";
 import SmartVideoPlayer from "@/components/SmartVideoPlayer";
 import { EpisodePlaybackDto } from "@/application/dto/SeriesDto";
+import { useMembership } from "@/components/MembershipProvider";
+
+/**
+ * Espera un breve intervalo cancelable mediante `AbortSignal` antes de reintentar una petición.
+ */
+function esperarConAborto(
+  milliseconds: number,
+  signal?: AbortSignal
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 /**
  * Página de reproducción dedicada para capítulos de Series de TV (`/watch/episode/[id]`).
@@ -26,6 +53,7 @@ export default function WatchEpisodePage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const episodeId = params.id;
+  const { isPro, openUpgradeModal } = useMembership();
 
   const [playback, setPlayback] = useState<EpisodePlaybackDto | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -36,35 +64,80 @@ export default function WatchEpisodePage() {
   const [detectedDurationSec, setDetectedDurationSec] = useState<number>(0);
 
   /**
-   * Carga los datos de reproducción y enlaces firmados del episodio actual.
+   * Carga los datos de reproducción y enlaces firmados del episodio actual,
+   * con soporte de cancelación y reintento automático ante fallos transitorios.
    */
-  const loadPlayback = useCallback(async () => {
-    setLoading(true);
-    setDetectedDurationSec(0);
-    try {
-      const response = await fetch(
-        `/api/series/episode/${episodeId}/playback`,
-        {
-          cache: "no-store",
+  const loadPlayback = useCallback(
+    async (signal?: AbortSignal) => {
+      setLoading(true);
+      setError(null);
+      setDetectedDurationSec(0);
+
+      try {
+        for (let intento = 0; intento <= 1; intento++) {
+          if (signal?.aborted) return;
+
+          if (intento > 0) {
+            await esperarConAborto(600, signal);
+          }
+
+          try {
+            const response = await fetch(
+              `/api/series/episode/${episodeId}/playback`,
+              {
+                cache: "no-store",
+                signal,
+              }
+            );
+            const data = await response.json();
+
+            if (!response.ok || !data.ok) {
+              const errorMessage =
+                data.error || "No se pudo cargar el episodio.";
+              if (response.status === 404 || intento === 1) {
+                throw new Error(errorMessage);
+              }
+              continue;
+            }
+
+            if (!signal?.aborted) {
+              setPlayback(data.playback);
+            }
+            return;
+          } catch (attemptError) {
+            const isAbort =
+              signal?.aborted ||
+              (attemptError instanceof Error &&
+                attemptError.name === "AbortError");
+            if (isAbort || intento === 1) {
+              throw attemptError;
+            }
+          }
         }
-      );
-      const data = await response.json();
-      if (!response.ok || !data.ok) {
-        throw new Error(data.error || "No se pudo cargar el episodio.");
+      } catch (err) {
+        const isAbort =
+          signal?.aborted ||
+          (err instanceof Error && err.name === "AbortError");
+        if (!isAbort) {
+          setError(
+            err instanceof Error ? err.message : "Error cargando el episodio."
+          );
+        }
+      } finally {
+        if (!signal?.aborted) {
+          setLoading(false);
+        }
       }
-      setPlayback(data.playback);
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Error cargando el episodio."
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, [episodeId]);
+    },
+    [episodeId]
+  );
 
   useEffect(() => {
-    void loadPlayback();
-  }, [loadPlayback]);
+    if (!episodeId) return;
+    const controller = new AbortController();
+    void loadPlayback(controller.signal);
+    return () => controller.abort();
+  }, [episodeId, loadPlayback]);
 
   const hasLatino =
     playback?.streams.some((stream) => stream.language === "Latino") ?? false;
@@ -95,13 +168,13 @@ export default function WatchEpisodePage() {
   return (
     <div className="min-h-screen bg-[#141414] text-white flex flex-col">
       {/* Barra de navegación superior con retroceso a la ficha de la serie */}
-      <header className="fixed top-0 inset-x-0 z-50 bg-black/90 backdrop-blur-md border-b border-white/10 px-4 sm:px-8 h-14 flex items-center justify-between">
+      <header className="fixed top-0 inset-x-0 z-50 bg-black/90 backdrop-blur-md border-b border-white/10 px-3 sm:px-8 h-14 flex items-center justify-between gap-3">
         <Link
           href={playback ? `/series/${playback.seriesId}` : "/"}
-          className="inline-flex items-center gap-2 text-xs sm:text-sm font-bold text-zinc-300 hover:text-white transition group"
+          className="inline-flex items-center gap-2 text-xs sm:text-sm font-bold text-zinc-300 hover:text-white transition group min-w-0 max-w-full"
         >
-          <ArrowLeft className="w-4 h-4 group-hover:-translate-x-1 transition-transform" />
-          <span>
+          <ArrowLeft className="w-4 h-4 flex-shrink-0 group-hover:-translate-x-1 transition-transform" />
+          <span className="truncate">
             {playback
               ? `Volver a ${playback.seriesTitle}`
               : "Volver al catálogo"}
@@ -109,18 +182,23 @@ export default function WatchEpisodePage() {
         </Link>
 
         {playback && (
-          <div className="text-xs font-semibold text-zinc-400 hidden sm:block truncate max-w-md">
-            <span className="text-zinc-200">{playback.seriesTitle}</span> •{" "}
-            <span>
-              T{playback.seasonNumber}:E{playback.episodeNumber}{" "}
-              {playback.episodeTitle}
+          <>
+            <span className="sm:hidden flex-shrink-0 px-2 py-0.5 rounded bg-amber-500/90 text-black text-[11px] font-extrabold">
+              T{playback.seasonNumber}:E{playback.episodeNumber}
             </span>
-          </div>
+            <div className="text-xs font-semibold text-zinc-400 hidden sm:block truncate max-w-md">
+              <span className="text-zinc-200">{playback.seriesTitle}</span> •{" "}
+              <span>
+                T{playback.seasonNumber}:E{playback.episodeNumber}{" "}
+                {playback.episodeTitle}
+              </span>
+            </div>
+          </>
         )}
       </header>
 
       {/* Contenido principal */}
-      <main className="flex-1 max-w-7xl mx-auto px-4 sm:px-8 pt-20 pb-16 w-full space-y-6 sm:space-y-8">
+      <main className="flex-1 max-w-7xl mx-auto px-3 sm:px-8 pt-20 pb-16 w-full space-y-6 sm:space-y-8">
         {loading ? (
           <div className="w-full aspect-video rounded-2xl bg-zinc-900 border border-white/10 flex flex-col items-center justify-center space-y-3">
             <div className="w-10 h-10 border-4 border-netflix-red border-t-transparent rounded-full animate-spin" />
@@ -173,7 +251,7 @@ export default function WatchEpisodePage() {
 
             {/* Metadatos del episodio y selector de idioma */}
             <div className="bg-zinc-900/40 border border-white/10 rounded-xl sm:rounded-2xl p-4 sm:p-6 space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                 <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-xs font-semibold">
                   <span className="px-2.5 py-0.5 rounded bg-amber-500/90 text-black font-extrabold uppercase">
                     T{playback.seasonNumber}:E{playback.episodeNumber}
@@ -193,48 +271,70 @@ export default function WatchEpisodePage() {
                 </div>
 
                 {/* Selector de idioma + Transmitir a TV */}
-                <div className="flex flex-wrap items-center gap-2">
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
                   {(hasLatino || hasEnglish) && (
-                    <div className="inline-flex items-center gap-1.5 bg-zinc-900 border border-white/10 rounded-full p-1">
-                      <span className="pl-2.5 pr-1 text-zinc-400 flex items-center">
+                    <div className="flex sm:inline-flex items-center gap-1 bg-zinc-900 border border-white/10 rounded-full p-1 w-full sm:w-auto">
+                      <span className="pl-2 pr-1 text-zinc-400 flex items-center flex-shrink-0">
                         <Languages className="w-3.5 h-3.5 text-netflix-red" />
                       </span>
-                      {hasLatino && (
-                        <button
-                          type="button"
-                          onClick={() => setSelectedLanguage("Latino")}
-                          className={`px-3 py-1 rounded-full text-xs transition ${
-                            selectedLanguage === "Latino"
-                              ? "bg-netflix-red text-white font-bold shadow"
-                              : "text-zinc-400 hover:text-white"
-                          }`}
-                        >
-                          Audio Latino
-                        </button>
-                      )}
-                      {hasEnglish && (
-                        <button
-                          type="button"
-                          onClick={() => setSelectedLanguage("Inglés (Sub)")}
-                          className={`px-3 py-1 rounded-full text-xs transition ${
-                            selectedLanguage === "Inglés (Sub)"
-                              ? "bg-netflix-red text-white font-bold shadow"
-                              : "text-zinc-400 hover:text-white"
-                          }`}
-                        >
-                          Inglés (Sub)
-                        </button>
-                      )}
+                      {[
+                        { visible: hasLatino, value: "Latino" as const, label: "Audio Latino" },
+                        { visible: hasEnglish, value: "Inglés (Sub)" as const, label: "Inglés (Sub)" },
+                      ]
+                        .filter((lang) => lang.visible)
+                        .map((lang) => (
+                          <button
+                            key={lang.value}
+                            type="button"
+                            onClick={() => setSelectedLanguage(lang.value)}
+                            className={`flex-1 sm:flex-initial text-center px-3 py-1.5 sm:py-1 rounded-full text-xs transition ${
+                              selectedLanguage === lang.value
+                                ? "bg-netflix-red text-white font-bold shadow"
+                                : "text-zinc-400 hover:text-white"
+                            }`}
+                          >
+                            {lang.label}
+                          </button>
+                        ))}
                     </div>
                   )}
 
                   <button
                     type="button"
+                    onClick={() => openUpgradeModal("modo_escudo")}
+                    className={`inline-flex items-center justify-center gap-1.5 w-full sm:w-auto px-3.5 py-2 sm:py-1.5 rounded-full border text-xs font-semibold transition ${
+                      isPro
+                        ? "bg-emerald-500/15 border-emerald-400/50 text-emerald-300 hover:bg-emerald-500/25"
+                        : "bg-zinc-900 hover:bg-netflix-red border-white/10 text-zinc-200 hover:text-white"
+                    }`}
+                  >
+                    {isPro ? (
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                    ) : (
+                      <ShieldOff className="w-3.5 h-3.5 text-amber-400" />
+                    )}
+                    <span>
+                      {isPro ? "Modo Escudo Activo" : "Modo Escudo"}
+                    </span>
+                    {!isPro && (
+                      <span className="px-1.5 py-0.5 rounded bg-netflix-red text-white text-[9px] font-black uppercase">
+                        PRO
+                      </span>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
                     onClick={handleNativeCastTrigger}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-zinc-900 hover:bg-netflix-red border border-white/10 text-xs font-semibold text-zinc-200 hover:text-white transition"
+                    className="inline-flex items-center justify-center gap-1.5 w-full sm:w-auto px-3.5 py-2 sm:py-1.5 rounded-full bg-zinc-900 hover:bg-netflix-red border border-white/10 text-xs font-semibold text-zinc-200 hover:text-white transition"
                   >
                     <Cast className="w-3.5 h-3.5 text-netflix-red group-hover:text-white" />
                     <span>Transmitir a TV</span>
+                    {!isPro && (
+                      <span className="px-1.5 py-0.5 rounded bg-netflix-red text-white text-[9px] font-black uppercase">
+                        PRO
+                      </span>
+                    )}
                   </button>
                 </div>
               </div>
@@ -250,13 +350,13 @@ export default function WatchEpisodePage() {
               </div>
 
               {/* Botones de navegación Anterior / Siguiente */}
-              <div className="flex items-center gap-3 pt-2 border-t border-zinc-800">
+              <div className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2.5 pt-3 border-t border-zinc-800">
                 {playback.previousEpisode && (
                   <Link
                     href={`/watch/episode/${playback.previousEpisode.id}`}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-xs font-bold text-white transition"
+                    className="inline-flex items-center justify-center flex-1 sm:flex-initial gap-1.5 px-4 py-2.5 sm:py-2 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-xs font-bold text-white transition text-center"
                   >
-                    <ChevronLeft className="w-4 h-4" />
+                    <ChevronLeft className="w-4 h-4 flex-shrink-0" />
                     <span>
                       Anterior: E{playback.previousEpisode.episodeNumber}
                     </span>
@@ -266,12 +366,12 @@ export default function WatchEpisodePage() {
                 {playback.nextEpisode && (
                   <Link
                     href={`/watch/episode/${playback.nextEpisode.id}`}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-white hover:bg-white/90 text-xs font-black text-black transition ml-auto shadow-md"
+                    className="inline-flex items-center justify-center flex-1 sm:flex-initial gap-1.5 px-4 py-2.5 sm:py-2 rounded-lg bg-white hover:bg-white/90 text-xs font-black text-black transition sm:ml-auto shadow-md text-center"
                   >
                     <span>
                       Siguiente: E{playback.nextEpisode.episodeNumber}
                     </span>
-                    <ChevronRight className="w-4 h-4" />
+                    <ChevronRight className="w-4 h-4 flex-shrink-0" />
                   </Link>
                 )}
               </div>
@@ -279,14 +379,16 @@ export default function WatchEpisodePage() {
 
             {/* Explorador de temporadas y episodios debajo del reproductor */}
             <section className="space-y-4 pt-4">
-              <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
-                <h2 className="text-lg sm:text-xl font-bold text-white flex items-center gap-2">
-                  <Layers className="w-5 h-5 text-netflix-red" />
-                  Más episodios de {playback.seriesTitle}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 sm:gap-4 pb-3 border-b border-zinc-800">
+                <h2 className="text-base sm:text-xl font-bold text-white flex items-center gap-2 min-w-0">
+                  <Layers className="w-5 h-5 text-netflix-red flex-shrink-0" />
+                  <span className="truncate">
+                    Más episodios de {playback.seriesTitle}
+                  </span>
                 </h2>
                 <Link
                   href={`/series/${playback.seriesId}`}
-                  className="text-xs font-semibold text-zinc-400 hover:text-white transition"
+                  className="text-xs font-semibold text-zinc-400 hover:text-white transition flex-shrink-0"
                 >
                   Ver ficha completa
                 </Link>

@@ -13,6 +13,7 @@ export interface CreateMirrorInput {
 }
 
 export interface UpsertMovieInput {
+  existingMovieId?: string;
   tmdbId?: number | null;
   mediaType?: "MOVIE" | "SERIES";
   title: string;
@@ -32,6 +33,7 @@ export interface IMovieRepository {
   findAvailableCatalog(searchQuery?: string, genre?: string): Promise<Movie[]>;
   findByIdWithMirrors(id: string): Promise<Movie | null>;
   findByTmdbId(tmdbId: number): Promise<Movie | null>;
+  findAnyMediaByTmdbId(tmdbId: number): Promise<Movie | null>;
   upsertMovieWithMirrors(data: UpsertMovieInput): Promise<Movie>;
   updateAvailability(movieId: string, isAvailable: boolean): Promise<void>;
 }

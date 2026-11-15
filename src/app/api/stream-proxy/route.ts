@@ -43,13 +43,35 @@ export async function OPTIONS() {
  * @param refererHeader Cabecera Referer que debe propagarse a cada segmento.
  * @returns Manifiesto HLS reescrito.
  */
+function resolvePublicProxyOrigin(request: NextRequest): string {
+  const forwardedProto = request.headers
+    .get("x-forwarded-proto")
+    ?.split(",")[0]
+    ?.trim();
+  const forwardedHost =
+    request.headers.get("x-forwarded-host")?.split(",")[0]?.trim() ||
+    request.headers.get("host")?.split(",")[0]?.trim();
+
+  if (forwardedHost) {
+    const protocol =
+      forwardedProto ||
+      request.nextUrl.protocol.replace(/:$/, "") ||
+      "https";
+    return `${protocol}://${forwardedHost}`;
+  }
+
+  return request.nextUrl.origin;
+}
+
 function rewriteHlsManifestLines(
   manifestText: string,
   finalBaseUrl: string,
-  refererHeader: string
+  refererHeader: string,
+  proxyOrigin: string
 ): string {
+  const normalizedOrigin = proxyOrigin.replace(/\/+$/, "");
   const buildProxyUrl = (targetUrl: string): string =>
-    `/api/stream-proxy?url=${encodeURIComponent(
+    `${normalizedOrigin}/api/stream-proxy?url=${encodeURIComponent(
       targetUrl
     )}&referer=${encodeURIComponent(refererHeader)}`;
 
@@ -215,10 +237,12 @@ export async function GET(request: NextRequest) {
 
     if (isHlsManifest) {
       const manifestText = await upstreamResponse.text();
+      const proxyOrigin = resolvePublicProxyOrigin(request);
       const modifiedManifest = rewriteHlsManifestLines(
         manifestText,
         finalBaseUrl,
-        refererHeader
+        refererHeader,
+        proxyOrigin
       );
 
       return new NextResponse(modifiedManifest, {

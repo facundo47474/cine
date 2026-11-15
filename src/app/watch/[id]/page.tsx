@@ -2,10 +2,44 @@
 
 import React, { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
-import { ArrowLeft, Cast, Clock, Film, Languages, Star } from "lucide-react";
+import { useParams, useRouter } from "next/navigation";
+import {
+  ArrowLeft,
+  Cast,
+  Clock,
+  Film,
+  Languages,
+  ShieldCheck,
+  ShieldOff,
+  Star,
+} from "lucide-react";
 import SmartVideoPlayer from "@/components/SmartVideoPlayer";
 import { MoviePlaybackDto } from "@/application/dto/PlaybackStreamDto";
+import { useMembership } from "@/components/MembershipProvider";
+
+/**
+ * Espera un breve intervalo cancelable mediante `AbortSignal` antes de reintentar una petición.
+ */
+function esperarConAborto(
+  milliseconds: number,
+  signal?: AbortSignal
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 /**
  * Página de reproducción dedicada para Películas (`/watch/[id]`).
@@ -15,7 +49,9 @@ import { MoviePlaybackDto } from "@/application/dto/PlaybackStreamDto";
  */
 export default function WatchMoviePage() {
   const params = useParams<{ id: string }>();
+  const router = useRouter();
   const movieId = params.id;
+  const { isPro, openUpgradeModal } = useMembership();
 
   const [movie, setMovie] = useState<MoviePlaybackDto | null>(null);
   const [savedProgress, setSavedProgress] = useState<number>(0);
@@ -26,33 +62,85 @@ export default function WatchMoviePage() {
   >("Latino");
 
   /**
-   * Consulta al backend los streams firmados y el progreso guardado de la película.
+   * Consulta al backend los streams firmados y el progreso guardado de la película,
+   * realizando un reintento automático ante errores transitorios y redirigiendo si corresponde a una serie.
    */
-  const loadPlayback = useCallback(async () => {
-    setLoading(true);
-    try {
-      const response = await fetch(`/api/movies/${movieId}/play`, {
-        cache: "no-store",
-      });
-      const data = await response.json();
-      if (!response.ok || !data.ok) {
-        throw new Error(data.error || "No se pudo cargar la película.");
+  const loadPlayback = useCallback(
+    async (signal?: AbortSignal) => {
+      setLoading(true);
+      setError(null);
+      let redirectingToSeries = false;
+
+      try {
+        for (let intento = 0; intento <= 1; intento++) {
+          if (signal?.aborted) return;
+
+          if (intento > 0) {
+            await esperarConAborto(600, signal);
+          }
+
+          try {
+            const response = await fetch(`/api/movies/${movieId}/play`, {
+              cache: "no-store",
+              signal,
+            });
+            const data = await response.json();
+
+            if (!response.ok || !data.ok) {
+              const errorMessage =
+                data.error || "No se pudo cargar la película.";
+              if (response.status === 404 || intento === 1) {
+                throw new Error(errorMessage);
+              }
+              continue;
+            }
+
+            const targetSeriesId: string | undefined =
+              data.redirectToSeriesId || data.movie?.redirectToSeriesId;
+            if (targetSeriesId) {
+              redirectingToSeries = true;
+              router.replace(`/series/${targetSeriesId}`);
+              return;
+            }
+
+            if (!signal?.aborted) {
+              setMovie(data.movie);
+              setSavedProgress(data.savedProgressSeconds || 0);
+            }
+            return;
+          } catch (attemptError) {
+            const isAbort =
+              signal?.aborted ||
+              (attemptError instanceof Error &&
+                attemptError.name === "AbortError");
+            if (isAbort || intento === 1) {
+              throw attemptError;
+            }
+          }
+        }
+      } catch (err) {
+        const isAbort =
+          signal?.aborted ||
+          (err instanceof Error && err.name === "AbortError");
+        if (!isAbort) {
+          setError(
+            err instanceof Error ? err.message : "Error cargando la película."
+          );
+        }
+      } finally {
+        if (!signal?.aborted && !redirectingToSeries) {
+          setLoading(false);
+        }
       }
-      setMovie(data.movie);
-      setSavedProgress(data.savedProgressSeconds || 0);
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Error cargando la película."
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, [movieId]);
+    },
+    [movieId, router]
+  );
 
   useEffect(() => {
-    if (movieId) {
-      void loadPlayback();
-    }
+    if (!movieId) return;
+    const controller = new AbortController();
+    void loadPlayback(controller.signal);
+    return () => controller.abort();
   }, [movieId, loadPlayback]);
 
   const hasLatino =
@@ -140,7 +228,7 @@ export default function WatchMoviePage() {
               </div>
 
               <div className="md:col-span-3 space-y-3 sm:space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                   <div className="flex flex-wrap items-center gap-2.5 sm:gap-3 text-xs font-semibold">
                     <span className="px-2.5 py-0.5 rounded bg-netflix-red text-white">
                       {movie.qualityBadge}
@@ -156,48 +244,70 @@ export default function WatchMoviePage() {
                     </span>
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
                     {(hasLatino || hasEnglish) && (
-                      <div className="inline-flex items-center gap-1.5 bg-zinc-900 border border-white/10 rounded-full p-1">
-                        <span className="pl-2.5 pr-1 text-zinc-400 flex items-center">
+                      <div className="flex sm:inline-flex items-center gap-1 bg-zinc-900 border border-white/10 rounded-full p-1 w-full sm:w-auto">
+                        <span className="pl-2 pr-1 text-zinc-400 flex items-center flex-shrink-0">
                           <Languages className="w-3.5 h-3.5 text-netflix-red" />
                         </span>
-                        {hasLatino && (
-                          <button
-                            type="button"
-                            onClick={() => setSelectedLanguage("Latino")}
-                            className={`px-3 py-1 rounded-full text-xs transition ${
-                              selectedLanguage === "Latino"
-                                ? "bg-netflix-red text-white font-bold shadow"
-                                : "text-zinc-400 hover:text-white"
-                            }`}
-                          >
-                            Audio Latino
-                          </button>
-                        )}
-                        {hasEnglish && (
-                          <button
-                            type="button"
-                            onClick={() => setSelectedLanguage("Inglés (Sub)")}
-                            className={`px-3 py-1 rounded-full text-xs transition ${
-                              selectedLanguage === "Inglés (Sub)"
-                                ? "bg-netflix-red text-white font-bold shadow"
-                                : "text-zinc-400 hover:text-white"
-                            }`}
-                          >
-                            Inglés (Sub)
-                          </button>
-                        )}
+                        {[
+                          { visible: hasLatino, value: "Latino" as const, label: "Audio Latino" },
+                          { visible: hasEnglish, value: "Inglés (Sub)" as const, label: "Inglés (Sub)" },
+                        ]
+                          .filter((lang) => lang.visible)
+                          .map((lang) => (
+                            <button
+                              key={lang.value}
+                              type="button"
+                              onClick={() => setSelectedLanguage(lang.value)}
+                              className={`flex-1 sm:flex-initial text-center px-3 py-1.5 sm:py-1 rounded-full text-xs transition ${
+                                selectedLanguage === lang.value
+                                  ? "bg-netflix-red text-white font-bold shadow"
+                                  : "text-zinc-400 hover:text-white"
+                              }`}
+                            >
+                              {lang.label}
+                            </button>
+                          ))}
                       </div>
                     )}
 
                     <button
                       type="button"
+                      onClick={() => openUpgradeModal("modo_escudo")}
+                      className={`inline-flex items-center justify-center gap-1.5 w-full sm:w-auto px-3.5 py-2 sm:py-1.5 rounded-full border text-xs font-semibold transition ${
+                        isPro
+                          ? "bg-emerald-500/15 border-emerald-400/50 text-emerald-300 hover:bg-emerald-500/25"
+                          : "bg-zinc-900 hover:bg-netflix-red border-white/10 text-zinc-200 hover:text-white"
+                      }`}
+                    >
+                      {isPro ? (
+                        <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                      ) : (
+                        <ShieldOff className="w-3.5 h-3.5 text-amber-400" />
+                      )}
+                      <span>
+                        {isPro ? "Modo Escudo Activo" : "Modo Escudo"}
+                      </span>
+                      {!isPro && (
+                        <span className="px-1.5 py-0.5 rounded bg-netflix-red text-white text-[9px] font-black uppercase">
+                          PRO
+                        </span>
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
                       onClick={handleNativeCastTrigger}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-zinc-900 hover:bg-netflix-red border border-white/10 text-xs font-semibold text-zinc-200 hover:text-white transition"
+                      className="inline-flex items-center justify-center gap-1.5 w-full sm:w-auto px-3.5 py-2 sm:py-1.5 rounded-full bg-zinc-900 hover:bg-netflix-red border border-white/10 text-xs font-semibold text-zinc-200 hover:text-white transition"
                     >
                       <Cast className="w-3.5 h-3.5 text-netflix-red group-hover:text-white" />
                       <span>Transmitir a TV</span>
+                      {!isPro && (
+                        <span className="px-1.5 py-0.5 rounded bg-netflix-red text-white text-[9px] font-black uppercase">
+                          PRO
+                        </span>
+                      )}
                     </button>
                   </div>
                 </div>

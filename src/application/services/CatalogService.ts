@@ -16,6 +16,8 @@ import {
   HomeFeedDto,
 } from "../dto/CatalogFeedDto";
 import { Movie, MovieProps } from "@/domain/entities/Movie";
+import { MirrorFormat } from "@/domain/enums/MirrorFormat";
+import { MirrorStatus } from "@/domain/enums/MirrorStatus";
 import {
   FALLBACK_IF_EMPTY,
   STRICT_STREAMWISH_ONLY,
@@ -24,6 +26,7 @@ import {
   isMultiEmbedAggregatorUrl,
   isStreamwish,
 } from "@/domain/utils/streamwishMatcher";
+import { InFlightOperationCoalescer } from "../utils/InFlightOperationCoalescer";
 
 /**
  * Servicio de Aplicación para el Catálogo Principal y Reproducción de Películas.
@@ -34,6 +37,8 @@ import {
  * - Gestionar la auto-sincronización de mirrors con Streamwish y firmar tokens AES-256-GCM.
  */
 export class CatalogService {
+  private readonly playbackOperationCoalescer = new InFlightOperationCoalescer();
+
   constructor(
     private readonly movieRepository: IMovieRepository,
     private readonly tokenCryptoService: ITokenCryptoService,
@@ -498,13 +503,345 @@ export class CatalogService {
   }
 
   /**
+   * Construye enlaces de contingencia multi-servidor para una película cuando los proveedores
+   * principales (`Embed69` / `PlayLatin`) no devuelven resultados o fallan temporalmente.
+   *
+   * @param tmdbId Identificador numérico de TMDB de la película.
+   * @param imdbId Identificador IMDb opcional (`tt...`).
+   * @returns Lista garantizada de espejos de contingencia (`CreateMirrorInput[]`).
+   */
+  private construirMirrorsDeContingenciaParaPelicula(
+    tmdbId: number,
+    imdbId?: string | null
+  ): CreateMirrorInput[] {
+    const emergencyMirrors: CreateMirrorInput[] = [];
+    let nextPriority = 70;
+
+    if (imdbId && imdbId.trim().startsWith("tt")) {
+      const cleanImdbId = imdbId.trim();
+      emergencyMirrors.push(
+        {
+          serverName: "Embed69-Fallback-Lat",
+          language: "Latino",
+          rawUrl: `https://embed69.org/f/${cleanImdbId}?lang=LAT&prefer=streamwish`,
+          format: MirrorFormat.EMBED,
+          quality: "1080p",
+          priority: nextPriority++,
+          isStreamwish: false,
+          isDirty: true,
+        },
+        {
+          serverName: "Embed69-Fallback-Sub",
+          language: "Inglés (Sub)",
+          rawUrl: `https://embed69.org/f/${cleanImdbId}?lang=SUB&prefer=streamwish`,
+          format: MirrorFormat.EMBED,
+          quality: "1080p",
+          priority: nextPriority++,
+          isStreamwish: false,
+          isDirty: true,
+        }
+      );
+    }
+
+    emergencyMirrors.push(
+      {
+        serverName: "VidLink-Contingencia",
+        language: "Inglés (Sub)",
+        rawUrl: `https://vidlink.pro/movie/${tmdbId}`,
+        format: MirrorFormat.EMBED,
+        quality: "1080p",
+        priority: nextPriority++,
+        isStreamwish: false,
+        isDirty: true,
+      },
+      {
+        serverName: "VidSrcCC-Contingencia",
+        language: "Inglés (Sub)",
+        rawUrl: `https://vidsrc.cc/v2/embed/movie/${tmdbId}`,
+        format: MirrorFormat.EMBED,
+        quality: "1080p",
+        priority: nextPriority++,
+        isStreamwish: false,
+        isDirty: true,
+      },
+      {
+        serverName: "AutoEmbed-Contingencia",
+        language: "Inglés (Sub)",
+        rawUrl: `https://autoembed.cc/movie/tmdb/${tmdbId}`,
+        format: MirrorFormat.EMBED,
+        quality: "1080p",
+        priority: nextPriority++,
+        isStreamwish: false,
+        isDirty: true,
+      }
+    );
+
+    return emergencyMirrors;
+  }
+
+  /**
+   * Construye un DTO mínimo con `redirectToSeriesId` cuando una petición destinada a películas
+   * corresponde en realidad a una Serie de TV.
+   *
+   * @param seriesIdOrSlug UUID o slug `tmdb-{id}` de la serie destino.
+   * @param tmdbId ID numérico de TMDB si está disponible.
+   * @param title Título de la serie.
+   * @returns DTO `MoviePlaybackDto` que indica redirección segura a la vista de serie.
+   */
+  private construirDtoDeRedireccionASerie(
+    seriesIdOrSlug: string,
+    tmdbId: number | null,
+    title: string = "Serie de TV"
+  ): MoviePlaybackDto {
+    return {
+      id: seriesIdOrSlug,
+      tmdbId,
+      title,
+      originalTitle: title,
+      synopsis: "",
+      posterUrl: "",
+      backdropUrl: null,
+      releaseYear: new Date().getFullYear(),
+      durationMins: 45,
+      rating: 7.5,
+      qualityBadge: "HD",
+      genres: [],
+      isAvailable: true,
+      streams: [],
+      redirectToSeriesId: seriesIdOrSlug,
+    };
+  }
+
+  /**
+   * Resuelve e importa/actualiza una película por `tmdbId` aplicando degradación elegante:
+   * - Si falla TMDB o los scrapers pero la película ya existe en BD, conserva el registro local.
+   * - Si el `tmdbId` no es película sino una Serie de TV, devuelve un DTO de redirección segura.
+   */
+  private async sincronizarPeliculaPorTmdbConRespaldoSeguro(
+    tmdbId: number,
+    existingMovie: Movie | null
+  ): Promise<{ movie: Movie | null; redirectDto: MoviePlaybackDto | null }> {
+    try {
+      const metadata = await this.tmdbGateway.fetchMovieMetadata(tmdbId);
+
+      let resolvedRawMirrors: CreateMirrorInput[] = [];
+      try {
+        resolvedRawMirrors =
+          await this.mirrorResolver.resolveDefaultMirrorsForTmdb(
+            tmdbId,
+            metadata.title,
+            metadata.releaseYear,
+            metadata.imdbId
+          );
+      } catch (resolverError) {
+        console.warn(
+          `[CatalogService] Falló la resolución primaria de mirrors para TMDB #${tmdbId}, aplicando contingencia:`,
+          resolverError
+        );
+      }
+
+      if (resolvedRawMirrors.length === 0) {
+        resolvedRawMirrors = this.construirMirrorsDeContingenciaParaPelicula(
+          tmdbId,
+          metadata.imdbId
+        );
+      }
+
+      const mergedMirrors = this.mergePreservingDirectMirrors(
+        existingMovie,
+        resolvedRawMirrors
+      );
+
+      const persistedMovie = await this.movieRepository.upsertMovieWithMirrors({
+        existingMovieId: existingMovie?.id,
+        tmdbId: metadata.tmdbId,
+        title: metadata.title,
+        originalTitle: metadata.originalTitle,
+        synopsis: metadata.synopsis,
+        posterUrl: metadata.posterUrl,
+        backdropUrl: metadata.backdropUrl,
+        releaseYear: metadata.releaseYear,
+        durationMins: metadata.durationMins,
+        rating: metadata.rating,
+        qualityBadge: existingMovie?.qualityBadge || "HD",
+        genres: metadata.genres,
+        mirrors: mergedMirrors,
+      });
+
+      return { movie: persistedMovie, redirectDto: null };
+    } catch (syncError) {
+      if (existingMovie) {
+        console.warn(
+          `[CatalogService] Error actualizando película TMDB #${tmdbId}; se conserva registro local (${existingMovie.id}):`,
+          syncError
+        );
+        return { movie: existingMovie, redirectDto: null };
+      }
+
+      const existingSeries = await this.movieRepository
+        .findAnyMediaByTmdbId(tmdbId)
+        .catch(() => null);
+      if (existingSeries && existingSeries.mediaType === "SERIES") {
+        return {
+          movie: null,
+          redirectDto: this.construirDtoDeRedireccionASerie(
+            existingSeries.id,
+            tmdbId,
+            existingSeries.title
+          ),
+        };
+      }
+
+      const tvMetadata = await this.tmdbGateway
+        .fetchTvMetadata(tmdbId)
+        .catch(() => null);
+      if (tvMetadata) {
+        return {
+          movie: null,
+          redirectDto: this.construirDtoDeRedireccionASerie(
+            `tmdb-${tmdbId}`,
+            tmdbId,
+            tvMetadata.title
+          ),
+        };
+      }
+
+      console.warn(
+        `[CatalogService] No se encontró película ni serie válida para TMDB #${tmdbId}:`,
+        syncError
+      );
+      return { movie: null, redirectDto: null };
+    }
+  }
+
+  /**
+   * Intenta actualizar automáticamente los mirrors de una película local por UUID
+   * conservando siempre la entidad existente si TMDB, los scrapers o PostgreSQL fallan.
+   */
+  private async actualizarMirrorsDePeliculaLocalConRespaldoSeguro(
+    movie: Movie
+  ): Promise<Movie> {
+    if (!movie.tmdbId) return movie;
+
+    try {
+      const imdbId = await this.tmdbGateway
+        .fetchMovieImdbId(movie.tmdbId)
+        .catch(() => null);
+
+      let resolvedRawMirrors: CreateMirrorInput[] = [];
+      try {
+        resolvedRawMirrors =
+          await this.mirrorResolver.resolveDefaultMirrorsForTmdb(
+            movie.tmdbId,
+            movie.title,
+            movie.releaseYear,
+            imdbId
+          );
+      } catch (resolverError) {
+        console.warn(
+          `[CatalogService] Falló resolveDefaultMirrorsForTmdb(${movie.tmdbId}) para UUID ${movie.id}, usando contingencia:`,
+          resolverError
+        );
+      }
+
+      if (resolvedRawMirrors.length === 0) {
+        resolvedRawMirrors = this.construirMirrorsDeContingenciaParaPelicula(
+          movie.tmdbId,
+          imdbId
+        );
+      }
+
+      const mergedMirrors = this.mergePreservingDirectMirrors(
+        movie,
+        resolvedRawMirrors
+      );
+
+      if (mergedMirrors.length === 0) {
+        return movie;
+      }
+
+      return await this.movieRepository.upsertMovieWithMirrors({
+        existingMovieId: movie.id,
+        tmdbId: movie.tmdbId,
+        title: movie.title,
+        originalTitle: movie.originalTitle,
+        synopsis: movie.synopsis,
+        posterUrl: movie.posterUrl,
+        backdropUrl: movie.backdropUrl,
+        releaseYear: movie.releaseYear,
+        durationMins: movie.durationMins,
+        rating: movie.rating,
+        qualityBadge: movie.qualityBadge,
+        genres: movie.genres,
+        mirrors: mergedMirrors,
+      });
+    } catch (upgradeError) {
+      console.warn(
+        `[CatalogService] Error en actualización automática de mirrors para "${movie.title}" (${movie.id}); usando enlaces actuales:`,
+        upgradeError
+      );
+      return movie;
+    }
+  }
+
+  /**
+   * Garantiza que la película disponga siempre de al menos un mirror candidato para firmar,
+   * recurriendo en última instancia a espejos marcados `DOWN` o enlaces de contingencia en memoria.
+   */
+  private garantizarCandidatosDeReproduccionParaPelicula(movie: Movie) {
+    const playableMirrors = movie.getPlayableMirrors();
+    if (playableMirrors.length > 0) {
+      return playableMirrors;
+    }
+
+    if (movie.mirrors.length > 0) {
+      return [...movie.mirrors].sort((a, b) => a.priority - b.priority);
+    }
+
+    if (movie.tmdbId) {
+      return this.construirMirrorsDeContingenciaParaPelicula(movie.tmdbId).map(
+        (mirror, index) => ({
+          id: `emergency-${movie.id}-${index + 1}`,
+          serverName: mirror.serverName,
+          language: mirror.language || "Latino",
+          rawUrl: mirror.rawUrl,
+          format: mirror.format,
+          quality: mirror.quality || "1080p",
+          priority: mirror.priority,
+          status: MirrorStatus.ACTIVE,
+        })
+      );
+    }
+
+    return [];
+  }
+
+  /**
    * Obtiene la información completa de reproducción de una película por su UUID o `tmdb-{id}`,
    * auto-importándola desde TMDB si aún no existe en la base de datos y firmando sus streams.
    *
+   * Coordina peticiones concurrentes (*Singleflight*) y degrada con seguridad para evitar HTTP 500.
+   *
    * @param idOrTmdbSlug UUID local, `"tmdb-{id}"` o ID numérico de TMDB.
-   * @returns Objeto `MoviePlaybackDto` con streams firmados o `null` si no existe.
+   * @returns Objeto `MoviePlaybackDto` con streams firmados (o redirección si es Serie) o `null` si no existe.
    */
   public async getMoviePlaybackData(
+    idOrTmdbSlug: string
+  ): Promise<MoviePlaybackDto | null> {
+    const cleanSlug = idOrTmdbSlug.trim();
+    if (!cleanSlug) return null;
+
+    const operationKey = `movie-playback:${cleanSlug.toLowerCase()}`;
+    return this.playbackOperationCoalescer.executeSingleFlight(
+      operationKey,
+      () => this.resolveMoviePlaybackDataSafely(cleanSlug)
+    );
+  }
+
+  /**
+   * Implementación interna protegida para resolver los datos de reproducción de una película.
+   */
+  private async resolveMoviePlaybackDataSafely(
     idOrTmdbSlug: string
   ): Promise<MoviePlaybackDto | null> {
     let movie: Movie | null = null;
@@ -519,75 +856,51 @@ export class CatalogService {
 
       if (isNaN(tmdbId) || tmdbId <= 0) return null;
 
-      movie = await this.movieRepository.findByTmdbId(tmdbId);
+      const existingMedia = await this.movieRepository.findAnyMediaByTmdbId(
+        tmdbId
+      );
+      if (existingMedia && existingMedia.mediaType === "SERIES") {
+        return this.construirDtoDeRedireccionASerie(
+          existingMedia.id,
+          existingMedia.tmdbId,
+          existingMedia.title
+        );
+      }
+
+      movie = existingMedia;
 
       if (!movie || this.needsAutomaticMirrorUpgrade(movie)) {
-        const metadata = await this.tmdbGateway.fetchMovieMetadata(tmdbId);
-        const resolvedRawMirrors =
-          await this.mirrorResolver.resolveDefaultMirrorsForTmdb(
-            tmdbId,
-            metadata.title,
-            metadata.releaseYear,
-            metadata.imdbId
-          );
-        const mergedMirrors = this.mergePreservingDirectMirrors(
-          movie,
-          resolvedRawMirrors
-        );
+        const syncOutcome =
+          await this.sincronizarPeliculaPorTmdbConRespaldoSeguro(tmdbId, movie);
 
-        movie = await this.movieRepository.upsertMovieWithMirrors({
-          tmdbId: metadata.tmdbId,
-          title: metadata.title,
-          originalTitle: metadata.originalTitle,
-          synopsis: metadata.synopsis,
-          posterUrl: metadata.posterUrl,
-          backdropUrl: metadata.backdropUrl,
-          releaseYear: metadata.releaseYear,
-          durationMins: metadata.durationMins,
-          rating: metadata.rating,
-          qualityBadge: "HD",
-          genres: metadata.genres,
-          mirrors: mergedMirrors,
-        });
+        if (syncOutcome.redirectDto) {
+          return syncOutcome.redirectDto;
+        }
+        movie = syncOutcome.movie;
       }
     } else {
       movie = await this.movieRepository.findByIdWithMirrors(idOrTmdbSlug);
 
-      if (movie && movie.tmdbId && this.needsAutomaticMirrorUpgrade(movie)) {
-        const imdbId = await this.tmdbGateway.fetchMovieImdbId(movie.tmdbId);
-        const resolvedRawMirrors =
-          await this.mirrorResolver.resolveDefaultMirrorsForTmdb(
-            movie.tmdbId,
-            movie.title,
-            movie.releaseYear,
-            imdbId
-          );
-        const mergedMirrors = this.mergePreservingDirectMirrors(
-          movie,
-          resolvedRawMirrors
+      if (movie && movie.mediaType === "SERIES") {
+        return this.construirDtoDeRedireccionASerie(
+          movie.id,
+          movie.tmdbId,
+          movie.title
         );
+      }
 
-        movie = await this.movieRepository.upsertMovieWithMirrors({
-          tmdbId: movie.tmdbId,
-          title: movie.title,
-          originalTitle: movie.originalTitle,
-          synopsis: movie.synopsis,
-          posterUrl: movie.posterUrl,
-          backdropUrl: movie.backdropUrl,
-          releaseYear: movie.releaseYear,
-          durationMins: movie.durationMins,
-          rating: movie.rating,
-          qualityBadge: movie.qualityBadge,
-          genres: movie.genres,
-          mirrors: mergedMirrors,
-        });
+      if (movie && movie.tmdbId && this.needsAutomaticMirrorUpgrade(movie)) {
+        movie = await this.actualizarMirrorsDePeliculaLocalConRespaldoSeguro(
+          movie
+        );
       }
     }
 
     if (!movie) return null;
 
-    const playableMirrors = movie.getPlayableMirrors();
-    const prioritizedMirrors = filterAndPrioritizeMirrors(playableMirrors, {
+    const candidateMirrors =
+      this.garantizarCandidatosDeReproduccionParaPelicula(movie);
+    const prioritizedMirrors = filterAndPrioritizeMirrors(candidateMirrors, {
       strictOnly: STRICT_STREAMWISH_ONLY,
       fallbackIfEmpty: FALLBACK_IF_EMPTY,
     });
@@ -638,7 +951,7 @@ export class CatalogService {
       rating: movie.rating,
       qualityBadge: movie.qualityBadge,
       genres: movie.genres,
-      isAvailable: movie.isAvailable && signedStreams.length > 0,
+      isAvailable: signedStreams.length > 0,
       streams: signedStreams,
     };
   }

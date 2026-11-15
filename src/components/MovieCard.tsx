@@ -67,18 +67,23 @@ export default function MovieCard({
 
         <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent opacity-80 group-hover:opacity-100 transition-opacity" />
 
-        {isSeries && (
-          <div className="absolute top-2 left-2 z-10">
-            <span className="px-1.5 sm:px-2 py-0.5 rounded text-[10px] font-extrabold uppercase tracking-wider bg-black/80 text-amber-400 border border-amber-400/30 shadow-md backdrop-blur-md">
-              {seasonNumber && episodeNumber
-                ? `SERIE • T${seasonNumber}:E${episodeNumber}`
-                : "SERIE"}
+        <div className="absolute top-2 inset-x-2 z-10 flex items-start justify-between gap-1 pointer-events-none">
+          {isSeries ? (
+            <span className="px-1.5 sm:px-2 py-0.5 rounded text-[10px] font-extrabold uppercase tracking-wider bg-black/80 text-amber-400 border border-amber-400/30 shadow-md backdrop-blur-md truncate max-w-[72%]">
+              {seasonNumber && episodeNumber ? (
+                <>
+                  <span className="hidden sm:inline">SERIE • </span>
+                  T{seasonNumber}:E{episodeNumber}
+                </>
+              ) : (
+                "SERIE"
+              )}
             </span>
-          </div>
-        )}
+          ) : (
+            <span />
+          )}
 
-        <div className="absolute top-2 right-2">
-          <span className="px-1.5 sm:px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-netflix-red text-white shadow">
+          <span className="px-1.5 sm:px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-netflix-red text-white shadow flex-shrink-0 ml-auto">
             {qualityBadge}
           </span>
         </div>

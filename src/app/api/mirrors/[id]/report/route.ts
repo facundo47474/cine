@@ -13,7 +13,7 @@ export async function POST(
 ) {
   try {
     const mirrorId = params.id;
-    if (mirrorId.startsWith("ep-")) {
+    if (mirrorId.startsWith("ep-") || mirrorId.startsWith("emergency-")) {
       return NextResponse.json({
         ok: true,
         skipped: true,
@@ -23,10 +23,10 @@ export async function POST(
     const auditResult = await healthCheckerService.auditSingleMirror(mirrorId);
 
     if (!auditResult) {
-      return NextResponse.json(
-        { ok: false, error: "Mirror no encontrado." },
-        { status: 404 }
-      );
+      return NextResponse.json({
+        ok: true,
+        ignored: true,
+      });
     }
 
     return NextResponse.json({

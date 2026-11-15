@@ -3,13 +3,69 @@
 import React, { useState } from "react";
 import Link from "next/link";
 import { useSession, signOut } from "next-auth/react";
-import { Film, Search, X, LogOut, User as UserIcon } from "lucide-react";
+import {
+  Film,
+  Search,
+  X,
+  LogOut,
+  User as UserIcon,
+  Rocket,
+} from "lucide-react";
+import { useMembership } from "@/components/MembershipProvider";
 
 interface NavbarProps {
   searchQuery?: string;
   onSearchChange?: (q: string) => void;
   selectedMediaType?: "movie" | "tv";
   onSelectMediaType?: (type: "movie" | "tv" | undefined) => void;
+}
+
+interface NavItemConfig {
+  id: string;
+  label: string;
+  href: string;
+  mediaFilter?: "movie" | "tv";
+  isAnchor?: boolean;
+  isActive: boolean;
+}
+
+/**
+ * Construye la lista declarativa de secciones de navegación evitando duplicar enlaces entre móvil y escritorio.
+ */
+function obtenerOpcionesDeNavegacion(
+  hasInteractiveFilter: boolean,
+  selectedMediaType?: "movie" | "tv"
+): NavItemConfig[] {
+  return [
+    {
+      id: "home",
+      label: "Inicio",
+      href: "/",
+      mediaFilter: undefined,
+      isActive: hasInteractiveFilter && selectedMediaType === undefined,
+    },
+    {
+      id: "movies",
+      label: "Películas",
+      href: "/?type=movie#explorar",
+      mediaFilter: "movie",
+      isActive: hasInteractiveFilter && selectedMediaType === "movie",
+    },
+    {
+      id: "series",
+      label: "Series",
+      href: "/?type=tv#explorar",
+      mediaFilter: "tv",
+      isActive: hasInteractiveFilter && selectedMediaType === "tv",
+    },
+    {
+      id: "platforms",
+      label: "Plataformas",
+      href: hasInteractiveFilter ? "#explorar" : "/#explorar",
+      isAnchor: true,
+      isActive: false,
+    },
+  ];
 }
 
 export default function Navbar({
@@ -20,7 +76,12 @@ export default function Navbar({
 }: NavbarProps) {
   const [showSearch, setShowSearch] = useState(false);
   const { data: session } = useSession();
+  const { isPro, openUpgradeModal } = useMembership();
   const isSearchExpanded = Boolean(onSearchChange && (showSearch || searchQuery));
+  const navItems = obtenerOpcionesDeNavegacion(
+    Boolean(onSelectMediaType),
+    selectedMediaType
+  );
 
   const handleNavFilter = (type: "movie" | "tv" | undefined) => {
     if (onSelectMediaType) {
@@ -34,8 +95,64 @@ export default function Navbar({
     }
   };
 
+  /**
+   * Renderiza cada opción de navegación adaptada al formato horizontal de escritorio o píldoras táctiles móviles.
+   */
+  const renderNavItem = (
+    item: NavItemConfig,
+    variant: "desktop" | "mobile"
+  ) => {
+    const baseStyle =
+      variant === "mobile"
+        ? `px-3.5 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition flex-shrink-0 inline-flex items-center ${
+            item.isActive
+              ? item.mediaFilter
+                ? "bg-netflix-red text-white shadow"
+                : "bg-white/15 text-white border border-white/25"
+              : "bg-zinc-900/90 text-zinc-300 border border-white/10 hover:text-white"
+          }`
+        : `transition whitespace-nowrap ${
+            item.isActive
+              ? item.mediaFilter
+                ? "text-netflix-red font-bold"
+                : "text-white font-bold"
+              : "text-zinc-300 hover:text-white"
+          }`;
+
+    if (item.isAnchor) {
+      return onSelectMediaType ? (
+        <a key={item.id} href={item.href} className={baseStyle}>
+          {item.label}
+        </a>
+      ) : (
+        <Link key={item.id} href={item.href} className={baseStyle}>
+          {item.label}
+        </Link>
+      );
+    }
+
+    if (onSelectMediaType) {
+      return (
+        <button
+          key={item.id}
+          type="button"
+          onClick={() => handleNavFilter(item.mediaFilter)}
+          className={baseStyle}
+        >
+          {item.label}
+        </button>
+      );
+    }
+
+    return (
+      <Link key={item.id} href={item.href} className={baseStyle}>
+        {item.label}
+      </Link>
+    );
+  };
+
   return (
-    <header className="fixed top-0 left-0 right-0 z-50 bg-gradient-to-b from-black/95 via-black/80 to-transparent backdrop-blur-md">
+    <header className="fixed top-0 left-0 right-0 z-50 bg-gradient-to-b from-black/95 via-black/85 to-black/70 sm:to-transparent backdrop-blur-md border-b border-white/5 sm:border-b-0">
       <div className="max-w-7xl mx-auto px-3 sm:px-8 h-14 sm:h-16 flex items-center justify-between gap-2 sm:gap-4">
         <div
           className={`${
@@ -57,77 +174,11 @@ export default function Navbar({
             </span>
           </Link>
 
-          <nav className="flex items-center gap-3 sm:gap-6 text-xs sm:text-sm font-medium text-zinc-300">
-            {onSelectMediaType ? (
-              <>
-                <button
-                  type="button"
-                  onClick={() => handleNavFilter(undefined)}
-                  className={`transition ${
-                    selectedMediaType === undefined
-                      ? "text-white font-bold"
-                      : "text-zinc-300 hover:text-white"
-                  }`}
-                >
-                  Inicio
-                </button>
-                <a
-                  href="#explorar"
-                  className="hidden sm:inline text-zinc-300 hover:text-white transition"
-                >
-                  Plataformas
-                </a>
-                <button
-                  type="button"
-                  onClick={() => handleNavFilter("movie")}
-                  className={`transition ${
-                    selectedMediaType === "movie"
-                      ? "text-netflix-red font-bold"
-                      : "text-zinc-300 hover:text-white"
-                  }`}
-                >
-                  Películas
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleNavFilter("tv")}
-                  className={`transition ${
-                    selectedMediaType === "tv"
-                      ? "text-netflix-red font-bold"
-                      : "text-zinc-300 hover:text-white"
-                  }`}
-                >
-                  Series
-                </button>
-              </>
-            ) : (
-              <>
-                <Link
-                  className="text-white hover:text-zinc-300 transition"
-                  href="/"
-                >
-                  Inicio
-                </Link>
-                <Link
-                  href="/#explorar"
-                  className="hidden sm:inline hover:text-white transition"
-                >
-                  Plataformas
-                </Link>
-                <Link
-                  href="/?type=movie#explorar"
-                  className="hover:text-white transition"
-                >
-                  Películas
-                </Link>
-                <Link
-                  href="/?type=tv#explorar"
-                  className="hover:text-white transition"
-                >
-                  Series
-                </Link>
-              </>
-            )}
+          <nav
+            aria-label="Navegación principal"
+            className="hidden sm:flex items-center gap-5 lg:gap-6 text-sm font-medium text-zinc-300"
+          >
+            {navItems.map((item) => renderNavItem(item, "desktop"))}
           </nav>
         </div>
 
@@ -156,7 +207,7 @@ export default function Navbar({
                 }}
                 aria-label="Cerrar búsqueda"
                 title="Cerrar búsqueda"
-                className="absolute right-2.5 text-zinc-400 hover:text-white p-1 rounded-full hover:bg-white/10 transition"
+                className="absolute right-2 text-zinc-400 hover:text-white p-1.5 rounded-full hover:bg-white/10 transition"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -166,13 +217,39 @@ export default function Navbar({
               <button
                 type="button"
                 onClick={() => setShowSearch(true)}
-                className="p-2 rounded-full text-zinc-300 hover:text-white hover:bg-white/10 transition"
+                className="p-2 min-w-[36px] min-h-[36px] flex items-center justify-center rounded-full text-zinc-300 hover:text-white hover:bg-white/10 transition"
                 title="Buscar"
                 aria-label="Buscar"
               >
                 <Search className="w-4 h-4 sm:w-5 sm:h-5" />
               </button>
             )
+          )}
+
+          {!isSearchExpanded && (
+            <button
+              type="button"
+              onClick={() => openUpgradeModal("modo_escudo")}
+              title={
+                isPro
+                  ? "Gestionar tu suscripción Piloto"
+                  : "Activar Piloto Plus"
+              }
+              className={`inline-flex items-center gap-1.5 px-2.5 sm:px-3.5 py-1.5 min-h-[34px] rounded-lg text-[11px] sm:text-xs font-bold whitespace-nowrap transition flex-shrink-0 border ${
+                isPro
+                  ? "bg-purple-600 hover:bg-purple-700 border-purple-400 text-white shadow-sm shadow-purple-900/30"
+                  : "bg-[#E50914] hover:bg-red-700 border-red-500 text-white shadow-sm shadow-red-900/30"
+              }`}
+            >
+              {isPro ? (
+                <>
+                  <Rocket className="w-3.5 h-3.5 flex-shrink-0" />
+                  <span>Piloto</span>
+                </>
+              ) : (
+                <span>Activar Piloto Plus</span>
+              )}
+            </button>
           )}
 
           {session ? (
@@ -201,15 +278,11 @@ export default function Navbar({
               <button
                 type="button"
                 onClick={() => {
-                  try {
-                    sessionStorage.removeItem("piloto_welcome_dismissed");
-                  } catch {
-                    // Silencioso
-                  }
                   void signOut({ callbackUrl: "/" });
                 }}
-                className="p-1.5 sm:p-2 rounded-full text-zinc-400 hover:text-white hover:bg-white/10 transition"
+                className="p-2 min-w-[36px] min-h-[36px] flex items-center justify-center rounded-full text-zinc-400 hover:text-white hover:bg-white/10 transition"
                 title="Cerrar sesión"
+                aria-label="Cerrar sesión"
               >
                 <LogOut className="w-4 h-4" />
               </button>
@@ -219,7 +292,7 @@ export default function Navbar({
               href="/login"
               className={`${
                 isSearchExpanded ? "hidden sm:inline-flex" : "inline-flex"
-              } items-center gap-1.5 px-3 sm:px-4 py-1.5 rounded-md bg-netflix-red text-white text-xs sm:text-sm font-bold hover:bg-red-700 transition shadow flex-shrink-0`}
+              } items-center gap-1.5 px-3 sm:px-4 py-1.5 min-h-[36px] rounded-md bg-netflix-red text-white text-xs sm:text-sm font-bold hover:bg-red-700 transition shadow flex-shrink-0`}
             >
               <UserIcon className="w-3.5 h-3.5" />
               <span>Ingresar</span>
@@ -227,6 +300,15 @@ export default function Navbar({
           )}
         </div>
       </div>
+
+      {!isSearchExpanded && (
+        <nav
+          aria-label="Navegación móvil"
+          className="sm:hidden flex items-center gap-2 px-3 pb-2.5 pt-1 overflow-x-auto no-scrollbar border-t border-white/5"
+        >
+          {navItems.map((item) => renderNavItem(item, "mobile"))}
+        </nav>
+      )}
     </header>
   );
 }

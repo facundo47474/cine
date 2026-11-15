@@ -1,8 +1,7 @@
 "use client";
 
 import React, { useEffect, useState, useCallback } from "react";
-import { useSession } from "next-auth/react";
-import { Sparkles, Loader2, X, Mail } from "lucide-react";
+import { Sparkles, Loader2, Cloud, BookmarkCheck } from "lucide-react";
 import Navbar from "@/components/Navbar";
 import HeroBanner from "@/components/HeroBanner";
 import MovieRow from "@/components/MovieRow";
@@ -12,6 +11,8 @@ import ProviderFilterBar, {
   STREAMING_PROVIDERS,
   GENRE_PILLS,
 } from "@/components/ProviderFilterBar";
+import { useMembership } from "@/components/MembershipProvider";
+import { FREE_MY_LIST_LIMIT } from "@/domain/services/MembershipPolicy";
 import {
   CatalogCardDto,
   HomeFeedDto,
@@ -19,12 +20,13 @@ import {
 import { ContinueWatchingItemDto } from "@/application/services/WatchHistoryService";
 
 export default function HomePage() {
-  const { data: session, status: sessionStatus } = useSession();
-  const [showWelcomeBanner, setShowWelcomeBanner] = useState<boolean>(false);
+  const { isPro, myList, openUpgradeModal } = useMembership();
   const [homeFeed, setHomeFeed] = useState<HomeFeedDto | null>(null);
   const [continueWatching, setContinueWatching] = useState<
     ContinueWatchingItemDto[]
   >([]);
+  const [historyLimitedByPlan, setHistoryLimitedByPlan] =
+    useState<boolean>(false);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedProviderId, setSelectedProviderId] = useState<
@@ -54,6 +56,7 @@ export default function HomePage() {
       const historyData = await historyRes.json();
       if (historyData.ok) {
         setContinueWatching(historyData.items);
+        setHistoryLimitedByPlan(Boolean(historyData.isLimitedByFreePlan));
       }
     } catch {
       // Silencioso
@@ -76,6 +79,7 @@ export default function HomePage() {
       }
       if (historyData.ok) {
         setContinueWatching(historyData.items);
+        setHistoryLimitedByPlan(Boolean(historyData.isLimitedByFreePlan));
       }
     } catch (error) {
       console.error("Error cargando catálogo:", error);
@@ -130,47 +134,9 @@ export default function HomePage() {
       if (t === "movie" || t === "tv") {
         setSelectedMediaType(t);
       }
-      if (sp.get("welcome") === "1") {
-        try {
-          sessionStorage.removeItem("piloto_welcome_dismissed");
-        } catch {
-          // Silencioso
-        }
-        sp.delete("welcome");
-        const cleanSearch = sp.toString();
-        const nextUrl = `${window.location.pathname}${
-          cleanSearch ? `?${cleanSearch}` : ""
-        }${window.location.hash}`;
-        window.history.replaceState({}, "", nextUrl);
-      }
     }
     fetchHomeAndHistory();
   }, [fetchHomeAndHistory]);
-
-  useEffect(() => {
-    if (sessionStatus !== "authenticated" || !session?.user) {
-      setShowWelcomeBanner(false);
-      return;
-    }
-
-    try {
-      const dismissed = sessionStorage.getItem("piloto_welcome_dismissed");
-      if (dismissed !== "true") {
-        setShowWelcomeBanner(true);
-      }
-    } catch {
-      setShowWelcomeBanner(true);
-    }
-  }, [sessionStatus, session]);
-
-  const handleDismissWelcomeBanner = useCallback(() => {
-    setShowWelcomeBanner(false);
-    try {
-      sessionStorage.setItem("piloto_welcome_dismissed", "true");
-    } catch {
-      // Silencioso
-    }
-  }, []);
 
   useEffect(() => {
     const handleVisibilityOrFocus = () => {
@@ -187,6 +153,11 @@ export default function HomePage() {
       document.removeEventListener("visibilitychange", handleVisibilityOrFocus);
     };
   }, [refreshContinueWatching]);
+
+  // Refresca el historial al instante cuando cambia la membresía (Gratis <-> Piloto Pro)
+  useEffect(() => {
+    void refreshContinueWatching();
+  }, [isPro, refreshContinueWatching]);
 
   useEffect(() => {
     if (!isExploring) return;
@@ -242,57 +213,6 @@ export default function HomePage() {
           }}
         />
 
-        {showWelcomeBanner && session?.user && (
-          <div
-            role="status"
-            aria-live="polite"
-            className="fixed top-16 sm:top-20 right-3 sm:right-8 z-50 w-[calc(100vw-1.5rem)] max-w-md rounded-2xl bg-zinc-950/95 border border-netflix-red/40 p-4 sm:p-5 shadow-2xl shadow-black/80 backdrop-blur-xl animate-fade-in"
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex items-center gap-2.5 min-w-0">
-                <div className="w-8 h-8 rounded-xl bg-netflix-red/20 border border-netflix-red/40 flex items-center justify-center flex-shrink-0">
-                  <Sparkles className="w-4 h-4 text-netflix-red" />
-                </div>
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-netflix-red text-white">
-                      Users Priority • Beta
-                    </span>
-                  </div>
-                  <p className="text-xs font-bold text-zinc-200 truncate mt-1 flex items-center gap-1.5">
-                    <Mail className="w-3.5 h-3.5 text-netflix-red flex-shrink-0" />
-                    <span className="truncate">
-                      {session.user.email || session.user.name}
-                    </span>
-                  </p>
-                </div>
-              </div>
-
-              <button
-                type="button"
-                onClick={handleDismissWelcomeBanner}
-                title="Cerrar mensaje de bienvenida"
-                aria-label="Cerrar mensaje de bienvenida"
-                className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-white/10 transition flex-shrink-0"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <p className="mt-3 text-xs sm:text-sm text-zinc-300 leading-relaxed">
-              Bienvenido{" "}
-              <span className="font-bold text-white">
-                {session.user.email || session.user.name || "usuario"}
-              </span>
-              , gracias por usar nuestra plataforma. Esta es una versión beta
-              lanzada para <span className="font-semibold text-white">users priority</span>;
-              se está trabajando en mejoras que podrán disfrutarlas a corto
-              plazo como la eliminación total de anuncios, el cual ya es mínimo.
-              ¡Gracias!
-            </p>
-          </div>
-        )}
-
         {!isExploring && homeFeed?.featured && (
           <HeroBanner movie={homeFeed.featured} />
         )}
@@ -301,8 +221,8 @@ export default function HomePage() {
           id="explorar"
           className={`space-y-8 ${
             isExploring || !homeFeed?.featured
-              ? "pt-24"
-              : "-mt-10 relative z-20"
+              ? "pt-28 sm:pt-24"
+              : "-mt-6 sm:-mt-10 relative z-20"
           }`}
         >
           <ProviderFilterBar
@@ -325,13 +245,15 @@ export default function HomePage() {
               className="max-w-7xl mx-auto px-4 sm:px-8 space-y-6"
             >
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3">
-                <h2 className="text-xl sm:text-2xl font-black text-white flex items-center gap-2">
-                  <Sparkles className="w-5 h-5 text-netflix-red" />
-                  {searchQuery
-                    ? `Resultados en ${activeTypeLabel} para "${searchQuery}"`
-                    : `${activeTypeLabel} • ${activeProviderName || "Todo el Catálogo"} • ${
-                        activeGenreName || "Todos los géneros"
-                      }`}
+                <h2 className="text-base sm:text-2xl font-black text-white flex items-start sm:items-center gap-2 leading-snug break-words">
+                  <Sparkles className="w-5 h-5 text-netflix-red flex-shrink-0 mt-0.5 sm:mt-0" />
+                  <span>
+                    {searchQuery
+                      ? `Resultados en ${activeTypeLabel} para "${searchQuery}"`
+                      : `${activeTypeLabel} • ${activeProviderName || "Todo el Catálogo"} • ${
+                          activeGenreName || "Todos los géneros"
+                        }`}
+                  </span>
                 </h2>
               </div>
 
@@ -399,10 +321,23 @@ export default function HomePage() {
             <div id="catalogo" className="space-y-4">
               {continueWatching.length > 0 && (
                 <section className="space-y-3 py-2">
-                  <div className="px-4 sm:px-8 max-w-7xl mx-auto">
+                  <div className="px-4 sm:px-8 max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
                     <h2 className="text-lg sm:text-xl font-bold text-white">
                       Continuar viendo
                     </h2>
+                    {(!isPro || historyLimitedByPlan) && (
+                      <button
+                        type="button"
+                        onClick={() => openUpgradeModal("cloud_sync")}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-900 hover:bg-zinc-800 border border-white/15 text-[11px] font-semibold text-zinc-300 hover:text-white transition"
+                      >
+                        <Cloud className="w-3.5 h-3.5 text-netflix-red flex-shrink-0" />
+                        <span>Sincronización Cloud</span>
+                        <span className="px-1.5 py-0.5 rounded bg-netflix-red text-white text-[9px] font-black uppercase">
+                          PRO
+                        </span>
+                      </button>
+                    )}
                   </div>
                   <div className="px-4 sm:px-8 max-w-7xl mx-auto">
                     <div className="flex items-stretch gap-4 overflow-x-auto no-scrollbar pb-3 pt-1">
@@ -420,6 +355,52 @@ export default function HomePage() {
                           seasonNumber={item.seasonNumber}
                           episodeNumber={item.episodeNumber}
                           episodeTitle={item.episodeTitle}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              {myList.length > 0 && (
+                <section className="space-y-3 py-2">
+                  <div className="px-4 sm:px-8 max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <BookmarkCheck className="w-5 h-5 text-netflix-red flex-shrink-0" />
+                      <h2 className="text-lg sm:text-xl font-bold text-white">
+                        Mi Lista
+                      </h2>
+                      <span className="text-xs text-zinc-400 font-medium">
+                        {isPro
+                          ? `(${myList.length} guardados • Ilimitado)`
+                          : `(${myList.length}/${FREE_MY_LIST_LIMIT} en Plan Gratis)`}
+                      </span>
+                    </div>
+                    {!isPro && (
+                      <button
+                        type="button"
+                        onClick={() => openUpgradeModal("mi_lista")}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-900 hover:bg-zinc-800 border border-white/15 text-[11px] font-semibold text-zinc-300 hover:text-white transition"
+                      >
+                        <span>Espacio Ilimitado</span>
+                        <span className="px-1.5 py-0.5 rounded bg-netflix-red text-white text-[9px] font-black uppercase">
+                          PRO
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                  <div className="px-4 sm:px-8 max-w-7xl mx-auto">
+                    <div className="flex items-stretch gap-4 overflow-x-auto no-scrollbar pb-3 pt-1">
+                      {myList.map((movie) => (
+                        <MovieCard
+                          id={movie.id}
+                          key={`mylist-${movie.id}`}
+                          posterUrl={movie.posterUrl}
+                          qualityBadge={movie.qualityBadge}
+                          rating={movie.rating}
+                          releaseYear={movie.releaseYear}
+                          title={movie.title}
+                          mediaType={movie.mediaType}
                         />
                       ))}
                     </div>

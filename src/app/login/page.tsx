@@ -35,18 +35,13 @@ function LoginCard() {
 
   const handleGoogleAuth = async () => {
     setLoading(true);
-    try {
-      sessionStorage.removeItem("piloto_welcome_dismissed");
-    } catch {
-      // Silencioso
-    }
-    await signIn("google", { callbackUrl: "/?welcome=1" });
+    await signIn("google", { callbackUrl: "/" });
   };
 
   const isRegister = mode === "register";
 
   return (
-    <div className="relative z-10 w-full max-w-[390px] bg-black/75 backdrop-blur-sm rounded-lg p-8 sm:p-10 shadow-2xl shadow-black/60 space-y-6">
+    <div className="relative z-10 w-full max-w-[390px] bg-black/75 backdrop-blur-sm rounded-lg p-6 sm:p-10 shadow-2xl shadow-black/60 space-y-6">
       <div className="space-y-1.5">
         <h1 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">
           {isRegister ? "Crear cuenta" : "Iniciar sesión"}
