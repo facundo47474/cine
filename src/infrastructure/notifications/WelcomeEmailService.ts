@@ -165,6 +165,7 @@ export class WelcomeEmailService {
     amountPaidLabel: string;
     billingCycleLabel: string;
     activatedAtLabel: string;
+    renewalDateLabel: string;
     appUrl: string;
   }): string {
     const safeName = this.escapeHtml(params.displayName);
@@ -172,6 +173,7 @@ export class WelcomeEmailService {
     const safeAmount = this.escapeHtml(params.amountPaidLabel);
     const safeCycle = this.escapeHtml(params.billingCycleLabel);
     const safeDate = this.escapeHtml(params.activatedAtLabel);
+    const safeRenewalDate = this.escapeHtml(params.renewalDateLabel);
     const safeAppUrl = this.escapeHtml(params.appUrl);
 
     return `<!DOCTYPE html>
@@ -242,6 +244,14 @@ export class WelcomeEmailService {
                   </td>
                   <td align="right" style="padding:8px 0;font-size:13px;font-weight:600;color:#0f172a;border-bottom:1px solid #e2e8f0;">
                     ${safeDate}
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:8px 0;font-size:13px;color:#475569;border-bottom:1px solid #e2e8f0;">
+                    Vencimiento / Próxima renovación (30 días)
+                  </td>
+                  <td align="right" style="padding:8px 0;font-size:13px;font-weight:700;color:#059669;border-bottom:1px solid #e2e8f0;">
+                    ${safeRenewalDate}
                   </td>
                 </tr>
                 <tr>
@@ -686,6 +696,10 @@ export class WelcomeEmailService {
     const displayName = userName?.trim() || "Cinéfilo";
     const appUrl = DEFAULT_APP_URL;
     const activatedAtLabel = this.formatActivationDate(activatedAt);
+    const renewalDate = new Date(
+      activatedAt.getTime() + 30 * 24 * 60 * 60 * 1000
+    );
+    const renewalDateLabel = this.formatActivationDate(renewalDate);
 
     const text = [
       `¡Muchas gracias por suscribirte a Piloto Plus, ${displayName}!`,
@@ -695,6 +709,7 @@ export class WelcomeEmailService {
       `- Monto abonado: ${amountPaidLabel} / mes`,
       "- Estado de membresía: Activo",
       `- Fecha de activación: ${activatedAtLabel}`,
+      `- Vencimiento / Próxima renovación (30 días): ${renewalDateLabel}`,
       `- Cuenta asociada: ${toEmail}`,
       "",
       "FUNCIONES DESBLOQUEADAS:",
@@ -716,6 +731,7 @@ export class WelcomeEmailService {
         amountPaidLabel,
         billingCycleLabel,
         activatedAtLabel,
+        renewalDateLabel,
         appUrl,
       }),
       text,

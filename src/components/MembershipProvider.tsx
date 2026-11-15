@@ -58,6 +58,7 @@ export function MembershipProvider({
 }) {
   const { data: session, status: sessionStatus } = useSession();
   const userId = (session?.user as { id?: string } | undefined)?.id;
+  const sessionEmail = session?.user?.email?.trim().toLowerCase() || null;
   const isAuthenticated = sessionStatus === "authenticated" && Boolean(session?.user);
 
   const [membership, setMembership] = useState<UserMembershipStatusDto>(
@@ -103,8 +104,15 @@ export function MembershipProvider({
 
   useEffect(() => {
     if (sessionStatus === "loading") return;
+    if (sessionStatus === "unauthenticated") {
+      setMembership(DEFAULT_FREE_MEMBERSHIP);
+      setResolvedUserEmail(null);
+      setShowPaymentThankYou(false);
+      setLoadingMembership(false);
+      return;
+    }
     void refreshMembership();
-  }, [sessionStatus, userId, refreshMembership]);
+  }, [sessionStatus, userId, sessionEmail, refreshMembership]);
 
   // Procesa el retorno desde MercadoPago Checkout Pro (?mp_status=approved|pending|failure)
   useEffect(() => {

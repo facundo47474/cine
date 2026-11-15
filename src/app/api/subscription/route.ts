@@ -68,10 +68,33 @@ export async function GET() {
       );
     }
 
-    const membership = await prismaMembershipRepository.getMembershipByUserId(
+    let membership = await prismaMembershipRepository.getMembershipByUserId(
       auth.userId,
       auth.email
     );
+
+    if (!membership.isPro && mercadoPagoService.isConfigured()) {
+      try {
+        const reconciled =
+          await mercadoPagoService.reconcileRecentApprovedPaymentForUser(
+            auth.userId,
+            auth.email
+          );
+        if (reconciled.ok && reconciled.membership) {
+          membership = reconciled.membership;
+        } else if (reconciled.ok) {
+          membership = await prismaMembershipRepository.getMembershipByUserId(
+            auth.userId,
+            auth.email
+          );
+        }
+      } catch (reconcileError) {
+        console.warn(
+          "[GET /api/subscription] Error conciliando pagos en MercadoPago:",
+          reconcileError
+        );
+      }
+    }
 
     return NextResponse.json(
       {
@@ -197,7 +220,10 @@ export async function POST(request: NextRequest) {
 
     if (body.action === "DOWNGRADE_FREE") {
       const membership =
-        await prismaMembershipRepository.downgradeToFreeMembership(auth.userId);
+        await prismaMembershipRepository.downgradeToFreeMembership(
+          auth.userId,
+          auth.email
+        );
       return NextResponse.json({ ok: true, membership });
     }
 

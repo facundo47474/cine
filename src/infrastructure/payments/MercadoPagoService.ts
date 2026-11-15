@@ -1,7 +1,10 @@
 import { prisma } from "@/infrastructure/database/prismaClient";
 import { prismaMembershipRepository } from "@/infrastructure/repositories/PrismaMembershipRepository";
 import { welcomeEmailService } from "@/infrastructure/notifications/WelcomeEmailService";
-import { UserMembershipStatusDto } from "@/domain/services/MembershipPolicy";
+import {
+  MONTHLY_SUBSCRIPTION_DURATION_MS,
+  UserMembershipStatusDto,
+} from "@/domain/services/MembershipPolicy";
 import {
   signExternalReference,
   verifyExternalReference,
@@ -32,9 +35,12 @@ export interface MercadoPagoPaymentInfo {
   id: number | string;
   status: string;
   status_detail?: string;
+  description?: string | null;
   external_reference?: string | null;
   transaction_amount?: number;
   currency_id?: string;
+  date_approved?: string | null;
+  date_created?: string | null;
   payer?: {
     email?: string | null;
   } | null;
@@ -50,12 +56,58 @@ export interface ProcessMercadoPagoPaymentResult {
   error?: string;
 }
 
+interface ParsedExternalRefData {
+  userId: string;
+  userEmail?: string;
+  userName?: string | null;
+  billingCycle?: string;
+}
+
+function parseTrustedPaymentExternalReference(
+  rawRef: string | null | undefined
+): ParsedExternalRefData | null {
+  const verified = verifyExternalReference(rawRef);
+  if (verified.valid && verified.userId) {
+    return {
+      userId: verified.userId,
+      userEmail: verified.userEmail,
+      userName: verified.userName,
+      billingCycle: verified.billingCycle,
+    };
+  }
+
+  if (!rawRef || typeof rawRef !== "string") {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(rawRef.trim()) as Partial<ParsedExternalRefData>;
+    if (parsed && typeof parsed.userId === "string" && parsed.userId.trim()) {
+      return {
+        userId: parsed.userId.trim(),
+        userEmail:
+          typeof parsed.userEmail === "string" ? parsed.userEmail : undefined,
+        userName: parsed.userName ?? null,
+        billingCycle:
+          typeof parsed.billingCycle === "string"
+            ? parsed.billingCycle
+            : "MONTHLY",
+      };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
 class MercadoPagoService {
   private readonly processedPaymentIds = new Set<string>();
   private readonly inFlightPayments = new Map<
     string,
     Promise<ProcessMercadoPagoPaymentResult>
   >();
+  private readonly lastReconcileAttemptByUser = new Map<string, number>();
 
   private getAccessToken(): string {
     return process.env.MERCADOPAGO_ACCESS_TOKEN?.trim() || "";
@@ -286,18 +338,29 @@ class MercadoPagoService {
       };
     }
 
-    const ref = verifyExternalReference(payment.external_reference);
-    if (!ref.valid || !ref.userId) {
+    const ref = parseTrustedPaymentExternalReference(payment.external_reference);
+    if (!ref || !ref.userId) {
       return {
         ok: false,
         status: "invalid_reference",
-        error: "La referencia del pago no superó la verificación de integridad.",
+        error: "El pago aprobado no contiene referencia válida de usuario.",
       };
     }
 
-    const dbUser = await prisma.user.findUnique({
+    let dbUser = await prisma.user.findUnique({
       where: { id: ref.userId },
     });
+
+    if (!dbUser && ref.userEmail) {
+      dbUser = await prisma.user.findFirst({
+        where: {
+          email: {
+            equals: ref.userEmail,
+            mode: "insensitive",
+          },
+        },
+      });
+    }
 
     if (!dbUser) {
       return {
@@ -307,9 +370,42 @@ class MercadoPagoService {
       };
     }
 
+    const rawApprovedDate = payment.date_approved
+      ? new Date(payment.date_approved)
+      : null;
+    const activatedAt =
+      rawApprovedDate && !Number.isNaN(rawApprovedDate.getTime())
+        ? rawApprovedDate
+        : new Date();
+
+    const existingMembership =
+      await prismaMembershipRepository.getMembershipByUserId(
+        dbUser.id,
+        dbUser.email
+      );
+    if (
+      existingMembership.isPro &&
+      existingMembership.activatedAt &&
+      Math.abs(
+        new Date(existingMembership.activatedAt).getTime() -
+          activatedAt.getTime()
+      ) < 5000
+    ) {
+      this.processedPaymentIds.add(paymentId);
+      return {
+        ok: true,
+        status: "approved",
+        alreadyProcessed: true,
+        userId: dbUser.id,
+        membership: existingMembership,
+      };
+    }
+
     const membership = await prismaMembershipRepository.activateProMembership(
       dbUser.id,
-      "MONTHLY"
+      "MONTHLY",
+      activatedAt,
+      dbUser.email || ref.userEmail
     );
 
     this.processedPaymentIds.add(paymentId);
@@ -327,7 +423,7 @@ class MercadoPagoService {
             userName: targetName,
             amountPaidLabel: "$ 2.500 ARS",
             billingCycleLabel: "Mensual",
-            activatedAt: new Date(),
+            activatedAt,
           });
         emailSent = emailResult.sent;
       } catch (emailError) {
@@ -344,6 +440,213 @@ class MercadoPagoService {
       userId: dbUser.id,
       membership,
       emailSent,
+    };
+  }
+
+  /**
+   * Consulta una orden comercial (`merchant_order_id`) de MercadoPago y activa el pago aprobado asociado.
+   */
+  public async processMerchantOrder(
+    merchantOrderId: string
+  ): Promise<ProcessMercadoPagoPaymentResult> {
+    const cleanOrderId = String(merchantOrderId || "").trim();
+    if (!MERCADOPAGO_PAYMENT_ID_REGEX.test(cleanOrderId)) {
+      return {
+        ok: false,
+        status: "invalid_order",
+        error: "ID de orden de MercadoPago inválido.",
+      };
+    }
+
+    const accessToken = this.getAccessToken();
+    if (!accessToken) {
+      return {
+        ok: false,
+        status: "unconfigured",
+        error: "MERCADOPAGO_ACCESS_TOKEN no configurado.",
+      };
+    }
+
+    const response = await fetch(
+      `${MERCADOPAGO_API_BASE}/merchant_orders/${encodeURIComponent(cleanOrderId)}`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+        cache: "no-store",
+      }
+    );
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: "order_not_found",
+        error: `Error al consultar merchant_order (${response.status}).`,
+      };
+    }
+
+    const order = (await response.json().catch(() => null)) as {
+      payments?: Array<{ id?: number | string; status?: string }>;
+    } | null;
+
+    const approvedPayment = Array.isArray(order?.payments)
+      ? order.payments.find(
+          (item) => item?.status === "approved" && item?.id != null
+        )
+      : undefined;
+
+    if (!approvedPayment?.id) {
+      return {
+        ok: false,
+        status: "pending",
+        error: "La orden aún no registra un pago aprobado.",
+      };
+    }
+
+    return this.processApprovedPayment(String(approvedPayment.id));
+  }
+
+  /**
+   * Busca pagos aprobados recientes del usuario en MercadoPago (últimos 30 días)
+   * para conciliar suscripciones cuando el callback o webhook no pudieron entregarse.
+   */
+  public async reconcileRecentApprovedPaymentForUser(
+    userId: string,
+    userEmail?: string | null,
+    options?: { bypassThrottle?: boolean }
+  ): Promise<ProcessMercadoPagoPaymentResult> {
+    const cleanUserId = (userId || "").trim();
+    const normalizedEmail = (userEmail || "").trim().toLowerCase();
+
+    if (!cleanUserId && !normalizedEmail) {
+      return { ok: false, status: "invalid", error: "Usuario inválido." };
+    }
+
+    const accessToken = this.getAccessToken();
+    if (!accessToken) {
+      return {
+        ok: false,
+        status: "unconfigured",
+        error: "MERCADOPAGO_ACCESS_TOKEN no configurado.",
+      };
+    }
+
+    const throttleKey = cleanUserId || normalizedEmail;
+    const now = Date.now();
+    const lastAttempt = this.lastReconcileAttemptByUser.get(throttleKey) || 0;
+    if (!options?.bypassThrottle && now - lastAttempt < 20_000) {
+      return {
+        ok: false,
+        status: "throttled",
+        error: "Conciliación reciente omitida.",
+      };
+    }
+    this.lastReconcileAttemptByUser.set(throttleKey, now);
+
+    const response = await fetch(
+      `${MERCADOPAGO_API_BASE}/v1/payments/search?sort=date_created&criteria=desc&limit=15`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+        cache: "no-store",
+      }
+    );
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: "search_error",
+        error: `No se pudo consultar pagos recientes (${response.status}).`,
+      };
+    }
+
+    const payload = (await response.json().catch(() => null)) as {
+      results?: MercadoPagoPaymentInfo[];
+    } | null;
+
+    const cutoffMs = now - MONTHLY_SUBSCRIPTION_DURATION_MS;
+    const results = Array.isArray(payload?.results) ? payload.results : [];
+
+    for (const candidate of results) {
+      if (
+        !candidate ||
+        candidate.status !== "approved" ||
+        candidate.currency_id !== "ARS" ||
+        typeof candidate.transaction_amount !== "number" ||
+        candidate.transaction_amount < PILOTO_PRO_PRICE_ARS
+      ) {
+        continue;
+      }
+
+      const rawDate = candidate.date_approved || candidate.date_created;
+      const dateMs = rawDate ? new Date(rawDate).getTime() : 0;
+      if (!Number.isFinite(dateMs) || dateMs < cutoffMs) {
+        continue;
+      }
+
+      const ref = parseTrustedPaymentExternalReference(
+        candidate.external_reference
+      );
+      const payerEmail = candidate.payer?.email?.trim().toLowerCase() || "";
+      const isPilotoPayment =
+        Boolean(ref) ||
+        Boolean(candidate.description?.toLowerCase().includes("piloto"));
+
+      const matchesUserId = Boolean(ref && cleanUserId && ref.userId === cleanUserId);
+      const matchesRefEmail = Boolean(
+        ref &&
+          normalizedEmail &&
+          ref.userEmail?.trim().toLowerCase() === normalizedEmail
+      );
+      const matchesPayerEmail = Boolean(
+        normalizedEmail && isPilotoPayment && payerEmail === normalizedEmail
+      );
+
+      if (matchesUserId || matchesRefEmail) {
+        return this.processApprovedPayment(String(candidate.id));
+      }
+
+      if (matchesPayerEmail) {
+        const dbUser =
+          (cleanUserId
+            ? await prisma.user.findUnique({ where: { id: cleanUserId } })
+            : null) ||
+          (await prisma.user.findFirst({
+            where: {
+              email: {
+                equals: normalizedEmail,
+                mode: "insensitive",
+              },
+            },
+          }));
+
+        if (dbUser) {
+          const paymentDate = new Date(dateMs);
+          const membership =
+            await prismaMembershipRepository.activateProMembership(
+              dbUser.id,
+              "MONTHLY",
+              paymentDate,
+              dbUser.email
+            );
+          this.processedPaymentIds.add(String(candidate.id));
+          return {
+            ok: true,
+            status: "approved",
+            userId: dbUser.id,
+            membership,
+          };
+        }
+      }
+    }
+
+    return {
+      ok: false,
+      status: "not_found",
+      error: "No se encontraron pagos aprobados vigentes en los últimos 30 días.",
     };
   }
 }

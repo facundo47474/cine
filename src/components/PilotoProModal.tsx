@@ -174,12 +174,24 @@ export default function PilotoProModal({
               </div>
 
               <div className="pt-4 border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-slate-600">
-                <span>
-                  Suscripción actual:{" "}
-                  <strong className="text-slate-900">
-                    Piloto Pro ({MONTHLY_PRICE_LABEL} ARS / mes)
-                  </strong>
-                </span>
+                <div className="space-y-1">
+                  <div>
+                    Suscripción actual:{" "}
+                    <strong className="text-slate-900">
+                      Piloto Pro ({MONTHLY_PRICE_LABEL} ARS / mes)
+                    </strong>
+                  </div>
+                  {membership.expiresAt && (
+                    <div className="text-[11px] text-emerald-700 font-semibold">
+                      Días restantes: {membership.daysRemaining}{" "}
+                      {membership.daysRemaining === 1 ? "día" : "días"} • Próxima
+                      renovación:{" "}
+                      {new Intl.DateTimeFormat("es-AR", {
+                        dateStyle: "long",
+                      }).format(new Date(membership.expiresAt))}
+                    </div>
+                  )}
+                </div>
 
                 <button
                   type="button"

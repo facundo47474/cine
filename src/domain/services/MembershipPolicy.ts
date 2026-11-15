@@ -11,6 +11,9 @@ export type ProFeatureKey =
 
 export const FREE_CONTINUE_WATCHING_LIMIT = 2;
 export const FREE_MY_LIST_LIMIT = 3;
+export const MONTHLY_SUBSCRIPTION_DURATION_DAYS = 30;
+export const MONTHLY_SUBSCRIPTION_DURATION_MS =
+  MONTHLY_SUBSCRIPTION_DURATION_DAYS * 24 * 60 * 60 * 1000;
 
 export interface MembershipEntitlements {
   canUseModoEscudo: boolean;
@@ -30,6 +33,10 @@ export interface UserMembershipStatusDto {
   isModoEscudoActive: boolean;
   entitlements: MembershipEntitlements;
   updatedAt: string;
+  activatedAt: string | null;
+  expiresAt: string | null;
+  daysRemaining: number;
+  isExpired: boolean;
 }
 
 export interface ProFeatureDescriptor {
@@ -88,17 +95,61 @@ export const PRO_FEATURES_CATALOG: ProFeatureDescriptor[] = [
   },
 ];
 
+function parseValidDate(value?: Date | string | null): Date | null {
+  if (!value) return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 /**
  * Construye el DTO de membresía y permisos efectivos a partir del plan contratado.
- * Regla de negocio: los usuarios `PRO` tienen el Modo Escudo siempre activo; en `FREE` nunca existe protección.
+ * Regla de negocio: los usuarios `PRO` tienen el Modo Escudo siempre activo durante sus 30 días vigentes;
+ * al vencer la fecha de expiración (`expiresAt`), la membresía vuelve automáticamente a `FREE`.
  */
 export function construirEstadoMembresia(params: {
   plan: MembershipPlan;
   billingCycle?: BillingCycle;
   shieldModeEnabled?: boolean;
   updatedAt?: Date | string;
+  expiresAt?: Date | string | null;
 }): UserMembershipStatusDto {
-  const isPro = params.plan === "PRO";
+  const isRequestedPro = params.plan === "PRO";
+  const resolvedUpdatedAt = parseValidDate(params.updatedAt) || new Date();
+
+  let activatedAt: string | null = null;
+  let expiresAt: string | null = null;
+  let isExpired = false;
+  let daysRemaining = 0;
+  let isPro = false;
+
+  if (isRequestedPro) {
+    const expirationDate =
+      parseValidDate(params.expiresAt) ||
+      new Date(resolvedUpdatedAt.getTime() + MONTHLY_SUBSCRIPTION_DURATION_MS);
+    const remainingMs = expirationDate.getTime() - Date.now();
+    activatedAt = resolvedUpdatedAt.toISOString();
+    expiresAt = expirationDate.toISOString();
+
+    if (remainingMs <= 0) {
+      isExpired = true;
+      isPro = false;
+      daysRemaining = 0;
+    } else {
+      isExpired = false;
+      isPro = true;
+      daysRemaining = Math.max(
+        1,
+        Math.ceil(remainingMs / (24 * 60 * 60 * 1000))
+      );
+    }
+  } else {
+    const pastExpiration = parseValidDate(params.expiresAt);
+    if (pastExpiration && pastExpiration.getTime() <= Date.now()) {
+      expiresAt = pastExpiration.toISOString();
+      isExpired = true;
+    }
+  }
+
   const effectiveShieldEnabled = isPro;
 
   const entitlements: MembershipEntitlements = {
@@ -113,11 +164,6 @@ export function construirEstadoMembresia(params: {
     maxMyListItems: isPro ? Number.MAX_SAFE_INTEGER : FREE_MY_LIST_LIMIT,
   };
 
-  const resolvedDate =
-    params.updatedAt instanceof Date
-      ? params.updatedAt.toISOString()
-      : params.updatedAt || new Date().toISOString();
-
   return {
     plan: isPro ? "PRO" : "FREE",
     billingCycle: params.billingCycle === "ANNUAL" ? "ANNUAL" : "MONTHLY",
@@ -125,7 +171,11 @@ export function construirEstadoMembresia(params: {
     isPro,
     isModoEscudoActive: isPro && effectiveShieldEnabled,
     entitlements,
-    updatedAt: resolvedDate,
+    updatedAt: resolvedUpdatedAt.toISOString(),
+    activatedAt,
+    expiresAt,
+    daysRemaining,
+    isExpired,
   };
 }
 

@@ -23,11 +23,49 @@ export async function getAuthenticatedUserSession(): Promise<
   if (!sessionUserId && !sessionEmail) return undefined;
 
   try {
-    const dbUser = sessionUserId
+    let dbUser = sessionUserId
       ? await prisma.user.findUnique({ where: { id: sessionUserId } })
-      : sessionEmail
-        ? await prisma.user.findUnique({ where: { email: sessionEmail } })
-        : null;
+      : null;
+
+    if (
+      sessionEmail &&
+      (!dbUser ||
+        dbUser.email.trim().toLowerCase() !== sessionEmail.toLowerCase())
+    ) {
+      const userByEmail = await prisma.user.findFirst({
+        where: {
+          email: {
+            equals: sessionEmail,
+            mode: "insensitive",
+          },
+        },
+      });
+      if (userByEmail) {
+        dbUser = userByEmail;
+      }
+    }
+
+    if (!dbUser && sessionEmail) {
+      try {
+        dbUser = await prisma.user.create({
+          data: {
+            email: sessionEmail.toLowerCase(),
+            name: sessionName ?? "Usuario",
+            avatarUrl: session?.user?.image ?? null,
+            lastLoginAt: new Date(),
+          },
+        });
+      } catch {
+        dbUser = await prisma.user.findFirst({
+          where: {
+            email: {
+              equals: sessionEmail,
+              mode: "insensitive",
+            },
+          },
+        });
+      }
+    }
 
     if (dbUser) {
       return {

@@ -3,18 +3,26 @@ import {
   BillingCycle,
   construirEstadoMembresia,
   MembershipPlan,
+  MONTHLY_SUBSCRIPTION_DURATION_MS,
   UserMembershipStatusDto,
 } from "@/domain/services/MembershipPolicy";
 
 interface StoredMembershipRecord {
   userId: string;
+  userEmail?: string | null;
   plan: MembershipPlan;
   billingCycle: BillingCycle;
   shieldModeEnabled: boolean;
   updatedAt: Date;
+  expiresAt: Date | null;
 }
 
 const memoryMembershipFallback = new Map<string, StoredMembershipRecord>();
+
+function normalizeEmail(email?: string | null): string | null {
+  const trimmed = email?.trim().toLowerCase();
+  return trimmed || null;
+}
 
 function isVipEmailByEnv(email?: string | null): boolean {
   if (!email) return false;
@@ -43,11 +51,21 @@ export class PrismaMembershipRepository {
           await prisma.$executeRawUnsafe(`
             CREATE TABLE IF NOT EXISTS "UserMembership" (
               "userId" TEXT PRIMARY KEY,
+              "userEmail" TEXT,
               "plan" TEXT NOT NULL DEFAULT 'FREE',
               "billingCycle" TEXT NOT NULL DEFAULT 'MONTHLY',
               "shieldModeEnabled" BOOLEAN NOT NULL DEFAULT FALSE,
-              "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+              "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              "expiresAt" TIMESTAMPTZ
             );
+          `);
+          await prisma.$executeRawUnsafe(`
+            ALTER TABLE "UserMembership"
+            ADD COLUMN IF NOT EXISTS "expiresAt" TIMESTAMPTZ;
+          `);
+          await prisma.$executeRawUnsafe(`
+            ALTER TABLE "UserMembership"
+            ADD COLUMN IF NOT EXISTS "userEmail" TEXT;
           `);
           return true;
         } catch (error) {
@@ -64,40 +82,99 @@ export class PrismaMembershipRepository {
     return this.tableReadyPromise;
   }
 
+  private async resolveEmailForUser(
+    userId: string,
+    explicitEmail?: string | null
+  ): Promise<string | null> {
+    const normalized = normalizeEmail(explicitEmail);
+    if (normalized) {
+      return normalized;
+    }
+
+    try {
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { email: true },
+      });
+      return normalizeEmail(user?.email);
+    } catch {
+      return null;
+    }
+  }
+
   private async readStoredRecord(
-    userId: string
+    userId: string,
+    userEmail?: string | null
   ): Promise<StoredMembershipRecord | null> {
+    const normalizedEmail = normalizeEmail(userEmail);
     const dbAvailable = await this.ensureMembershipTable();
     if (dbAvailable) {
       try {
-        const rows = await prisma.$queryRaw<
-          Array<{
-            userId: string;
-            plan: string;
-            billingCycle: string;
-            shieldModeEnabled: boolean;
-            updatedAt: Date;
-          }>
-        >`
-          SELECT "userId", "plan", "billingCycle", "shieldModeEnabled", "updatedAt"
-          FROM "UserMembership"
-          WHERE "userId" = ${userId}
-          LIMIT 1
-        `;
+        const rows = normalizedEmail
+          ? await prisma.$queryRaw<
+              Array<{
+                userId: string;
+                userEmail: string | null;
+                plan: string;
+                billingCycle: string;
+                shieldModeEnabled: boolean;
+                updatedAt: Date;
+                expiresAt: Date | null;
+              }>
+            >`
+              SELECT "userId", "userEmail", "plan", "billingCycle", "shieldModeEnabled", "updatedAt", "expiresAt"
+              FROM "UserMembership"
+              WHERE "userId" = ${userId}
+                 OR LOWER("userEmail") = ${normalizedEmail}
+              ORDER BY CASE WHEN "plan" = 'PRO' THEN 0 ELSE 1 END, "updatedAt" DESC
+              LIMIT 1
+            `
+          : await prisma.$queryRaw<
+              Array<{
+                userId: string;
+                userEmail: string | null;
+                plan: string;
+                billingCycle: string;
+                shieldModeEnabled: boolean;
+                updatedAt: Date;
+                expiresAt: Date | null;
+              }>
+            >`
+              SELECT "userId", "userEmail", "plan", "billingCycle", "shieldModeEnabled", "updatedAt", "expiresAt"
+              FROM "UserMembership"
+              WHERE "userId" = ${userId}
+              LIMIT 1
+            `;
 
         const row = rows[0];
         if (row) {
+          const normalizedUpdatedAt =
+            row.updatedAt instanceof Date
+              ? row.updatedAt
+              : new Date(row.updatedAt);
+          const normalizedPlan: MembershipPlan =
+            row.plan === "PRO" ? "PRO" : "FREE";
+          let normalizedExpiresAt: Date | null = row.expiresAt
+            ? row.expiresAt instanceof Date
+              ? row.expiresAt
+              : new Date(row.expiresAt)
+            : null;
+          if (normalizedPlan === "PRO" && !normalizedExpiresAt) {
+            normalizedExpiresAt = new Date(
+              normalizedUpdatedAt.getTime() + MONTHLY_SUBSCRIPTION_DURATION_MS
+            );
+          }
+
           const normalized: StoredMembershipRecord = {
             userId: row.userId,
-            plan: row.plan === "PRO" ? "PRO" : "FREE",
+            userEmail: normalizeEmail(row.userEmail) || normalizedEmail,
+            plan: normalizedPlan,
             billingCycle: row.billingCycle === "ANNUAL" ? "ANNUAL" : "MONTHLY",
             shieldModeEnabled: Boolean(row.shieldModeEnabled),
-            updatedAt:
-              row.updatedAt instanceof Date
-                ? row.updatedAt
-                : new Date(row.updatedAt),
+            updatedAt: normalizedUpdatedAt,
+            expiresAt: normalizedExpiresAt,
           };
-          memoryMembershipFallback.set(userId, normalized);
+          memoryMembershipFallback.set(row.userId, normalized);
           return normalized;
         }
       } catch (error) {
@@ -108,16 +185,46 @@ export class PrismaMembershipRepository {
       }
     }
 
-    return memoryMembershipFallback.get(userId) || null;
+    const byId = memoryMembershipFallback.get(userId);
+    if (byId) return byId;
+
+    if (normalizedEmail) {
+      let emailMatch: StoredMembershipRecord | null = null;
+      memoryMembershipFallback.forEach((entry) => {
+        if (normalizeEmail(entry.userEmail) === normalizedEmail) {
+          if (!emailMatch || entry.plan === "PRO") {
+            emailMatch = entry;
+          }
+        }
+      });
+      if (emailMatch) return emailMatch;
+    }
+
+    return null;
   }
 
-  private async upsertStoredRecord(
-    record: Omit<StoredMembershipRecord, "updatedAt">
-  ): Promise<UserMembershipStatusDto> {
-    const now = new Date();
+  private async upsertStoredRecord(record: {
+    userId: string;
+    userEmail?: string | null;
+    plan: MembershipPlan;
+    billingCycle: BillingCycle;
+    shieldModeEnabled: boolean;
+    activatedAt?: Date;
+    expiresAt?: Date | null;
+  }): Promise<UserMembershipStatusDto> {
+    const now = record.activatedAt ? new Date(record.activatedAt) : new Date();
+    const resolvedEmail = await this.resolveEmailForUser(
+      record.userId,
+      record.userEmail
+    );
     const nextRecord: StoredMembershipRecord = {
-      ...record,
+      userId: record.userId,
+      userEmail: resolvedEmail,
+      plan: record.plan,
+      billingCycle: record.billingCycle,
+      shieldModeEnabled: record.shieldModeEnabled,
       updatedAt: now,
+      expiresAt: record.expiresAt ?? null,
     };
 
     memoryMembershipFallback.set(record.userId, nextRecord);
@@ -126,14 +233,16 @@ export class PrismaMembershipRepository {
     if (dbAvailable) {
       try {
         await prisma.$executeRaw`
-          INSERT INTO "UserMembership" ("userId", "plan", "billingCycle", "shieldModeEnabled", "updatedAt")
-          VALUES (${nextRecord.userId}, ${nextRecord.plan}, ${nextRecord.billingCycle}, ${nextRecord.shieldModeEnabled}, ${now})
+          INSERT INTO "UserMembership" ("userId", "userEmail", "plan", "billingCycle", "shieldModeEnabled", "updatedAt", "expiresAt")
+          VALUES (${nextRecord.userId}, ${nextRecord.userEmail ?? null}, ${nextRecord.plan}, ${nextRecord.billingCycle}, ${nextRecord.shieldModeEnabled}, ${now}, ${nextRecord.expiresAt})
           ON CONFLICT ("userId")
           DO UPDATE SET
+            "userEmail" = COALESCE(EXCLUDED."userEmail", "UserMembership"."userEmail"),
             "plan" = EXCLUDED."plan",
             "billingCycle" = EXCLUDED."billingCycle",
             "shieldModeEnabled" = EXCLUDED."shieldModeEnabled",
-            "updatedAt" = EXCLUDED."updatedAt"
+            "updatedAt" = EXCLUDED."updatedAt",
+            "expiresAt" = EXCLUDED."expiresAt"
         `;
       } catch (error) {
         console.warn(
@@ -147,46 +256,71 @@ export class PrismaMembershipRepository {
   }
 
   /**
-   * Obtiene el estado de membresía y permisos del usuario; si pertenece a `PRO_EMAILS`
-   * y no tiene registro previo, lo inicializa automáticamente como usuario Pro con Modo Escudo activo.
+   * Obtiene el estado de membresía y permisos del usuario buscando por `userId` y correo de Google (`userEmail`).
+   * Si pertenece a `PRO_EMAILS` y no tiene registro previo, lo inicializa automáticamente como usuario Pro.
+   * Si la suscripción mensual de 30 días venció, revierte la cuenta a `FREE` automáticamente.
    */
   public async getMembershipByUserId(
     userId: string,
     userEmail?: string | null
   ): Promise<UserMembershipStatusDto> {
-    if (!userId) {
+    if (!userId && !userEmail) {
       return construirEstadoMembresia({ plan: "FREE" });
     }
 
-    const existing = await this.readStoredRecord(userId);
+    const existing = await this.readStoredRecord(userId, userEmail);
     if (existing) {
-      return construirEstadoMembresia(existing);
+      const evaluated = construirEstadoMembresia(existing);
+      if (existing.plan === "PRO" && evaluated.isExpired) {
+        if (isVipEmailByEnv(userEmail || existing.userEmail)) {
+          return this.activateProMembership(
+            userId || existing.userId,
+            "ANNUAL",
+            undefined,
+            userEmail || existing.userEmail
+          );
+        }
+        return this.upsertStoredRecord({
+          userId: existing.userId,
+          userEmail: userEmail || existing.userEmail,
+          plan: "FREE",
+          billingCycle: "MONTHLY",
+          shieldModeEnabled: false,
+          expiresAt: existing.expiresAt,
+        });
+      }
+      return evaluated;
     }
 
-    if (isVipEmailByEnv(userEmail)) {
-      return this.upsertStoredRecord({
-        userId,
-        plan: "PRO",
-        billingCycle: "ANNUAL",
-        shieldModeEnabled: true,
-      });
+    if (isVipEmailByEnv(userEmail) && userId) {
+      return this.activateProMembership(userId, "ANNUAL", undefined, userEmail);
     }
 
     return construirEstadoMembresia({ plan: "FREE" });
   }
 
   /**
-   * Activa la suscripción Piloto Pro habilitando de inmediato el Modo Escudo y demás funciones avanzadas.
+   * Activa la suscripción Piloto Pro habilitando el Modo Escudo durante 30 días desde `activatedAt`.
    */
   public async activateProMembership(
     userId: string,
-    billingCycle: BillingCycle = "MONTHLY"
+    billingCycle: BillingCycle = "MONTHLY",
+    activatedAt?: Date,
+    userEmail?: string | null
   ): Promise<UserMembershipStatusDto> {
+    const start = activatedAt ? new Date(activatedAt) : new Date();
+    const expiresAt = new Date(
+      start.getTime() + MONTHLY_SUBSCRIPTION_DURATION_MS
+    );
+
     return this.upsertStoredRecord({
       userId,
+      userEmail,
       plan: "PRO",
       billingCycle: billingCycle === "ANNUAL" ? "ANNUAL" : "MONTHLY",
       shieldModeEnabled: true,
+      activatedAt: start,
+      expiresAt,
     });
   }
 
@@ -194,18 +328,21 @@ export class PrismaMembershipRepository {
    * Revierte la cuenta al plan gratuito estándar desactivando el Modo Escudo y las herramientas Pro.
    */
   public async downgradeToFreeMembership(
-    userId: string
+    userId: string,
+    userEmail?: string | null
   ): Promise<UserMembershipStatusDto> {
     return this.upsertStoredRecord({
       userId,
+      userEmail,
       plan: "FREE",
       billingCycle: "MONTHLY",
       shieldModeEnabled: false,
+      expiresAt: null,
     });
   }
 
   /**
-   * Activa o pausa el Modo Escudo exclusivamente cuando el usuario posee membresía Piloto Pro.
+   * Activa o pausa el Modo Escudo exclusivamente cuando el usuario posee membresía Piloto Pro vigente.
    */
   public async setShieldModeEnabled(
     userId: string,
@@ -219,9 +356,14 @@ export class PrismaMembershipRepository {
 
     return this.upsertStoredRecord({
       userId,
+      userEmail,
       plan: "PRO",
       billingCycle: current.billingCycle,
       shieldModeEnabled: Boolean(enabled),
+      activatedAt: current.activatedAt
+        ? new Date(current.activatedAt)
+        : undefined,
+      expiresAt: current.expiresAt ? new Date(current.expiresAt) : null,
     });
   }
 }
