@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { healthCheckerService } from "@/infrastructure/container";
+import { safeCompareSecrets } from "@/infrastructure/security/SecurityGuard";
 
 export const dynamic = "force-dynamic";
 
@@ -11,16 +12,22 @@ export const dynamic = "force-dynamic";
  * @returns `true` si la petición está autorizada.
  */
 function isCronRequestAuthorized(request: NextRequest): boolean {
-  const configuredSecret =
-    process.env.CRON_SECRET || "piloto_cron_secret_2026_seguro";
+  const configuredSecret = process.env.CRON_SECRET?.trim();
+  if (!configuredSecret) {
+    return false;
+  }
 
-  const authHeader = request.headers.get("authorization");
-  if (authHeader === `Bearer ${configuredSecret}`) {
+  const authHeader = request.headers.get("authorization") || "";
+  if (
+    authHeader.startsWith("Bearer ") &&
+    safeCompareSecrets(authHeader.slice(7).trim(), configuredSecret)
+  ) {
     return true;
   }
 
   const { searchParams } = new URL(request.url);
-  if (searchParams.get("secret") === configuredSecret) {
+  const querySecret = searchParams.get("secret")?.trim() || "";
+  if (querySecret && safeCompareSecrets(querySecret, configuredSecret)) {
     return true;
   }
 

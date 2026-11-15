@@ -42,10 +42,7 @@ export const authOptions: NextAuthOptions = {
       clientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
     }),
   ],
-  secret:
-    process.env.NEXTAUTH_SECRET ||
-    process.env.STREAM_TOKEN_SECRET ||
-    "piloto_default_nextauth_secret_2026",
+  secret: process.env.NEXTAUTH_SECRET || process.env.STREAM_TOKEN_SECRET,
   pages: {
     signIn: "/login",
   },

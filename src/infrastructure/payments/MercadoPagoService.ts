@@ -2,10 +2,19 @@ import { prisma } from "@/infrastructure/database/prismaClient";
 import { prismaMembershipRepository } from "@/infrastructure/repositories/PrismaMembershipRepository";
 import { welcomeEmailService } from "@/infrastructure/notifications/WelcomeEmailService";
 import { UserMembershipStatusDto } from "@/domain/services/MembershipPolicy";
+import {
+  signExternalReference,
+  verifyExternalReference,
+} from "@/infrastructure/security/SecurityGuard";
 
 const MERCADOPAGO_API_BASE = "https://api.mercadopago.com";
 const PILOTO_PRO_PRICE_ARS = 2500;
 const PILOTO_PRO_TITLE = "Piloto Plus - Suscripción Mensual";
+const MERCADOPAGO_PAYMENT_ID_REGEX = /^\d{1,24}$/;
+
+function isPublicHttpsUrl(url: string): boolean {
+  return /^https:\/\//i.test(url) && !/localhost|127\.0\.0\.1/i.test(url);
+}
 
 export interface CreateSubscriptionPreferenceParams {
   userId: string;
@@ -41,41 +50,6 @@ export interface ProcessMercadoPagoPaymentResult {
   error?: string;
 }
 
-interface ParsedExternalReference {
-  userId?: string;
-  userEmail?: string;
-  userName?: string | null;
-  billingCycle?: string;
-}
-
-function isPublicHttpsUrl(url: string): boolean {
-  return /^https:\/\//i.test(url) && !/localhost|127\.0\.0\.1/i.test(url);
-}
-
-function parseExternalReference(
-  rawRef: string | null | undefined
-): ParsedExternalReference {
-  if (!rawRef || typeof rawRef !== "string") {
-    return {};
-  }
-
-  const trimmed = rawRef.trim();
-  if (!trimmed) {
-    return {};
-  }
-
-  try {
-    const parsed = JSON.parse(trimmed) as ParsedExternalReference;
-    if (parsed && typeof parsed === "object") {
-      return parsed;
-    }
-  } catch {
-    return { userId: trimmed };
-  }
-
-  return {};
-}
-
 class MercadoPagoService {
   private readonly processedPaymentIds = new Set<string>();
   private readonly inFlightPayments = new Map<
@@ -103,7 +77,7 @@ class MercadoPagoService {
 
     const cleanBaseUrl = params.baseUrl.replace(/\/+$/, "");
     const callbackUrl = `${cleanBaseUrl}/api/mercadopago/callback`;
-    const externalReference = JSON.stringify({
+    const externalReference = signExternalReference({
       userId: params.userId,
       userEmail: params.userEmail,
       userName: params.userName || null,
@@ -206,7 +180,7 @@ class MercadoPagoService {
     }
 
     const cleanId = paymentId.trim();
-    if (!cleanId) {
+    if (!MERCADOPAGO_PAYMENT_ID_REGEX.test(cleanId)) {
       return null;
     }
 
@@ -241,7 +215,7 @@ class MercadoPagoService {
     paymentId: string
   ): Promise<ProcessMercadoPagoPaymentResult> {
     const cleanId = String(paymentId || "").trim();
-    if (!cleanId || cleanId === "null" || cleanId === "undefined") {
+    if (!MERCADOPAGO_PAYMENT_ID_REGEX.test(cleanId)) {
       return {
         ok: false,
         status: "invalid",
@@ -300,12 +274,24 @@ class MercadoPagoService {
       };
     }
 
-    const ref = parseExternalReference(payment.external_reference);
-    if (!ref.userId) {
+    if (
+      payment.currency_id !== "ARS" ||
+      typeof payment.transaction_amount !== "number" ||
+      payment.transaction_amount < PILOTO_PRO_PRICE_ARS
+    ) {
       return {
         ok: false,
-        status: "approved",
-        error: "El pago aprobado no contiene referencia de usuario.",
+        status: "invalid_amount",
+        error: "El monto o moneda del pago no coincide con el plan Piloto Plus.",
+      };
+    }
+
+    const ref = verifyExternalReference(payment.external_reference);
+    if (!ref.valid || !ref.userId) {
+      return {
+        ok: false,
+        status: "invalid_reference",
+        error: "La referencia del pago no superó la verificación de integridad.",
       };
     }
 

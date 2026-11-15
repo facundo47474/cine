@@ -1,6 +1,7 @@
 import dns from "dns";
 import { NextRequest, NextResponse } from "next/server";
 import { DEFAULT_SCRAPER_USER_AGENT } from "@/infrastructure/providers/Embed69Decoder";
+import { isSafePublicHttpUrl } from "@/infrastructure/security/SecurityGuard";
 
 try {
   dns.setDefaultResultOrder("ipv4first");
@@ -166,6 +167,13 @@ export async function GET(request: NextRequest) {
     );
   }
 
+  if (!isSafePublicHttpUrl(streamUrl)) {
+    return NextResponse.json(
+      { error: "Destino de URL no permitido." },
+      { status: 403, headers: CORS_HEADERS }
+    );
+  }
+
   let refererHeader = rawReferer || `${parsedStreamUrl.origin}/`;
   let originHeader = parsedStreamUrl.origin;
 
@@ -213,6 +221,17 @@ export async function GET(request: NextRequest) {
       headers: upstreamHeaders,
       redirect: "follow",
     });
+
+    if (
+      upstreamResponse.url &&
+      !isSafePublicHttpUrl(upstreamResponse.url)
+    ) {
+      await upstreamResponse.body?.cancel().catch(() => {});
+      return NextResponse.json(
+        { error: "Redirección hacia destino no permitido." },
+        { status: 403, headers: CORS_HEADERS }
+      );
+    }
 
     if (!upstreamResponse.ok && upstreamResponse.status !== 206) {
       return NextResponse.json(
@@ -306,13 +325,10 @@ export async function GET(request: NextRequest) {
       status: upstreamResponse.status,
       headers: responseHeaders,
     });
-  } catch (error) {
+  } catch {
     return NextResponse.json(
       {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Error en el proxy de streaming.",
+        error: "Error en el proxy de streaming.",
       },
       { status: 502, headers: CORS_HEADERS }
     );

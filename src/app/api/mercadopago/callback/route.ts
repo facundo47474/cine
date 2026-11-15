@@ -3,12 +3,13 @@ import { mercadoPagoService } from "@/infrastructure/payments/MercadoPagoService
 
 export const dynamic = "force-dynamic";
 
-function resolveRedirectStatus(rawStatus: string): "approved" | "pending" | "failure" {
+function resolveNonApprovedStatus(rawStatus: string): "pending" | "failure" {
   const normalized = rawStatus.trim().toLowerCase();
-  if (normalized === "approved" || normalized === "success") {
-    return "approved";
-  }
-  if (normalized === "pending" || normalized === "in_process" || normalized === "authorized") {
+  if (
+    normalized === "pending" ||
+    normalized === "in_process" ||
+    normalized === "authorized"
+  ) {
     return "pending";
   }
   return "failure";
@@ -22,7 +23,8 @@ export async function GET(request: NextRequest) {
   const rawStatus =
     searchParams.get("status") || searchParams.get("collection_status") || "";
 
-  let finalStatus = resolveRedirectStatus(rawStatus);
+  let finalStatus: "approved" | "pending" | "failure" =
+    resolveNonApprovedStatus(rawStatus);
 
   if (paymentId && paymentId !== "null" && paymentId !== "undefined") {
     try {
@@ -35,9 +37,12 @@ export async function GET(request: NextRequest) {
         result.status === "authorized"
       ) {
         finalStatus = "pending";
+      } else {
+        finalStatus = "failure";
       }
     } catch (error) {
       console.error("[MercadoPago Callback] Error al verificar pago:", error);
+      finalStatus = "failure";
     }
   }
 

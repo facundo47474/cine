@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { tmdbImportService, movieRepository } from "@/infrastructure/container";
 import { MirrorFormat } from "@/domain/enums/MirrorFormat";
+import {
+  isSafePublicHttpUrl,
+  safeCompareSecrets,
+} from "@/infrastructure/security/SecurityGuard";
 
 export const dynamic = "force-dynamic";
 
@@ -13,6 +17,18 @@ interface RawMirrorInputPayload {
   priority?: number;
 }
 
+function isAdminAuthorized(request: NextRequest): boolean {
+  const configuredSecret = process.env.CRON_SECRET?.trim();
+  if (!configuredSecret) {
+    return false;
+  }
+  const authHeader = request.headers.get("authorization") || "";
+  if (!authHeader.startsWith("Bearer ")) {
+    return false;
+  }
+  return safeCompareSecrets(authHeader.slice(7).trim(), configuredSecret);
+}
+
 /**
  * Endpoint Administrativo de Ingesta (`POST /api/admin/import-tmdb`).
  *
@@ -20,6 +36,13 @@ interface RawMirrorInputPayload {
  * por su `tmdbId` o cargando manualmente sus campos descriptivos y lista de mirrors.
  */
 export async function POST(request: NextRequest) {
+  if (!isAdminAuthorized(request)) {
+    return NextResponse.json(
+      { ok: false, error: "No autorizado." },
+      { status: 401 }
+    );
+  }
+
   try {
     const body = await request.json();
     const { tmdbId, qualityBadge, mirrors, manualMovie } = body;
@@ -29,6 +52,19 @@ export async function POST(request: NextRequest) {
         { ok: false, error: "Debes proporcionar al menos un enlace Mirror." },
         { status: 400 }
       );
+    }
+
+    for (const mirror of mirrors as RawMirrorInputPayload[]) {
+      if (!mirror || !isSafePublicHttpUrl(mirror.rawUrl)) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error:
+              "Uno o más enlaces Mirror contienen una URL inválida o no permitida.",
+          },
+          { status: 400 }
+        );
+      }
     }
 
     const formattedMirrors = mirrors.map(
@@ -84,10 +120,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       {
         ok: false,
-        error:
-          error instanceof Error
-            ? error.message
-            : "Error al importar la película.",
+        error: "Error interno al importar la película.",
       },
       { status: 500 }
     );

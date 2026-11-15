@@ -4,6 +4,11 @@ import { tokenCryptoService } from "@/infrastructure/container";
 import { prisma } from "@/infrastructure/database/prismaClient";
 import { getAuthenticatedUserSession } from "@/infrastructure/auth/sessionHelper";
 import { prismaMembershipRepository } from "@/infrastructure/repositories/PrismaMembershipRepository";
+import { isSafePublicHttpUrl } from "@/infrastructure/security/SecurityGuard";
+import {
+  apiRateLimiter,
+  getClientIp,
+} from "@/infrastructure/security/RateLimiter";
 import {
   FALLBACK_IF_EMPTY,
   STRICT_STREAMWISH_ONLY,
@@ -323,7 +328,7 @@ export async function GET(request: NextRequest) {
       )
     : null;
 
-  if (!membership?.isModoEscudoActive) {
+  if (!auth || !membership?.isModoEscudoActive) {
     return NextResponse.json(
       {
         success: false,
@@ -335,6 +340,29 @@ export async function GET(request: NextRequest) {
           "El Modo Escudo requiere membresía Piloto Pro activa para usar el reproductor nativo.",
       },
       { status: 200 }
+    );
+  }
+
+  const rateLimit = apiRateLimiter.checkLimit(
+    `extractor:${auth.userId}:${getClientIp(request)}`,
+    30,
+    60_000
+  );
+  if (!rateLimit.allowed) {
+    return NextResponse.json(
+      {
+        success: false,
+        fallbackUrl: "",
+        isStreamwish: false,
+        isDirty: false,
+        reason: "Demasiadas solicitudes al extractor. Esperá unos segundos.",
+      },
+      {
+        status: 429,
+        headers: {
+          "Retry-After": String(rateLimit.retryAfterSeconds),
+        },
+      }
     );
   }
 
@@ -364,6 +392,19 @@ export async function GET(request: NextRequest) {
         tokenServerName = payload.serverName;
         fallbackIframeUrl = inputUrl;
       }
+    }
+
+    if (!isSafePublicHttpUrl(targetEmbedUrl)) {
+      return NextResponse.json(
+        {
+          success: false,
+          fallbackUrl: "",
+          isStreamwish: false,
+          isDirty: true,
+          reason: "Destino de URL no permitido.",
+        },
+        { status: 400 }
+      );
     }
 
     const parsedInitialUrl = new URL(targetEmbedUrl);
@@ -607,17 +648,14 @@ export async function GET(request: NextRequest) {
       },
       { status: 200 }
     );
-  } catch (error) {
+  } catch {
     return NextResponse.json(
       {
         success: false,
         fallbackUrl: fallbackIframeUrl,
         isStreamwish: false,
         isDirty: true,
-        reason:
-          error instanceof Error
-            ? error.message
-            : "Error al intentar extraer el stream.",
+        reason: "Error al intentar extraer el stream.",
       },
       { status: 200 }
     );

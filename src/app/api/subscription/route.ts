@@ -6,12 +6,21 @@ import {
 import { prismaMembershipRepository } from "@/infrastructure/repositories/PrismaMembershipRepository";
 import { welcomeEmailService } from "@/infrastructure/notifications/WelcomeEmailService";
 import { mercadoPagoService } from "@/infrastructure/payments/MercadoPagoService";
+import { isSameOriginMutation } from "@/infrastructure/security/SecurityGuard";
+import {
+  apiRateLimiter,
+  getClientIp,
+} from "@/infrastructure/security/RateLimiter";
 import {
   BillingCycle,
   construirEstadoMembresia,
 } from "@/domain/services/MembershipPolicy";
 
 export const dynamic = "force-dynamic";
+
+const PRIVATE_NO_STORE_HEADERS = {
+  "Cache-Control": "private, no-store, no-cache, must-revalidate",
+};
 
 type SubscriptionActionBody =
   | { action: "UPGRADE_PRO"; billingCycle?: BillingCycle }
@@ -48,12 +57,15 @@ export async function GET() {
   try {
     const auth = await getAuthenticatedUserSession();
     if (!auth) {
-      return NextResponse.json({
-        ok: true,
-        authenticated: false,
-        userEmail: null,
-        membership: construirEstadoMembresia({ plan: "FREE" }),
-      });
+      return NextResponse.json(
+        {
+          ok: true,
+          authenticated: false,
+          userEmail: null,
+          membership: construirEstadoMembresia({ plan: "FREE" }),
+        },
+        { headers: PRIVATE_NO_STORE_HEADERS }
+      );
     }
 
     const membership = await prismaMembershipRepository.getMembershipByUserId(
@@ -61,17 +73,20 @@ export async function GET() {
       auth.email
     );
 
-    return NextResponse.json({
-      ok: true,
-      authenticated: true,
-      userEmail: auth.email ?? null,
-      membership,
-    });
+    return NextResponse.json(
+      {
+        ok: true,
+        authenticated: true,
+        userEmail: auth.email ?? null,
+        membership,
+      },
+      { headers: PRIVATE_NO_STORE_HEADERS }
+    );
   } catch (error) {
     console.error("[GET /api/subscription] Error:", error);
     return NextResponse.json(
       { ok: false, error: "Error consultando el estado de tu membresía." },
-      { status: 500 }
+      { status: 500, headers: PRIVATE_NO_STORE_HEADERS }
     );
   }
 }
@@ -80,12 +95,40 @@ export async function GET() {
  * Actualiza el plan de suscripción (Gratis <-> Piloto Pro), el Modo Escudo o reenvía el correo de agradecimiento (`POST /api/subscription`).
  */
 export async function POST(request: NextRequest) {
+  if (!isSameOriginMutation(request)) {
+    return NextResponse.json(
+      { ok: false, error: "Origen de solicitud no permitido." },
+      { status: 403 }
+    );
+  }
+
   try {
     const auth = await getAuthenticatedUserSession();
     if (!auth) {
       return NextResponse.json(
         { ok: false, error: "Debes iniciar sesión para gestionar Piloto Pro." },
         { status: 401 }
+      );
+    }
+
+    const rateLimit = apiRateLimiter.checkLimit(
+      `sub:${auth.userId}:${getClientIp(request)}`,
+      15,
+      60_000
+    );
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "Demasiadas solicitudes de suscripción. Esperá unos segundos antes de reintentar.",
+        },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(rateLimit.retryAfterSeconds),
+          },
+        }
       );
     }
 
