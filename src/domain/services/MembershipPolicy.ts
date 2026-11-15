@@ -45,10 +45,10 @@ export const PRO_FEATURES_CATALOG: ProFeatureDescriptor[] = [
   {
     key: "modo_escudo",
     title: "Modo Escudo",
-    badge: "Sin anuncios",
-    summary: "Reproducción limpia sin publicidad ni ventanas emergentes.",
-    freeDetail: "Reproductor estándar con anuncios",
-    proDetail: "Experiencia sin anuncios ni interrupciones",
+    badge: "Reproductor propio",
+    summary: "Experiencia directa con nuestro propio reproductor optimizado.",
+    freeDetail: "Reproductor estándar externo",
+    proDetail: "Experiencia con nuestro propio reproductor",
   },
   {
     key: "transmitir_tv",

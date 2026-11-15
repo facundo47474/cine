@@ -269,7 +269,7 @@ export default function PilotoProModal({
                 <ul className="space-y-2 text-xs text-slate-700">
                   <li className="flex items-center gap-2">
                     <Check className="w-4 h-4 text-emerald-600 flex-shrink-0" />
-                    <span>Modo Escudo sin ventanas emergentes</span>
+                    <span>Modo Escudo con nuestro propio reproductor</span>
                   </li>
                   <li className="flex items-center gap-2">
                     <Check className="w-4 h-4 text-emerald-600 flex-shrink-0" />

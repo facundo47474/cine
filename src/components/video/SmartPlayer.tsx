@@ -237,9 +237,8 @@ export function SmartAdblockHelperBar({
         <p className="text-zinc-300 font-medium leading-snug">
           {showModoEscudoPromo ? (
             <>
-              ¿Molesto con las ventanas emergentes del servidor externo? Activá el{" "}
-              <strong className="text-white">Modo Escudo</strong> para reproducir en
-              nuestro reproductor nativo sin anuncios.
+              Activá el <strong className="text-white">Modo Escudo</strong> para
+              disfrutar la experiencia con nuestro propio reproductor.
             </>
           ) : (
             <>

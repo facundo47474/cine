@@ -266,7 +266,7 @@ export class WelcomeEmailService {
                   <td style="padding-bottom:12px;border-bottom:1px solid #f1f5f9;">
                     <strong style="color:#0f172a;font-size:13px;">🛡️ Modo Escudo Activo</strong>
                     <div style="color:#475569;font-size:12px;line-height:1.5;margin-top:3px;">
-                      Reproducción limpia sin ventanas emergentes (popups) ni redirecciones intrusivas.
+                      Experiencia fluida y directa con nuestro propio reproductor optimizado.
                     </div>
                   </td>
                 </tr>
@@ -698,7 +698,7 @@ export class WelcomeEmailService {
       `- Cuenta asociada: ${toEmail}`,
       "",
       "FUNCIONES DESBLOQUEADAS:",
-      "1. Modo Escudo Activo (sin ventanas emergentes ni redirecciones)",
+      "1. Modo Escudo Activo (experiencia con nuestro propio reproductor)",
       "2. Transmitir a Smart TV (Chromecast y AirPlay)",
       "3. Modo Maratón en Series (Saltar Intro + Autoplay)",
       "4. Sincronización Cloud Ilimitada",

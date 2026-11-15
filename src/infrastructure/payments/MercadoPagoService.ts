@@ -90,7 +90,7 @@ class MercadoPagoService {
           id: "piloto-plus-monthly",
           title: PILOTO_PRO_TITLE,
           description:
-            "Suscripción mensual a Piloto Pro con Modo Escudo sin publicidad.",
+            "Suscripción mensual a Piloto Plus • Experiencia con nuestro propio reproductor.",
           quantity: 1,
           currency_id: "ARS",
           unit_price: PILOTO_PRO_PRICE_ARS,
