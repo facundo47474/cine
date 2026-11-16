@@ -507,50 +507,19 @@ export class CatalogService {
    * principales (`Embed69` / `PlayLatin`) no devuelven resultados o fallan temporalmente.
    *
    * @param tmdbId Identificador numérico de TMDB de la película.
-   * @param imdbId Identificador IMDb opcional (`tt...`).
    * @returns Lista garantizada de espejos de contingencia (`CreateMirrorInput[]`).
    */
   private construirMirrorsDeContingenciaParaPelicula(
-    tmdbId: number,
-    imdbId?: string | null
+    tmdbId: number
   ): CreateMirrorInput[] {
-    const emergencyMirrors: CreateMirrorInput[] = [];
-    let nextPriority = 70;
-
-    if (imdbId && imdbId.trim().startsWith("tt")) {
-      const cleanImdbId = imdbId.trim();
-      emergencyMirrors.push(
-        {
-          serverName: "Embed69-Fallback-Lat",
-          language: "Latino",
-          rawUrl: `https://embed69.org/f/${cleanImdbId}?lang=LAT&prefer=streamwish`,
-          format: MirrorFormat.EMBED,
-          quality: "1080p",
-          priority: nextPriority++,
-          isStreamwish: false,
-          isDirty: true,
-        },
-        {
-          serverName: "Embed69-Fallback-Sub",
-          language: "Inglés (Sub)",
-          rawUrl: `https://embed69.org/f/${cleanImdbId}?lang=SUB&prefer=streamwish`,
-          format: MirrorFormat.EMBED,
-          quality: "1080p",
-          priority: nextPriority++,
-          isStreamwish: false,
-          isDirty: true,
-        }
-      );
-    }
-
-    emergencyMirrors.push(
+    return [
       {
         serverName: "VidLink-Contingencia",
         language: "Inglés (Sub)",
         rawUrl: `https://vidlink.pro/movie/${tmdbId}`,
         format: MirrorFormat.EMBED,
         quality: "1080p",
-        priority: nextPriority++,
+        priority: 70,
         isStreamwish: false,
         isDirty: true,
       },
@@ -560,7 +529,7 @@ export class CatalogService {
         rawUrl: `https://vidsrc.cc/v2/embed/movie/${tmdbId}`,
         format: MirrorFormat.EMBED,
         quality: "1080p",
-        priority: nextPriority++,
+        priority: 80,
         isStreamwish: false,
         isDirty: true,
       },
@@ -570,13 +539,32 @@ export class CatalogService {
         rawUrl: `https://autoembed.cc/movie/tmdb/${tmdbId}`,
         format: MirrorFormat.EMBED,
         quality: "1080p",
-        priority: nextPriority++,
+        priority: 90,
         isStreamwish: false,
         isDirty: true,
-      }
-    );
+      },
+      {
+        serverName: "Backup-Sub",
+        language: "Inglés (Sub)",
+        rawUrl: `https://vidsrc.me/embed/movie?tmdb=${tmdbId}&ds_lang=es`,
+        format: MirrorFormat.EMBED,
+        quality: "1080p",
+        priority: 99,
+        isStreamwish: false,
+        isDirty: true,
+      },
+    ];
+  }
 
-    return emergencyMirrors;
+  private appendMovieContingencyMirrors(
+    mirrors: CreateMirrorInput[],
+    tmdbId: number
+  ): CreateMirrorInput[] {
+    const existingUrls = new Set(mirrors.map((m) => m.rawUrl.trim()));
+    const contingency = this.construirMirrorsDeContingenciaParaPelicula(
+      tmdbId
+    ).filter((m) => !existingUrls.has(m.rawUrl.trim()));
+    return [...mirrors, ...contingency];
   }
 
   /**
@@ -640,12 +628,10 @@ export class CatalogService {
         );
       }
 
-      if (resolvedRawMirrors.length === 0) {
-        resolvedRawMirrors = this.construirMirrorsDeContingenciaParaPelicula(
-          tmdbId,
-          metadata.imdbId
-        );
-      }
+      resolvedRawMirrors = this.appendMovieContingencyMirrors(
+        resolvedRawMirrors,
+        tmdbId
+      );
 
       const mergedMirrors = this.mergePreservingDirectMirrors(
         existingMovie,
@@ -744,12 +730,10 @@ export class CatalogService {
         );
       }
 
-      if (resolvedRawMirrors.length === 0) {
-        resolvedRawMirrors = this.construirMirrorsDeContingenciaParaPelicula(
-          movie.tmdbId,
-          imdbId
-        );
-      }
+      resolvedRawMirrors = this.appendMovieContingencyMirrors(
+        resolvedRawMirrors,
+        movie.tmdbId
+      );
 
       const mergedMirrors = this.mergePreservingDirectMirrors(
         movie,

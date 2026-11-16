@@ -504,7 +504,7 @@ export default function SmartPlayer({
       const candidateUrls = [
         embedUrl,
         ...backupEmbedUrlsRef.current.filter((u) => Boolean(u) && u !== embedUrl),
-      ];
+      ].slice(0, 2);
       let firstFailureData: ExtractorResponseData | null = null;
 
       for (const candidateUrl of candidateUrls) {
@@ -550,7 +550,7 @@ export default function SmartPlayer({
       }
 
       if (!cancelled) {
-        const resolvedFallback = firstFailureData?.fallbackUrl ?? embedUrl;
+        const resolvedFallback = firstFailureData?.fallbackUrl || embedUrl;
         if (!resolvedFallback) {
           onFatalErrorRef.current?.();
           return;
@@ -753,15 +753,11 @@ export default function SmartPlayer({
         <div className="relative w-full h-full">
           <iframe
             ref={setIframeRefs}
-            key={`${targetIframeUrl}-${modoEscudoActivo && resolvedIsDirty ? "sandboxed" : "clean"}`}
+            key={`${targetIframeUrl}-clean`}
             src={targetIframeUrl}
             title={title || "Reproductor de video"}
             className="w-full h-full border-0"
-            sandbox={
-              modoEscudoActivo && resolvedIsDirty
-                ? "allow-scripts allow-same-origin allow-presentation allow-forms"
-                : undefined
-            }
+            sandbox={undefined}
             allow="autoplay *; fullscreen *; picture-in-picture *; encrypted-media *"
             allowFullScreen
             onError={() => onFatalError?.()}

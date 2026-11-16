@@ -2,6 +2,7 @@ import dns from "dns";
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { tokenCryptoService } from "@/infrastructure/container";
+import { prisma } from "@/infrastructure/database/prismaClient";
 import {
   InvalidTokenError,
   TokenExpiredError,
@@ -16,6 +17,7 @@ import {
 import {
   FALLBACK_IF_EMPTY,
   STRICT_STREAMWISH_ONLY,
+  isExtractableCleanHost,
   isMultiEmbedAggregatorUrl,
   isStreamwish,
   isStreamwishUrl,
@@ -181,10 +183,7 @@ function buildStreamTunnelPlayerHtml(params: {
     streamwishHls,
   } = params;
 
-  const sandboxAttribute =
-    shieldProtectionEnabled && isDirtyIframe
-      ? 'sandbox="allow-scripts allow-same-origin allow-presentation allow-forms"'
-      : "";
+  const sandboxAttribute = "";
 
   const streamwishReferer = (() => {
     try {
@@ -465,6 +464,72 @@ function buildStreamTunnelPlayerHtml(params: {
 </html>`;
 }
 
+async function resolveVidlinkFallbackFromPayload(payload: {
+  episodeId?: string;
+  movieId?: string;
+  rawUrl?: string;
+}): Promise<string | null> {
+  const rawUrl = payload.rawUrl || "";
+  const tvTupleMatch = rawUrl.match(/(\d+)x(\d+)/i);
+  const parsedSeason = tvTupleMatch ? Number(tvTupleMatch[1]) || 1 : 1;
+  const parsedEpisode = tvTupleMatch ? Number(tvTupleMatch[2]) || 1 : 1;
+
+  try {
+    if (payload.episodeId) {
+      const episode = await prisma.episode.findUnique({
+        where: { id: payload.episodeId },
+        select: {
+          episodeNumber: true,
+          season: {
+            select: {
+              seasonNumber: true,
+              series: {
+                select: {
+                  tmdbId: true,
+                },
+              },
+            },
+          },
+        },
+      });
+      const tmdbId = episode?.season?.series?.tmdbId;
+      if (tmdbId) {
+        return `https://vidlink.pro/tv/${tmdbId}/${episode.season.seasonNumber}/${episode.episodeNumber}`;
+      }
+    }
+
+    if (payload.movieId) {
+      const movie = await prisma.movie.findUnique({
+        where: { id: payload.movieId },
+        select: { tmdbId: true, mediaType: true },
+      });
+      if (movie?.tmdbId && movie.mediaType === "MOVIE") {
+        return `https://vidlink.pro/movie/${movie.tmdbId}`;
+      }
+      if (movie?.tmdbId && movie.mediaType === "SERIES") {
+        return `https://vidlink.pro/tv/${movie.tmdbId}/${parsedSeason}/${parsedEpisode}`;
+      }
+    }
+  } catch (error) {
+    console.warn(
+      "[GET /api/stream/[token]] Error resolviendo fallback VidLink en BD:",
+      error
+    );
+  }
+
+  const tvImdbMatch = rawUrl.match(/(tt\d+)-(\d+)x(\d+)/i);
+  if (tvImdbMatch) {
+    return `https://vidsrc.me/embed/tv?imdb=${tvImdbMatch[1]}&season=${Number(tvImdbMatch[2]) || 1}&episode=${Number(tvImdbMatch[3]) || 1}&ds_lang=es`;
+  }
+
+  const movieImdbMatch = rawUrl.match(/(tt\d+)/i);
+  if (movieImdbMatch) {
+    return `https://vidsrc.me/embed/movie?imdb=${movieImdbMatch[1]}&ds_lang=es`;
+  }
+
+  return null;
+}
+
 /**
  * Endpoint Túnel de Reproducción (`GET /api/stream/[token]`).
  *
@@ -576,14 +641,21 @@ export async function GET(
         if (playLatinFallback) {
           finalEmbedUrl = playLatinFallback.url;
           isSecondaryServer = !playLatinFallback.isStreamwish;
-        } else if (
-          embed69Result.status === "NOT_FOUND" ||
-          (STRICT_STREAMWISH_ONLY && !FALLBACK_IF_EMPTY)
-        ) {
-          return buildStreamErrorHtmlResponse(payload.mirrorId);
         } else {
-          finalEmbedUrl = embed69Result.cleanEmbedUrl;
-          isSecondaryServer = true;
+          const vidlinkFallback =
+            await resolveVidlinkFallbackFromPayload(payload);
+          if (vidlinkFallback) {
+            finalEmbedUrl = vidlinkFallback;
+            isSecondaryServer = true;
+          } else if (
+            embed69Result.status === "NOT_FOUND" ||
+            (STRICT_STREAMWISH_ONLY && !FALLBACK_IF_EMPTY)
+          ) {
+            return buildStreamErrorHtmlResponse(payload.mirrorId);
+          } else {
+            finalEmbedUrl = embed69Result.cleanEmbedUrl;
+            isSecondaryServer = true;
+          }
         }
       }
     }
@@ -594,10 +666,6 @@ export async function GET(
     });
     const isDirtyIframe =
       !resolvedIsStreamwish || isMultiEmbedAggregatorUrl(finalEmbedUrl);
-
-    if (STRICT_STREAMWISH_ONLY && !FALLBACK_IF_EMPTY && isDirtyIframe) {
-      return buildStreamErrorHtmlResponse(payload.mirrorId);
-    }
 
     if (isDirtyIframe) {
       isSecondaryServer = true;
@@ -624,8 +692,15 @@ export async function GET(
       serverAllowsShieldMode = membership.isModoEscudoActive;
     }
 
+    const canExtractNativeHls =
+      resolvedIsStreamwish ||
+      isExtractableCleanHost({
+        serverName: payload.serverName,
+        url: finalEmbedUrl,
+      });
+
     const streamwishHls =
-      resolvedIsStreamwish && serverAllowsShieldMode
+      canExtractNativeHls && serverAllowsShieldMode
         ? await extractDirectHlsFromStreamwishEmbed(finalEmbedUrl)
         : null;
 

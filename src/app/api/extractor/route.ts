@@ -424,7 +424,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(
         {
           success: false,
-          fallbackUrl: "",
+          fallbackUrl: fallbackIframeUrl,
           isStreamwish: false,
           isDirty: true,
           reason:
@@ -559,7 +559,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(
         {
           success: false,
-          fallbackUrl: STRICT_STREAMWISH_ONLY ? "" : fallbackIframeUrl,
+          fallbackUrl: fallbackIframeUrl,
           isStreamwish: false,
           isDirty: true,
           reason:

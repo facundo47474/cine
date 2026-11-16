@@ -454,26 +454,14 @@ export function filterAndPrioritizeMirrors<
     (entry) => entry.isStreamwish
   );
 
-  if (strictOnly) {
-    if (streamwishOnlyMirrors.length > 0) {
-      return streamwishOnlyMirrors.map(
-        ({ item, isStreamwish: sw, isDirty }) => ({
-          item,
-          isStreamwish: sw,
-          isDirty,
-        })
-      );
-    }
-
-    if (fallbackIfEmpty) {
-      return sortedMirrors.map(({ item, isStreamwish: sw, isDirty }) => ({
+  if (strictOnly && !fallbackIfEmpty) {
+    return streamwishOnlyMirrors.map(
+      ({ item, isStreamwish: sw, isDirty }) => ({
         item,
         isStreamwish: sw,
         isDirty,
-      }));
-    }
-
-    return [];
+      })
+    );
   }
 
   return sortedMirrors.map(({ item, isStreamwish: sw, isDirty }) => ({

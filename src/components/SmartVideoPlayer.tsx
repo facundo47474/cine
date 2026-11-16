@@ -1182,7 +1182,6 @@ export default function SmartVideoPlayer({
           embedUrl={embedSrcWithResume}
           backupEmbedUrls={orderedStreams
             .slice(activeIndex + 1)
-            .filter((s) => (currentStream.isStreamwish ? s.isStreamwish : true))
             .map((s) => s.streamUrl)}
           title={
             isSeriesPlayer

@@ -529,43 +529,16 @@ export class SeriesService {
     tmdbId: number,
     seasonNumber: number,
     episodeNumber: number,
-    imdbId?: string | null
+    _imdbId?: string | null
   ): CandidateEpisodeMirror[] {
-    const emergencyMirrors: CandidateEpisodeMirror[] = [];
-    let nextPriority = 70;
-
-    if (imdbId && imdbId.trim().startsWith("tt")) {
-      const paddedEpisode = String(episodeNumber).padStart(2, "0");
-      const embed69EpisodeSlug = `${imdbId.trim()}-${seasonNumber}x${paddedEpisode}`;
-
-      emergencyMirrors.push(
-        {
-          serverName: "Embed69-Fallback-Lat",
-          language: "Latino",
-          rawUrl: `https://embed69.org/f/${embed69EpisodeSlug}?lang=LAT&prefer=streamwish`,
-          format: MirrorFormat.EMBED,
-          quality: "1080p",
-          priority: nextPriority++,
-        },
-        {
-          serverName: "Embed69-Fallback-Sub",
-          language: "Inglés (Sub)",
-          rawUrl: `https://embed69.org/f/${embed69EpisodeSlug}?lang=SUB&prefer=streamwish`,
-          format: MirrorFormat.EMBED,
-          quality: "1080p",
-          priority: nextPriority++,
-        }
-      );
-    }
-
-    emergencyMirrors.push(
+    return [
       {
         serverName: "VidLink-Contingencia",
         language: "Inglés (Sub)",
         rawUrl: `https://vidlink.pro/tv/${tmdbId}/${seasonNumber}/${episodeNumber}`,
         format: MirrorFormat.EMBED,
         quality: "1080p",
-        priority: nextPriority++,
+        priority: 70,
       },
       {
         serverName: "VidSrcCC-Contingencia",
@@ -573,7 +546,7 @@ export class SeriesService {
         rawUrl: `https://vidsrc.cc/v2/embed/tv/${tmdbId}/${seasonNumber}/${episodeNumber}`,
         format: MirrorFormat.EMBED,
         quality: "1080p",
-        priority: nextPriority++,
+        priority: 80,
       },
       {
         serverName: "AutoEmbed-Contingencia",
@@ -581,7 +554,7 @@ export class SeriesService {
         rawUrl: `https://autoembed.cc/tv/tmdb/${tmdbId}-${seasonNumber}-${episodeNumber}`,
         format: MirrorFormat.EMBED,
         quality: "1080p",
-        priority: nextPriority++,
+        priority: 90,
       },
       {
         serverName: "Backup-Sub",
@@ -590,10 +563,8 @@ export class SeriesService {
         format: MirrorFormat.EMBED,
         quality: "1080p",
         priority: 99,
-      }
-    );
-
-    return emergencyMirrors;
+      },
+    ];
   }
 
   /**
@@ -669,22 +640,44 @@ export class SeriesService {
                   imdbId
                 );
 
+              const hasResolvedDirectFromResolver = resolvedMirrors.some(
+                (mirror) =>
+                  isStreamwish({
+                    serverName: mirror.serverName,
+                    url: mirror.rawUrl,
+                  }) && !isMultiEmbedAggregatorUrl(mirror.rawUrl)
+              );
+
+              const contingencyMirrors =
+                this.construirMirrorsDeContingenciaParaEpisodio(
+                  tmdbId,
+                  seasonNumber,
+                  episodeNumber,
+                  imdbId
+                ).map((m) => ({
+                  serverName: m.serverName,
+                  language: m.language,
+                  rawUrl: m.rawUrl,
+                  format: m.format,
+                  quality: m.quality,
+                  priority: m.priority,
+                }));
+
+              const seenMirrorUrls = new Set<string>(
+                resolvedMirrors.map((m) => m.rawUrl)
+              );
+
               const effectiveMirrors =
                 resolvedMirrors.length > 0
-                  ? resolvedMirrors
-                  : this.construirMirrorsDeContingenciaParaEpisodio(
-                      tmdbId,
-                      seasonNumber,
-                      episodeNumber,
-                      imdbId
-                    ).map((m) => ({
-                      serverName: m.serverName,
-                      language: m.language,
-                      rawUrl: m.rawUrl,
-                      format: m.format,
-                      quality: m.quality,
-                      priority: m.priority,
-                    }));
+                  ? hasResolvedDirectFromResolver
+                    ? resolvedMirrors
+                    : [
+                        ...resolvedMirrors,
+                        ...contingencyMirrors.filter(
+                          (m) => !seenMirrorUrls.has(m.rawUrl)
+                        ),
+                      ]
+                  : contingencyMirrors;
 
               const hasNewlyResolvedDirect = effectiveMirrors.some(
                 (mirror) =>

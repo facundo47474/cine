@@ -120,21 +120,12 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
 
   /**
    * Construye la lista final priorizada de mirrors fusionando las fuentes extraídas de
-   * `Embed69` y `PlayLatinSrc`, aplicando la política `STRICT_STREAMWISH_ONLY` / `FALLBACK_IF_EMPTY`.
-   *
-   * @param embed69Sources Fuentes categorizadas por idioma desde Embed69.
-   * @param playLatinSources Fuentes categorizadas por idioma desde PlayLatinSrc.
-   * @param multiEmbedFallbackLatUrl URL de respaldo en Embed69 para audio Latino.
-   * @param multiEmbedFallbackSubUrl URL de respaldo en Embed69 para subtitulado.
-   * @param emergencyBackupUrl URL de respaldo de último recurso (`vidsrc.me`).
-   * @returns Lista priorizada de objetos `CreateMirrorInput`.
+   * `Embed69` y `PlayLatinSrc` junto con los servidores multi-mirror de contingencia (`VidLink`, `VidSrcCC`, `AutoEmbed`, `VidSrc`).
    */
   private buildPrioritizedMirrorList(
     embed69Sources: SeparatedLanguageSources,
     playLatinSources: SeparatedLanguageSources,
-    multiEmbedFallbackLatUrl: string | null,
-    multiEmbedFallbackSubUrl: string | null,
-    emergencyBackupUrl: string
+    contingencyMirrors: CreateMirrorInput[]
   ): CreateMirrorInput[] {
     const rawCandidates: TaggedMirrorCandidate[] = [];
     const seenUrls = new Set<string>();
@@ -194,7 +185,7 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
       );
     });
 
-    // 2. CONTINGENCIA: Servidores alternativos ordenados por peso de prioridad
+    // 2. CONTINGENCIA: Servidores alternativos extraíbles ordenados por peso de prioridad
     const rawFallbackLat = Array.from(
       new Set([...embed69Sources.fallbackLat, ...playLatinSources.fallbackLat])
     ).sort(
@@ -232,45 +223,22 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
       );
     });
 
-    if (
-      !hasExtractableAnywhere &&
-      allStreamwishLat.length === 0 &&
-      filteredFallbackLat.length === 0 &&
-      multiEmbedFallbackLatUrl
-    ) {
-      registerMirrorCandidate(
-        multiEmbedFallbackLatUrl,
-        "Embed69-Fallback-Lat",
-        "Latino",
-        70
-      );
-    }
-
     filteredFallbackSub.forEach((url, index) => {
       registerMirrorCandidate(
         url,
         this.detectServerNameFromUrl(url, "Sub"),
         "Inglés (Sub)",
-        80 + index
+        60 + index
       );
     });
 
-    if (
-      !hasExtractableAnywhere &&
-      allStreamwishSub.length === 0 &&
-      filteredFallbackSub.length === 0 &&
-      multiEmbedFallbackSubUrl
-    ) {
+    for (const contingency of contingencyMirrors) {
       registerMirrorCandidate(
-        multiEmbedFallbackSubUrl,
-        "Embed69-Fallback-Sub",
-        "Inglés (Sub)",
-        90
+        contingency.rawUrl,
+        contingency.serverName,
+        contingency.language === "Latino" ? "Latino" : "Inglés (Sub)",
+        contingency.priority ?? 70
       );
-    }
-
-    if (!hasExtractableAnywhere) {
-      registerMirrorCandidate(emergencyBackupUrl, "Backup-En", "Inglés (Sub)", 99);
     }
 
     const prioritizedList = filterAndPrioritizeMirrors(rawCandidates, {
@@ -327,16 +295,45 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
       ]);
     }
 
+    const movieContingencyMirrors: CreateMirrorInput[] = [
+      {
+        serverName: "VidLink-Contingencia",
+        language: "Inglés (Sub)",
+        rawUrl: `https://vidlink.pro/movie/${tmdbId}`,
+        format: MirrorFormat.EMBED,
+        quality: "1080p",
+        priority: 70,
+      },
+      {
+        serverName: "VidSrcCC-Contingencia",
+        language: "Inglés (Sub)",
+        rawUrl: `https://vidsrc.cc/v2/embed/movie/${tmdbId}`,
+        format: MirrorFormat.EMBED,
+        quality: "1080p",
+        priority: 80,
+      },
+      {
+        serverName: "AutoEmbed-Contingencia",
+        language: "Inglés (Sub)",
+        rawUrl: `https://autoembed.cc/movie/tmdb/${tmdbId}`,
+        format: MirrorFormat.EMBED,
+        quality: "1080p",
+        priority: 90,
+      },
+      {
+        serverName: "Backup-Sub",
+        language: "Inglés (Sub)",
+        rawUrl: `https://vidsrc.me/embed/movie?tmdb=${tmdbId}&ds_lang=es`,
+        format: MirrorFormat.EMBED,
+        quality: "1080p",
+        priority: 99,
+      },
+    ];
+
     return this.buildPrioritizedMirrorList(
       embed69Sources,
       playLatinSources,
-      imdbId
-        ? `https://embed69.org/f/${imdbId}?lang=LAT&prefer=streamwish`
-        : null,
-      imdbId
-        ? `https://embed69.org/f/${imdbId}?lang=SUB&prefer=streamwish`
-        : null,
-      `https://vidsrc.me/embed/movie?tmdb=${tmdbId}&ds_lang=es`
+      movieContingencyMirrors
     );
   }
 
@@ -386,16 +383,45 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
       ]);
     }
 
+    const tvContingencyMirrors: CreateMirrorInput[] = [
+      {
+        serverName: "VidLink-Contingencia",
+        language: "Inglés (Sub)",
+        rawUrl: `https://vidlink.pro/tv/${tmdbId}/${seasonNumber}/${episodeNumber}`,
+        format: MirrorFormat.EMBED,
+        quality: "1080p",
+        priority: 70,
+      },
+      {
+        serverName: "VidSrcCC-Contingencia",
+        language: "Inglés (Sub)",
+        rawUrl: `https://vidsrc.cc/v2/embed/tv/${tmdbId}/${seasonNumber}/${episodeNumber}`,
+        format: MirrorFormat.EMBED,
+        quality: "1080p",
+        priority: 80,
+      },
+      {
+        serverName: "AutoEmbed-Contingencia",
+        language: "Inglés (Sub)",
+        rawUrl: `https://autoembed.cc/tv/tmdb/${tmdbId}-${seasonNumber}-${episodeNumber}`,
+        format: MirrorFormat.EMBED,
+        quality: "1080p",
+        priority: 90,
+      },
+      {
+        serverName: "Backup-Sub",
+        language: "Inglés (Sub)",
+        rawUrl: `https://vidsrc.me/embed/tv?tmdb=${tmdbId}&season=${seasonNumber}&episode=${episodeNumber}&ds_lang=es`,
+        format: MirrorFormat.EMBED,
+        quality: "1080p",
+        priority: 99,
+      },
+    ];
+
     return this.buildPrioritizedMirrorList(
       embed69Sources,
       playLatinSources,
-      embed69EpisodeSlug
-        ? `https://embed69.org/f/${embed69EpisodeSlug}?lang=LAT&prefer=streamwish`
-        : null,
-      embed69EpisodeSlug
-        ? `https://embed69.org/f/${embed69EpisodeSlug}?lang=SUB&prefer=streamwish`
-        : null,
-      `https://vidsrc.me/embed/tv?tmdb=${tmdbId}&season=${seasonNumber}&episode=${episodeNumber}&ds_lang=es`
+      tvContingencyMirrors
     );
   }
 }
