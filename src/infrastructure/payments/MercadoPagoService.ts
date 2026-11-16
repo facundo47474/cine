@@ -370,6 +370,19 @@ class MercadoPagoService {
       };
     }
 
+    const alreadyClaimed =
+      await prismaMembershipRepository.isPaymentAlreadyClaimedByAnotherUser(
+        paymentId,
+        dbUser.id
+      );
+    if (alreadyClaimed) {
+      return {
+        ok: false,
+        status: "already_claimed",
+        error: "Este pago ya fue utilizado por otra cuenta.",
+      };
+    }
+
     const rawApprovedDate = payment.date_approved
       ? new Date(payment.date_approved)
       : null;
@@ -405,7 +418,8 @@ class MercadoPagoService {
       dbUser.id,
       "MONTHLY",
       activatedAt,
-      dbUser.email || ref.userEmail
+      dbUser.email || ref.userEmail,
+      paymentId
     );
 
     this.processedPaymentIds.add(paymentId);
@@ -590,57 +604,33 @@ class MercadoPagoService {
       const ref = parseTrustedPaymentExternalReference(
         candidate.external_reference
       );
-      const payerEmail = candidate.payer?.email?.trim().toLowerCase() || "";
-      const isPilotoPayment =
-        Boolean(ref) ||
-        Boolean(candidate.description?.toLowerCase().includes("piloto"));
+      if (!ref) {
+        continue;
+      }
 
-      const matchesUserId = Boolean(ref && cleanUserId && ref.userId === cleanUserId);
+      const matchesUserId = Boolean(cleanUserId && ref.userId === cleanUserId);
       const matchesRefEmail = Boolean(
-        ref &&
-          normalizedEmail &&
+        normalizedEmail &&
           ref.userEmail?.trim().toLowerCase() === normalizedEmail
       );
-      const matchesPayerEmail = Boolean(
-        normalizedEmail && isPilotoPayment && payerEmail === normalizedEmail
-      );
 
-      if (matchesUserId || matchesRefEmail) {
-        return this.processApprovedPayment(String(candidate.id));
+      if (!matchesUserId && !matchesRefEmail) {
+        continue;
       }
 
-      if (matchesPayerEmail) {
-        const dbUser =
-          (cleanUserId
-            ? await prisma.user.findUnique({ where: { id: cleanUserId } })
-            : null) ||
-          (await prisma.user.findFirst({
-            where: {
-              email: {
-                equals: normalizedEmail,
-                mode: "insensitive",
-              },
-            },
-          }));
-
-        if (dbUser) {
-          const paymentDate = new Date(dateMs);
-          const membership =
-            await prismaMembershipRepository.activateProMembership(
-              dbUser.id,
-              "MONTHLY",
-              paymentDate,
-              dbUser.email
-            );
-          this.processedPaymentIds.add(String(candidate.id));
-          return {
-            ok: true,
-            status: "approved",
-            userId: dbUser.id,
-            membership,
-          };
+      const candidatePaymentId = String(candidate.id);
+      if (cleanUserId) {
+        const claimedByAnother =
+          await prismaMembershipRepository.isPaymentAlreadyClaimedByAnotherUser(
+            candidatePaymentId,
+            cleanUserId
+          );
+        if (claimedByAnother) {
+          continue;
         }
       }
+
+      return this.processApprovedPayment(candidatePaymentId);
     }
 
     return {

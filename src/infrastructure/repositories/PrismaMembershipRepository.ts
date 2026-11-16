@@ -10,6 +10,7 @@ import {
 interface StoredMembershipRecord {
   userId: string;
   userEmail?: string | null;
+  paymentId?: string | null;
   plan: MembershipPlan;
   billingCycle: BillingCycle;
   shieldModeEnabled: boolean;
@@ -52,6 +53,7 @@ export class PrismaMembershipRepository {
             CREATE TABLE IF NOT EXISTS "UserMembership" (
               "userId" TEXT PRIMARY KEY,
               "userEmail" TEXT,
+              "paymentId" TEXT,
               "plan" TEXT NOT NULL DEFAULT 'FREE',
               "billingCycle" TEXT NOT NULL DEFAULT 'MONTHLY',
               "shieldModeEnabled" BOOLEAN NOT NULL DEFAULT FALSE,
@@ -67,6 +69,10 @@ export class PrismaMembershipRepository {
             ALTER TABLE "UserMembership"
             ADD COLUMN IF NOT EXISTS "userEmail" TEXT;
           `);
+          await prisma.$executeRawUnsafe(`
+            ALTER TABLE "UserMembership"
+            ADD COLUMN IF NOT EXISTS "paymentId" TEXT;
+          `);
           return true;
         } catch (error) {
           console.warn(
@@ -80,6 +86,48 @@ export class PrismaMembershipRepository {
     }
 
     return this.tableReadyPromise;
+  }
+
+  /**
+   * Verifica si un `paymentId` de MercadoPago ya fue reclamado por otra cuenta de usuario diferente.
+   */
+  public async isPaymentAlreadyClaimedByAnotherUser(
+    paymentId: string,
+    userId: string
+  ): Promise<boolean> {
+    const cleanPaymentId = String(paymentId || "").trim();
+    if (!cleanPaymentId || !userId) {
+      return false;
+    }
+
+    const dbAvailable = await this.ensureMembershipTable();
+    if (dbAvailable) {
+      try {
+        const rows = await prisma.$queryRaw<Array<{ userId: string }>>`
+          SELECT "userId"
+          FROM "UserMembership"
+          WHERE "paymentId" = ${cleanPaymentId}
+            AND "userId" <> ${userId}
+          LIMIT 1
+        `;
+        if (rows.length > 0) {
+          return true;
+        }
+      } catch (error) {
+        console.warn(
+          "[PrismaMembershipRepository] Error verificando paymentId reclamado:",
+          error
+        );
+      }
+    }
+
+    let claimedInMemory = false;
+    memoryMembershipFallback.forEach((entry) => {
+      if (entry.paymentId === cleanPaymentId && entry.userId !== userId) {
+        claimedInMemory = true;
+      }
+    });
+    return claimedInMemory;
   }
 
   private async resolveEmailForUser(
@@ -115,6 +163,7 @@ export class PrismaMembershipRepository {
               Array<{
                 userId: string;
                 userEmail: string | null;
+                paymentId: string | null;
                 plan: string;
                 billingCycle: string;
                 shieldModeEnabled: boolean;
@@ -122,7 +171,7 @@ export class PrismaMembershipRepository {
                 expiresAt: Date | null;
               }>
             >`
-              SELECT "userId", "userEmail", "plan", "billingCycle", "shieldModeEnabled", "updatedAt", "expiresAt"
+              SELECT "userId", "userEmail", "paymentId", "plan", "billingCycle", "shieldModeEnabled", "updatedAt", "expiresAt"
               FROM "UserMembership"
               WHERE "userId" = ${userId}
                  OR LOWER("userEmail") = ${normalizedEmail}
@@ -133,6 +182,7 @@ export class PrismaMembershipRepository {
               Array<{
                 userId: string;
                 userEmail: string | null;
+                paymentId: string | null;
                 plan: string;
                 billingCycle: string;
                 shieldModeEnabled: boolean;
@@ -140,7 +190,7 @@ export class PrismaMembershipRepository {
                 expiresAt: Date | null;
               }>
             >`
-              SELECT "userId", "userEmail", "plan", "billingCycle", "shieldModeEnabled", "updatedAt", "expiresAt"
+              SELECT "userId", "userEmail", "paymentId", "plan", "billingCycle", "shieldModeEnabled", "updatedAt", "expiresAt"
               FROM "UserMembership"
               WHERE "userId" = ${userId}
               LIMIT 1
@@ -168,6 +218,7 @@ export class PrismaMembershipRepository {
           const normalized: StoredMembershipRecord = {
             userId: row.userId,
             userEmail: normalizeEmail(row.userEmail) || normalizedEmail,
+            paymentId: row.paymentId ?? null,
             plan: normalizedPlan,
             billingCycle: row.billingCycle === "ANNUAL" ? "ANNUAL" : "MONTHLY",
             shieldModeEnabled: Boolean(row.shieldModeEnabled),
@@ -206,6 +257,7 @@ export class PrismaMembershipRepository {
   private async upsertStoredRecord(record: {
     userId: string;
     userEmail?: string | null;
+    paymentId?: string | null;
     plan: MembershipPlan;
     billingCycle: BillingCycle;
     shieldModeEnabled: boolean;
@@ -217,9 +269,12 @@ export class PrismaMembershipRepository {
       record.userId,
       record.userEmail
     );
+    const resolvedPaymentId =
+      record.plan === "FREE" ? null : (record.paymentId ?? null);
     const nextRecord: StoredMembershipRecord = {
       userId: record.userId,
       userEmail: resolvedEmail,
+      paymentId: resolvedPaymentId,
       plan: record.plan,
       billingCycle: record.billingCycle,
       shieldModeEnabled: record.shieldModeEnabled,
@@ -233,11 +288,15 @@ export class PrismaMembershipRepository {
     if (dbAvailable) {
       try {
         await prisma.$executeRaw`
-          INSERT INTO "UserMembership" ("userId", "userEmail", "plan", "billingCycle", "shieldModeEnabled", "updatedAt", "expiresAt")
-          VALUES (${nextRecord.userId}, ${nextRecord.userEmail ?? null}, ${nextRecord.plan}, ${nextRecord.billingCycle}, ${nextRecord.shieldModeEnabled}, ${now}, ${nextRecord.expiresAt})
+          INSERT INTO "UserMembership" ("userId", "userEmail", "paymentId", "plan", "billingCycle", "shieldModeEnabled", "updatedAt", "expiresAt")
+          VALUES (${nextRecord.userId}, ${nextRecord.userEmail ?? null}, ${nextRecord.paymentId ?? null}, ${nextRecord.plan}, ${nextRecord.billingCycle}, ${nextRecord.shieldModeEnabled}, ${now}, ${nextRecord.expiresAt})
           ON CONFLICT ("userId")
           DO UPDATE SET
             "userEmail" = COALESCE(EXCLUDED."userEmail", "UserMembership"."userEmail"),
+            "paymentId" = CASE
+              WHEN EXCLUDED."plan" = 'FREE' THEN NULL
+              ELSE COALESCE(EXCLUDED."paymentId", "UserMembership"."paymentId")
+            END,
             "plan" = EXCLUDED."plan",
             "billingCycle" = EXCLUDED."billingCycle",
             "shieldModeEnabled" = EXCLUDED."shieldModeEnabled",
@@ -283,6 +342,7 @@ export class PrismaMembershipRepository {
         return this.upsertStoredRecord({
           userId: existing.userId,
           userEmail: userEmail || existing.userEmail,
+          paymentId: null,
           plan: "FREE",
           billingCycle: "MONTHLY",
           shieldModeEnabled: false,
@@ -306,7 +366,8 @@ export class PrismaMembershipRepository {
     userId: string,
     billingCycle: BillingCycle = "MONTHLY",
     activatedAt?: Date,
-    userEmail?: string | null
+    userEmail?: string | null,
+    paymentId?: string | null
   ): Promise<UserMembershipStatusDto> {
     const start = activatedAt ? new Date(activatedAt) : new Date();
     const expiresAt = new Date(
@@ -316,6 +377,7 @@ export class PrismaMembershipRepository {
     return this.upsertStoredRecord({
       userId,
       userEmail,
+      paymentId: paymentId ?? null,
       plan: "PRO",
       billingCycle: billingCycle === "ANNUAL" ? "ANNUAL" : "MONTHLY",
       shieldModeEnabled: true,
@@ -334,6 +396,7 @@ export class PrismaMembershipRepository {
     return this.upsertStoredRecord({
       userId,
       userEmail,
+      paymentId: null,
       plan: "FREE",
       billingCycle: "MONTHLY",
       shieldModeEnabled: false,
