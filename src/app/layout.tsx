@@ -3,15 +3,26 @@ import "./globals.css";
 import AuthSessionProvider from "@/components/AuthSessionProvider";
 
 export const metadata: Metadata = {
+  metadataBase: new URL("https://cine-ddbt.vercel.app"),
   title: "PILOTO | Streaming",
-  description: "Plataforma privada de películas, series y estrenos.",
+  description: "Plataforma de streaming de películas, series y estrenos.",
   icons: {
-    icon: [
-      { url: "/favicon.ico", sizes: "any" },
-      { url: "/icon.svg", type: "image/svg+xml" },
-    ],
-    shortcut: ["/favicon.ico"],
-    apple: [{ url: "/icon.svg", type: "image/svg+xml" }],
+    icon: [{ url: "/logo.jpg", type: "image/jpeg" }],
+    shortcut: ["/logo.jpg"],
+    apple: [{ url: "/logo.jpg", type: "image/jpeg" }],
+  },
+  openGraph: {
+    title: "PILOTO | Streaming",
+    description: "Plataforma de streaming de películas, series y estrenos.",
+    url: "https://cine-ddbt.vercel.app",
+    siteName: "PILOTO Streaming",
+    locale: "es_AR",
+    type: "website",
+    images: [{ url: "/logo.jpg", alt: "PILOTO Streaming Logo" }],
+  },
+  robots: {
+    index: true,
+    follow: true,
   },
   appleWebApp: {
     capable: true,
@@ -35,6 +46,14 @@ export default function RootLayout({
 }) {
   return (
     <html lang="es">
+      <head>
+        <link
+          rel="preconnect"
+          href="https://image.tmdb.org"
+          crossOrigin="anonymous"
+        />
+        <link rel="dns-prefetch" href="https://image.tmdb.org" />
+      </head>
       <body className="min-h-screen bg-[#141414] text-white antialiased selection:bg-netflix-red selection:text-white">
         <AuthSessionProvider>{children}</AuthSessionProvider>
       </body>

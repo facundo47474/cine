@@ -17,6 +17,10 @@ import {
   EpisodePlaybackDto,
 } from "../dto/SeriesDto";
 import {
+  buildTvEpisodeContingencyMirrors,
+  isBrokenOrLegacyContingencyUrl,
+} from "@/domain/utils/contingencyMirrors";
+import {
   FALLBACK_IF_EMPTY,
   STRICT_STREAMWISH_ONLY,
   filterAndPrioritizeMirrors,
@@ -531,40 +535,7 @@ export class SeriesService {
     episodeNumber: number,
     _imdbId?: string | null
   ): CandidateEpisodeMirror[] {
-    return [
-      {
-        serverName: "VidLink-Contingencia",
-        language: "Inglés (Sub)",
-        rawUrl: `https://vidlink.pro/tv/${tmdbId}/${seasonNumber}/${episodeNumber}`,
-        format: MirrorFormat.EMBED,
-        quality: "1080p",
-        priority: 70,
-      },
-      {
-        serverName: "VidSrcCC-Contingencia",
-        language: "Inglés (Sub)",
-        rawUrl: `https://vidsrc.cc/v2/embed/tv/${tmdbId}/${seasonNumber}/${episodeNumber}`,
-        format: MirrorFormat.EMBED,
-        quality: "1080p",
-        priority: 80,
-      },
-      {
-        serverName: "AutoEmbed-Contingencia",
-        language: "Inglés (Sub)",
-        rawUrl: `https://autoembed.cc/tv/tmdb/${tmdbId}-${seasonNumber}-${episodeNumber}`,
-        format: MirrorFormat.EMBED,
-        quality: "1080p",
-        priority: 90,
-      },
-      {
-        serverName: "Backup-Sub",
-        language: "Inglés (Sub)",
-        rawUrl: `https://vidsrc.me/embed/tv?tmdb=${tmdbId}&season=${seasonNumber}&episode=${episodeNumber}&ds_lang=es`,
-        format: MirrorFormat.EMBED,
-        quality: "1080p",
-        priority: 99,
-      },
-    ];
+    return buildTvEpisodeContingencyMirrors(tmdbId, seasonNumber, episodeNumber);
   }
 
   /**
@@ -687,9 +658,14 @@ export class SeriesService {
                   }) && !isMultiEmbedAggregatorUrl(mirror.rawUrl)
               );
 
+              const hasBrokenContingencyInDb = existingPlayableMirrors.some(
+                (mirror) => isBrokenOrLegacyContingencyUrl(mirror.rawUrl)
+              );
+
               let persistedEpisodeMirrors = existingPlayableMirrors;
               if (
                 hasNewlyResolvedDirect ||
+                hasBrokenContingencyInDb ||
                 (existingPlayableMirrors.length === 0 &&
                   effectiveMirrors.length > 0)
               ) {
@@ -704,7 +680,10 @@ export class SeriesService {
                 }
               }
 
-              if (persistedEpisodeMirrors.length > 0 && hasNewlyResolvedDirect) {
+              if (
+                persistedEpisodeMirrors.length > 0 &&
+                (hasNewlyResolvedDirect || hasBrokenContingencyInDb)
+              ) {
                 return persistedEpisodeMirrors.map((mirror) => ({
                   id: `ep-${mirror.id}`,
                   serverName: mirror.serverName,

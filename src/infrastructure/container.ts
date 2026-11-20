@@ -35,7 +35,8 @@ export const catalogService = new CatalogService(
   movieRepository,
   tokenCryptoService,
   tmdbGateway,
-  mirrorResolver
+  mirrorResolver,
+  cacheService
 );
 
 export const healthCheckerService = new HealthCheckerService(

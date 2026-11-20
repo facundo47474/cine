@@ -14,7 +14,7 @@ interface MovieRowProps {
 /**
  * Carrusel horizontal deslizable estilo Netflix para mostrar una colección temática de películas o series (`MovieRow`).
  */
-export default function MovieRow({ title, subtitle, movies }: MovieRowProps) {
+function MovieRow({ title, subtitle, movies }: MovieRowProps) {
   const rowRef = useRef<HTMLDivElement | null>(null);
 
   if (!movies || movies.length === 0) return null;
@@ -31,7 +31,10 @@ export default function MovieRow({ title, subtitle, movies }: MovieRowProps) {
   };
 
   return (
-    <section className="space-y-3 py-3 relative group/row">
+    <section
+      className="space-y-3 py-3 relative group/row"
+      style={{ contentVisibility: "auto", containIntrinsicSize: "340px" }}
+    >
       <div className="px-4 sm:px-8 max-w-7xl mx-auto flex items-end justify-between">
         <div>
           <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">
@@ -81,3 +84,5 @@ export default function MovieRow({ title, subtitle, movies }: MovieRowProps) {
     </section>
   );
 }
+
+export default React.memo(MovieRow);

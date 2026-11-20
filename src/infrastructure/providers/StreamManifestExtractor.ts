@@ -142,9 +142,41 @@ export function extractStreamCandidatesFromHtmlAndScripts(
   return candidates;
 }
 
+export async function resolveFirstNonNull<T>(
+  tasks: Promise<T | null>[]
+): Promise<T | null> {
+  if (tasks.length === 0) return null;
+
+  return new Promise((resolve) => {
+    let remaining = tasks.length;
+    let settled = false;
+
+    for (const task of tasks) {
+      task
+        .then((result) => {
+          if (!settled && result !== null && result !== undefined) {
+            settled = true;
+            resolve(result);
+            return;
+          }
+          remaining -= 1;
+          if (!settled && remaining <= 0) {
+            resolve(null);
+          }
+        })
+        .catch(() => {
+          remaining -= 1;
+          if (!settled && remaining <= 0) {
+            resolve(null);
+          }
+        });
+    }
+  });
+}
+
 /**
  * Verifica que un candidato de stream esté vivo y devuelva un manifiesto `#EXTM3U` válido
- * cuando es de tipo HLS.
+ * cuando es de tipo HLS, o cabecera/rango válido cuando es MP4 directo.
  *
  * @param candidate Candidato de stream extraído.
  * @param referer Cabecera Referer requerida por el CDN de origen.
@@ -154,10 +186,33 @@ export function extractStreamCandidatesFromHtmlAndScripts(
 export async function verifyExtractedStreamCandidateAlive(
   candidate: ExtractedStreamCandidate,
   referer: string,
-  timeoutMs: number = 2800
+  timeoutMs: number = 2200
 ): Promise<boolean> {
   if (candidate.type === "mp4") {
-    return true;
+    try {
+      const originHeader = (() => {
+        try {
+          return new URL(referer).origin;
+        } catch {
+          return new URL(candidate.streamUrl).origin;
+        }
+      })();
+      const response = await fetch(candidate.streamUrl, {
+        method: "GET",
+        headers: {
+          "User-Agent": DEFAULT_SCRAPER_USER_AGENT,
+          Referer: referer,
+          Origin: originHeader,
+          Range: "bytes=0-1023",
+          Accept: "*/*",
+        },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      await response.body?.cancel().catch(() => {});
+      return response.ok || response.status === 206;
+    } catch {
+      return false;
+    }
   }
 
   try {
@@ -183,12 +238,11 @@ export async function verifyExtractedStreamCandidateAlive(
 }
 
 /**
- * Extrae el flujo HLS `.m3u8` directo para un enlace embed de Streamwish o Vidhide,
- * resolviendo el manifiesto maestro (`hls4`) a una lista de segmentos con URLs absolutas (`inlineM3u8`)
- * o retornando el enlace `hls2` de respaldo.
+ * Extrae el flujo HLS `.m3u8` / `.mp4` directo para un enlace embed de Streamwish, Vidhide o Dropload
+ * usando carrera rápida al primer espejo vivo y proxificado mediante `/api/stream-proxy`.
  *
- * @param embedUrl URL del embed de Streamwish o Vidhide.
- * @returns Información del stream HLS listo para inyectar en `<video>` o `null` si no pudo extraerse.
+ * @param embedUrl URL del embed de Streamwish, Vidhide o Dropload.
+ * @returns Información del stream listo para reproducir vía `/api/stream-proxy` o `null`.
  */
 export async function extractDirectHlsFromStreamwishEmbed(
   embedUrl: string
@@ -198,155 +252,78 @@ export async function extractDirectHlsFromStreamwishEmbed(
     if (!codeMatch) return null;
 
     const isVidhideHost = /morencius\.com|vidhide/i.test(embedUrl);
+    const isDroploadHost = /dr0pstream\.com|dropload/i.test(embedUrl);
     const isStreamwishHost = isStreamwishUrl(embedUrl);
-    if (!isStreamwishHost && !isVidhideHost) return null;
+    if (!isStreamwishHost && !isVidhideHost && !isDroploadHost) return null;
 
-    const fileCode = codeMatch[1];
-    const extractionTargets = isVidhideHost
-      ? [
-          {
-            url: embedUrl,
-            origin: new URL(embedUrl).origin,
-            referer: "https://embed69.org/",
-          },
-        ]
-      : buildStreamwishExtractionTargets(embedUrl).map((target) => ({
-          url: target.fetchUrl,
-          origin: new URL(target.fetchUrl).origin,
-          referer: target.referer,
-        }));
+    const extractionTargets =
+      isVidhideHost || isDroploadHost
+        ? [
+            {
+              url: embedUrl,
+              origin: new URL(embedUrl).origin,
+              referer: `${new URL(embedUrl).origin}/`,
+            },
+          ]
+        : buildStreamwishExtractionTargets(embedUrl).map((target) => ({
+            url: target.fetchUrl,
+            origin: new URL(target.fetchUrl).origin,
+            referer: target.referer,
+          }));
 
-    const probeSingleOrigin = async (target: {
+    const probeOriginToLiveHls = async (target: {
       url: string;
       origin: string;
       referer: string;
-    }): Promise<{ origin: string; combinedText: string } | null> => {
+    }): Promise<DirectHlsStreamInfo | null> => {
       try {
         const response = await fetch(target.url, {
           headers: {
             "User-Agent": DEFAULT_SCRAPER_USER_AGENT,
             Referer: target.referer,
           },
-          signal: AbortSignal.timeout(2500),
+          signal: AbortSignal.timeout(3200),
         });
         if (!response.ok) return null;
 
+        const finalUrl = response.url || target.url;
+        const resolvedOrigin = new URL(finalUrl).origin;
+        const streamReferer = `${resolvedOrigin}/`;
         const html = await response.text();
         const unpacked = unpackDeanEdwardsPackedScripts(html);
         const combinedText = unpacked ? `${html}\n${unpacked}` : html;
 
-        if (!/"hls4"|"hls2"|file\s*:\s*["'][^"']+\.m3u8/i.test(combinedText)) {
-          return null;
-        }
-        return { origin: target.origin, combinedText };
+        const candidates = extractStreamCandidatesFromHtmlAndScripts(
+          combinedText,
+          resolvedOrigin
+        );
+        if (candidates.length === 0) return null;
+
+        const firstAlive = await resolveFirstNonNull(
+          candidates.slice(0, 4).map(async (candidate) => {
+            const ok = await verifyExtractedStreamCandidateAlive(
+              candidate,
+              streamReferer,
+              2200
+            );
+            return ok ? candidate : null;
+          })
+        );
+        if (!firstAlive) return null;
+
+        return {
+          hlsUrl: firstAlive.streamUrl,
+          posterUrl: firstAlive.posterUrl || "",
+          durationSeconds: firstAlive.durationSeconds,
+        };
       } catch {
         return null;
       }
     };
 
-    const originResponses = await Promise.all(
-      extractionTargets.map((target) => probeSingleOrigin(target))
+    return await resolveFirstNonNull(
+      extractionTargets.map((target) => probeOriginToLiveHls(target))
     );
-    const winningOrigin = originResponses.find(
-      (result): result is { origin: string; combinedText: string } =>
-        Boolean(result)
-    );
-
-    if (!winningOrigin) return null;
-
-    const { origin, combinedText } = winningOrigin;
-    const hls4Match = combinedText.match(/"hls4"\s*:\s*"([^"]+)"/);
-    const hls2Match = combinedText.match(/"hls2"\s*:\s*"([^"]+)"/);
-    const fileMatch = combinedText.match(
-      /file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i
-    );
-    const posterMatch = combinedText.match(/image\s*:\s*["']([^"']+)["']/i);
-    const durationMatch = combinedText.match(
-      /duration\s*:\s*["']?([0-9.]+)["']?/i
-    );
-
-    const durationSeconds = durationMatch
-      ? Math.floor(Number(durationMatch[1]) || 0)
-      : undefined;
-    const posterUrl = posterMatch?.[1] || "";
-
-    const masterCandidate = hls4Match?.[1] || fileMatch?.[1];
-    if (masterCandidate) {
-      try {
-        const masterUrl = masterCandidate.startsWith("http")
-          ? masterCandidate
-          : `${origin}${masterCandidate}`;
-
-        const masterResponse = await fetch(masterUrl, {
-          headers: {
-            "User-Agent": DEFAULT_SCRAPER_USER_AGENT,
-            Referer: `${origin}/e/${fileCode}`,
-          },
-          signal: AbortSignal.timeout(2500),
-        });
-
-        if (masterResponse.ok) {
-          const masterPlaylistText = await masterResponse.text();
-          const variantLines = masterPlaylistText
-            .split("\n")
-            .map((line) => line.trim())
-            .filter((line) => Boolean(line) && !line.startsWith("#"));
-
-          if (variantLines.length > 0) {
-            const highestQualityVariant = variantLines[variantLines.length - 1];
-            const variantUrl = new URL(
-              highestQualityVariant,
-              masterUrl
-            ).toString();
-
-            const variantResponse = await fetch(variantUrl, {
-              headers: {
-                "User-Agent": DEFAULT_SCRAPER_USER_AGENT,
-                Referer: `${origin}/e/${fileCode}`,
-              },
-              signal: AbortSignal.timeout(2500),
-            });
-
-            if (variantResponse.ok) {
-              const rawVariantM3u8 = await variantResponse.text();
-              if (rawVariantM3u8.includes("#EXTM3U")) {
-                const absoluteM3u8 = rawVariantM3u8
-                  .split("\n")
-                  .map((line) => {
-                    const trimmed = line.trim();
-                    if (!trimmed || trimmed.startsWith("#")) return trimmed;
-                    try {
-                      return new URL(trimmed, variantUrl).toString();
-                    } catch {
-                      return trimmed;
-                    }
-                  })
-                  .join("\n");
-
-                return {
-                  hlsUrl: variantUrl,
-                  inlineM3u8: absoluteM3u8,
-                  posterUrl,
-                  durationSeconds,
-                };
-              }
-            }
-          }
-        }
-      } catch {
-        // Si falla la resolución de hls4, cae al respaldo hls2
-      }
-    }
-
-    if (hls2Match?.[1]?.startsWith("http")) {
-      return {
-        hlsUrl: hls2Match[1],
-        posterUrl,
-        durationSeconds,
-      };
-    }
-
-    return null;
   } catch {
     return null;
   }

@@ -15,6 +15,12 @@ import {
   getClientIp,
 } from "@/infrastructure/security/RateLimiter";
 import {
+  PLUS_STRICT_IFRAME_SANDBOX,
+  getPlusCleanEmbedUrl,
+  isBrokenOrLegacyContingencyUrl,
+  isSandboxCompatibleEmbedUrl,
+} from "@/domain/utils/contingencyMirrors";
+import {
   FALLBACK_IF_EMPTY,
   STRICT_STREAMWISH_ONLY,
   isExtractableCleanHost,
@@ -164,6 +170,7 @@ function buildStreamTunnelPlayerHtml(params: {
   mirrorId: string;
   targetIframeUrl: string;
   escapedRawUrl: string;
+  plusSafeFallbackUrl?: string | null;
   isTvMode: boolean;
   isSecondaryServer: boolean;
   isDirtyIframe: boolean;
@@ -175,15 +182,28 @@ function buildStreamTunnelPlayerHtml(params: {
     mirrorId,
     targetIframeUrl,
     escapedRawUrl,
+    plusSafeFallbackUrl,
     isTvMode,
     isSecondaryServer,
-    isDirtyIframe,
     shieldProtectionEnabled,
     resumeSeconds,
     streamwishHls,
   } = params;
 
-  const sandboxAttribute = "";
+  const sandboxAttribute =
+    shieldProtectionEnabled && isSandboxCompatibleEmbedUrl(targetIframeUrl)
+      ? `sandbox="${PLUS_STRICT_IFRAME_SANDBOX}"`
+      : "";
+
+  const resolvedNativeFallbackUrl =
+    shieldProtectionEnabled && plusSafeFallbackUrl
+      ? plusSafeFallbackUrl
+      : targetIframeUrl;
+  const resolvedNativeFallbackSandbox =
+    shieldProtectionEnabled &&
+    isSandboxCompatibleEmbedUrl(resolvedNativeFallbackUrl)
+      ? `sandbox="${PLUS_STRICT_IFRAME_SANDBOX}"`
+      : "";
 
   const streamwishReferer = (() => {
     try {
@@ -236,24 +256,7 @@ function buildStreamTunnelPlayerHtml(params: {
         });
       } catch (e) {
         window.open = function() { return null; };
-      }
-      window.onbeforeunload = function(e) {
-        try {
-          if (document.activeElement && document.activeElement.tagName === "IFRAME") {
-            e.preventDefault();
-            e.returnValue = "";
-            return "";
-          }
-        } catch (err) {}
-      };
-      window.addEventListener("blur", function() {
-        setTimeout(function() {
-          try { window.focus(); } catch (e) {}
-        }, 25);
-        setTimeout(function() {
-          try { window.focus(); } catch (e) {}
-        }, 120);
-      });`
+      }`
           : ""
       }
       window.addEventListener("message", function(event) {
@@ -314,22 +317,23 @@ function buildStreamTunnelPlayerHtml(params: {
       var knownDurationSec = ${JSON.stringify(
         streamwishHls.durationSeconds || 0
       )};
-      var fallbackIframeUrl = ${JSON.stringify(targetIframeUrl)};
+      var fallbackIframeUrl = ${JSON.stringify(resolvedNativeFallbackUrl)};
+      var fallbackSandboxAttr = ${JSON.stringify(resolvedNativeFallbackSandbox)};
       var startSec = ${resumeSeconds};
       var switchedToIframe = false;
+      var streamRefererValue = ${JSON.stringify(streamwishReferer)};
 
-      var activeHlsSource = hlsUrl;
-      if (inlineM3u8) {
-        try {
-          var m3u8Blob = new Blob([inlineM3u8], { type: "application/vnd.apple.mpegurl" });
-          activeHlsSource = URL.createObjectURL(m3u8Blob);
-        } catch (e) {}
-      }
+      var activeHlsSource =
+        "/api/stream-proxy?url=" +
+        encodeURIComponent(hlsUrl) +
+        "&referer=" +
+        encodeURIComponent(streamRefererValue);
 
       function switchToEmbedIframe() {
         if (switchedToIframe || !root) return;
         switchedToIframe = true;
-        root.innerHTML = '<iframe src="' + fallbackIframeUrl.replace(/"/g, "&quot;") + '" allow="autoplay *; fullscreen *; picture-in-picture *; encrypted-media *" allowfullscreen webkitallowfullscreen="true" mozallowfullscreen="true" referrerpolicy="origin"></iframe>';
+        var sbxAttr = fallbackSandboxAttr ? (" " + fallbackSandboxAttr) : "";
+        root.innerHTML = '<iframe src="' + fallbackIframeUrl.replace(/"/g, "&quot;") + '"' + sbxAttr + ' allow="autoplay *; fullscreen *; picture-in-picture *; encrypted-media *" allowfullscreen webkitallowfullscreen="true" mozallowfullscreen="true" referrerpolicy="origin"></iframe>';
       }
 
       function reportTime() {
@@ -464,7 +468,7 @@ function buildStreamTunnelPlayerHtml(params: {
 </html>`;
 }
 
-async function resolveVidlinkFallbackFromPayload(payload: {
+async function resolveContingencyFallbackFromPayload(payload: {
   episodeId?: string;
   movieId?: string;
   rawUrl?: string;
@@ -494,7 +498,12 @@ async function resolveVidlinkFallbackFromPayload(payload: {
       });
       const tmdbId = episode?.season?.series?.tmdbId;
       if (tmdbId) {
-        return `https://vidlink.pro/tv/${tmdbId}/${episode.season.seasonNumber}/${episode.episodeNumber}`;
+        return getPlusCleanEmbedUrl({
+          mediaType: "SERIES",
+          tmdbId,
+          seasonNumber: episode.season.seasonNumber,
+          episodeNumber: episode.episodeNumber,
+        });
       }
     }
 
@@ -504,15 +513,23 @@ async function resolveVidlinkFallbackFromPayload(payload: {
         select: { tmdbId: true, mediaType: true },
       });
       if (movie?.tmdbId && movie.mediaType === "MOVIE") {
-        return `https://vidlink.pro/movie/${movie.tmdbId}`;
+        return getPlusCleanEmbedUrl({
+          mediaType: "MOVIE",
+          tmdbId: movie.tmdbId,
+        });
       }
       if (movie?.tmdbId && movie.mediaType === "SERIES") {
-        return `https://vidlink.pro/tv/${movie.tmdbId}/${parsedSeason}/${parsedEpisode}`;
+        return getPlusCleanEmbedUrl({
+          mediaType: "SERIES",
+          tmdbId: movie.tmdbId,
+          seasonNumber: parsedSeason,
+          episodeNumber: parsedEpisode,
+        });
       }
     }
   } catch (error) {
     console.warn(
-      "[GET /api/stream/[token]] Error resolviendo fallback VidLink en BD:",
+      "[GET /api/stream/[token]] Error resolviendo fallback de contingencia en BD:",
       error
     );
   }
@@ -642,10 +659,10 @@ export async function GET(
           finalEmbedUrl = playLatinFallback.url;
           isSecondaryServer = !playLatinFallback.isStreamwish;
         } else {
-          const vidlinkFallback =
-            await resolveVidlinkFallbackFromPayload(payload);
-          if (vidlinkFallback) {
-            finalEmbedUrl = vidlinkFallback;
+          const contingencyFallback =
+            await resolveContingencyFallbackFromPayload(payload);
+          if (contingencyFallback) {
+            finalEmbedUrl = contingencyFallback;
             isSecondaryServer = true;
           } else if (
             embed69Result.status === "NOT_FOUND" ||
@@ -657,6 +674,15 @@ export async function GET(
             isSecondaryServer = true;
           }
         }
+      }
+    }
+
+    if (isBrokenOrLegacyContingencyUrl(finalEmbedUrl)) {
+      const replacementEmbedUrl =
+        await resolveContingencyFallbackFromPayload(payload);
+      if (replacementEmbedUrl) {
+        finalEmbedUrl = replacementEmbedUrl;
+        isSecondaryServer = true;
       }
     }
 
@@ -675,11 +701,6 @@ export async function GET(
       0,
       Math.floor(Number(request.nextUrl.searchParams.get("t") || "0") || 0)
     );
-    const urlWithResume = appendResumeTimeParam(finalEmbedUrl, resumeSeconds);
-    const targetIframeUrl = isTvMode
-      ? appendAutoplayParam(urlWithResume)
-      : urlWithResume;
-    const escapedRawUrl = escapeHtmlAttribute(targetIframeUrl);
 
     let serverAllowsShieldMode = false;
     if (isTvMode) {
@@ -704,10 +725,32 @@ export async function GET(
         ? await extractDirectHlsFromStreamwishEmbed(finalEmbedUrl)
         : null;
 
+    let plusSafeFallbackUrl: string | null = null;
+    if (serverAllowsShieldMode) {
+      if (streamwishHls || !isSandboxCompatibleEmbedUrl(finalEmbedUrl)) {
+        const cleanReplacement =
+          await resolveContingencyFallbackFromPayload(payload);
+        if (cleanReplacement) {
+          plusSafeFallbackUrl = cleanReplacement;
+          if (!streamwishHls && !isSandboxCompatibleEmbedUrl(finalEmbedUrl)) {
+            finalEmbedUrl = cleanReplacement;
+            isSecondaryServer = true;
+          }
+        }
+      }
+    }
+
+    const urlWithResume = appendResumeTimeParam(finalEmbedUrl, resumeSeconds);
+    const targetIframeUrl = isTvMode
+      ? appendAutoplayParam(urlWithResume)
+      : urlWithResume;
+    const escapedRawUrl = escapeHtmlAttribute(targetIframeUrl);
+
     const html = buildStreamTunnelPlayerHtml({
       mirrorId: payload.mirrorId,
       targetIframeUrl,
       escapedRawUrl,
+      plusSafeFallbackUrl,
       isTvMode,
       isSecondaryServer,
       isDirtyIframe,
@@ -725,7 +768,7 @@ export async function GET(
           ? "no-referrer"
           : "strict-origin-when-cross-origin",
         "Permissions-Policy":
-          "fullscreen=*, autoplay=*, picture-in-picture=*",
+          "fullscreen=*, autoplay=*, picture-in-picture=*, payment=(), geolocation=(), camera=(), microphone=()",
         "Content-Security-Policy":
           "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; frame-src * data: blob:; frame-ancestors 'self'; form-action 'none';",
       },

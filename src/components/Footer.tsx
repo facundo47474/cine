@@ -2,7 +2,7 @@
 
 import React from "react";
 import Link from "next/link";
-import { Film, ShieldCheck } from "lucide-react";
+import { ShieldCheck } from "lucide-react";
 
 export default function Footer() {
   return (
@@ -12,15 +12,18 @@ export default function Footer() {
           {/* Identidad de la plataforma */}
           <div className="flex flex-col items-center md:items-start space-y-3">
             <Link className="inline-flex items-center gap-2.5 group" href="/">
-              <div className="w-8 h-8 rounded-lg bg-netflix-red flex items-center justify-center shadow-lg shadow-red-900/40">
-                <Film className="w-4 h-4 text-white" />
-              </div>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src="/logo.jpg"
+                alt="PILOTO Logo"
+                className="w-8 h-8 rounded-full object-cover border border-white/25 bg-white shadow-lg"
+              />
               <span className="text-xl font-black tracking-tighter text-netflix-red group-hover:text-red-500 transition">
                 PILOTO
               </span>
             </Link>
             <p className="text-xs text-zinc-400 max-w-xs sm:max-w-sm leading-relaxed">
-              Plataforma de streaming en desarrollo. Puede contener errores ante cualquier inconveniente comunicarse con el soporte.
+              Plataforma de streaming de películas, series y estrenos en alta definición. Ante cualquier consulta, comunicate con nuestro soporte técnico.
             </p>
           </div>
 
@@ -29,12 +32,15 @@ export default function Footer() {
             <Link href="/" className="hover:text-white transition">
               Inicio
             </Link>
-            <a href="#catalogo" className="hover:text-white transition">
+            <Link href="/#catalogo" className="hover:text-white transition">
               Catálogo
-            </a>
-            <a href="#explorar" className="hover:text-white transition">
-              Privacidad de Cuenta
-            </a>
+            </Link>
+            <Link href="/privacidad" className="hover:text-white transition">
+              Políticas y Privacidad
+            </Link>
+            <Link href="/condiciones" className="hover:text-white transition">
+              Condiciones de Servicio
+            </Link>
             <a
               href="mailto:facundotomas018@gmail.com"
               className="hover:text-white transition"
@@ -58,7 +64,14 @@ export default function Footer() {
         {/* Barra inferior de copyright */}
         <div className="pt-6 sm:pt-8 border-t border-white/10 text-center text-[11px] sm:text-xs text-zinc-500 leading-relaxed px-2">
           © 2026 PILOTO Streaming. Arquitectura y Desarrollo por Facundo
-          Argüello. Todos los derechos reservados.
+          Argüello. Todos los derechos reservados. ·{" "}
+          <Link href="/privacidad" className="hover:text-zinc-300 underline">
+            Políticas y Privacidad
+          </Link>{" "}
+          ·{" "}
+          <Link href="/condiciones" className="hover:text-zinc-300 underline">
+            Condiciones de Servicio
+          </Link>
         </div>
       </div>
     </footer>

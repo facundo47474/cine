@@ -3,7 +3,7 @@
 import React, { Suspense, useState } from "react";
 import { signIn } from "next-auth/react";
 import { useSearchParams } from "next/navigation";
-import { AlertTriangle, Film, Loader2 } from "lucide-react";
+import { AlertTriangle, Loader2 } from "lucide-react";
 
 const TRENDING_POSTERS = [
   "https://image.tmdb.org/t/p/w500/5j1YUuamobLACkzlkzvWfNuzFNg.jpg",
@@ -178,12 +178,15 @@ export default function LoginPage() {
         <div className="absolute inset-0 bg-gradient-to-b from-black/70 via-transparent to-black/70" />
       </div>
 
-      {/* Header superior con el logo tipo Netflix */}
+      {/* Header superior con el logo principal */}
       <header className="relative z-10 max-w-7xl w-full mx-auto px-6 sm:px-12 pt-6 sm:pt-8">
         <div className="inline-flex items-center gap-2.5">
-          <div className="w-9 h-9 rounded-lg bg-netflix-red flex items-center justify-center shadow-lg shadow-red-900/50">
-            <Film className="w-5 h-5 text-white" />
-          </div>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/logo.jpg"
+            alt="PILOTO Logo"
+            className="w-9 h-9 rounded-full object-cover border border-white/25 bg-white shadow-lg"
+          />
           <span className="text-2xl sm:text-3xl font-black tracking-tighter text-netflix-red">
             PILOTO
           </span>
@@ -203,7 +206,21 @@ export default function LoginPage() {
         </Suspense>
       </main>
 
-      <div className="h-6" />
+      <footer className="relative z-10 pb-5 text-center text-xs text-zinc-400 space-x-4">
+        <a
+          href="/privacidad"
+          className="hover:text-white underline underline-offset-4 transition"
+        >
+          Políticas y Privacidad
+        </a>
+        <span>·</span>
+        <a
+          href="/condiciones"
+          className="hover:text-white underline underline-offset-4 transition"
+        >
+          Condiciones de Servicio
+        </a>
+      </footer>
     </div>
   );
 }

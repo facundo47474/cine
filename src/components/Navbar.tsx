@@ -4,7 +4,6 @@ import React, { useState } from "react";
 import Link from "next/link";
 import { useSession, signOut } from "next-auth/react";
 import {
-  Film,
   Search,
   X,
   LogOut,
@@ -166,9 +165,12 @@ export default function Navbar({
               if (onSelectMediaType) onSelectMediaType(undefined);
             }}
           >
-            <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg bg-netflix-red flex items-center justify-center shadow-lg shadow-red-900/40">
-              <Film className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
-            </div>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/logo.jpg"
+              alt="PILOTO Logo"
+              className="w-8 h-8 sm:w-9 sm:h-9 rounded-full object-cover border border-white/25 bg-white shadow-lg"
+            />
             <span className="inline text-xl sm:text-2xl font-black tracking-tighter text-netflix-red group-hover:text-red-500 transition">
               PILOTO
             </span>

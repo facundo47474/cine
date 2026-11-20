@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import { Sparkles, Loader2, Cloud, BookmarkCheck } from "lucide-react";
 import Navbar from "@/components/Navbar";
 import HeroBanner from "@/components/HeroBanner";
@@ -22,6 +22,7 @@ import { ContinueWatchingItemDto } from "@/application/services/WatchHistoryServ
 export default function HomePage() {
   const { isPro, myList, openUpgradeModal } = useMembership();
   const [homeFeed, setHomeFeed] = useState<HomeFeedDto | null>(null);
+  const [homeError, setHomeError] = useState<string | null>(null);
   const [continueWatching, setContinueWatching] = useState<
     ContinueWatchingItemDto[]
   >([]);
@@ -43,6 +44,8 @@ export default function HomePage() {
   const [totalPages, setTotalPages] = useState<number>(1);
   const [loadingMore, setLoadingMore] = useState<boolean>(false);
   const [loading, setLoading] = useState(true);
+  const lastHistoryFetchAtRef = useRef<number>(0);
+  const previousIsProRef = useRef<boolean | null>(null);
 
   const isExploring =
     Boolean(searchQuery.trim()) ||
@@ -50,7 +53,12 @@ export default function HomePage() {
     selectedGenreId !== undefined ||
     selectedMediaType !== undefined;
 
-  const refreshContinueWatching = useCallback(async () => {
+  const refreshContinueWatching = useCallback(async (force: boolean = false) => {
+    const now = Date.now();
+    if (!force && now - lastHistoryFetchAtRef.current < 30_000) {
+      return;
+    }
+    lastHistoryFetchAtRef.current = now;
     try {
       const historyRes = await fetch("/api/history", { cache: "no-store" });
       const historyData = await historyRes.json();
@@ -65,24 +73,29 @@ export default function HomePage() {
 
   const fetchHomeAndHistory = useCallback(async () => {
     setLoading(true);
+    setHomeError(null);
     try {
+      lastHistoryFetchAtRef.current = Date.now();
       const [homeRes, historyRes] = await Promise.all([
-        fetch("/api/movies?mode=home", { cache: "no-store" }),
+        fetch("/api/movies?mode=home"),
         fetch("/api/history", { cache: "no-store" }),
       ]);
 
       const homeData = await homeRes.json();
-      const historyData = await historyRes.json();
+      const historyData = await historyRes.json().catch(() => ({ ok: false }));
 
-      if (homeData.ok) {
+      if (homeRes.ok && homeData.ok) {
         setHomeFeed(homeData);
+      } else {
+        setHomeError("No pudimos cargar el catálogo en este momento.");
       }
-      if (historyData.ok) {
+      if (historyRes.ok && historyData.ok) {
         setContinueWatching(historyData.items);
         setHistoryLimitedByPlan(Boolean(historyData.isLimitedByFreePlan));
       }
     } catch (error) {
       console.error("Error cargando catálogo:", error);
+      setHomeError("No pudimos cargar el catálogo en este momento.");
     } finally {
       setLoading(false);
     }
@@ -141,7 +154,7 @@ export default function HomePage() {
   useEffect(() => {
     const handleVisibilityOrFocus = () => {
       if (document.visibilityState === "visible") {
-        void refreshContinueWatching();
+        void refreshContinueWatching(false);
       }
     };
 
@@ -154,9 +167,17 @@ export default function HomePage() {
     };
   }, [refreshContinueWatching]);
 
-  // Refresca el historial al instante cuando cambia la membresía (Gratis <-> Piloto Pro)
+  // Refresca el historial al instante solo cuando cambia la membresía tras el montaje inicial
   useEffect(() => {
-    void refreshContinueWatching();
+    if (previousIsProRef.current === null) {
+      previousIsProRef.current = isPro;
+      return;
+    }
+    if (previousIsProRef.current === isPro) {
+      return;
+    }
+    previousIsProRef.current = isPro;
+    void refreshContinueWatching(true);
   }, [isPro, refreshContinueWatching]);
 
   useEffect(() => {
@@ -408,7 +429,7 @@ export default function HomePage() {
                 </section>
               )}
 
-              {loading || !homeFeed ? (
+              {loading ? (
                 <div className="max-w-7xl mx-auto px-4 sm:px-8 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-4 py-8">
                   {Array.from({ length: 6 }).map((_, idx) => (
                     <div
@@ -416,6 +437,22 @@ export default function HomePage() {
                       className="aspect-[2/3] rounded-xl bg-zinc-800/60 animate-pulse border border-white/5"
                     />
                   ))}
+                </div>
+              ) : !homeFeed ? (
+                <div className="max-w-7xl mx-auto px-4 sm:px-8 py-12">
+                  <div className="py-12 px-6 text-center space-y-4 bg-zinc-900/60 rounded-2xl border border-white/10">
+                    <p className="text-sm sm:text-base text-zinc-200 font-semibold">
+                      {homeError ||
+                        "No pudimos cargar el catálogo en este momento."}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => void fetchHomeAndHistory()}
+                      className="px-5 py-2.5 rounded-lg bg-netflix-red hover:bg-red-700 text-white text-xs sm:text-sm font-bold transition"
+                    >
+                      Reintentar
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <>

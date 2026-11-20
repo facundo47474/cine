@@ -116,6 +116,12 @@ export async function fetchRawPlayLatinSources(
   }
 }
 
+const playLatinSourceCache = new Map<
+  string,
+  { value: SeparatedLanguageSources; expiresAt: number }
+>();
+const PLAYLATIN_CACHE_TTL_MS = 10 * 60 * 1000;
+
 /**
  * Extrae y clasifica por idioma todas las fuentes de `playlatinsrc.co`
  * separando mirrors de Streamwish de servidores alternativos.
@@ -132,6 +138,29 @@ export async function extractCategorizedSourcesFromPlayLatin(
   seasonNumber: number = 1,
   episodeNumber: number = 1
 ): Promise<SeparatedLanguageSources> {
+  const cacheKey = `${imdbId}:${isTvEpisode ? "tv" : "movie"}:${seasonNumber}:${episodeNumber}`;
+  const cachedEntry = playLatinSourceCache.get(cacheKey);
+  if (cachedEntry) {
+    if (Date.now() <= cachedEntry.expiresAt) {
+      return cachedEntry.value;
+    }
+    playLatinSourceCache.delete(cacheKey);
+  }
+
+  const cacheResult = (value: SeparatedLanguageSources) => {
+    if (playLatinSourceCache.size >= 400) {
+      const oldestKey = playLatinSourceCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        playLatinSourceCache.delete(oldestKey);
+      }
+    }
+    playLatinSourceCache.set(cacheKey, {
+      value,
+      expiresAt: Date.now() + PLAYLATIN_CACHE_TTL_MS,
+    });
+    return value;
+  };
+
   const emptyResult: SeparatedLanguageSources = {
     streamwishLat: [],
     streamwishSub: [],
@@ -144,11 +173,11 @@ export async function extractCategorizedSourcesFromPlayLatin(
     isTvEpisode,
     seasonNumber,
     episodeNumber,
-    4500
+    2500
   );
 
   if (validSources.length === 0) {
-    return emptyResult;
+    return cacheResult(emptyResult);
   }
 
   const sortSourcesByPriority = (entries: PlayLatinSourceEntry[]) =>
@@ -200,12 +229,12 @@ export async function extractCategorizedSourcesFromPlayLatin(
   const latinoGroup = classifyByVersionList(["latino", "castellano"], true);
   const subtituladoGroup = classifyByVersionList(["subtitulado", "sub"], false);
 
-  return {
+  return cacheResult({
     streamwishLat: latinoGroup.streamwishUrls,
     streamwishSub: subtituladoGroup.streamwishUrls,
     fallbackLat: latinoGroup.fallbackUrls,
     fallbackSub: subtituladoGroup.fallbackUrls,
-  };
+  });
 }
 
 /**
@@ -310,7 +339,7 @@ export async function resolveBestEmbedFromPlayLatinByUrl(
 ): Promise<{ url: string; isStreamwish: boolean } | null> {
   const rankedItems = await resolveRankedEmbedsFromPlayLatinByUrl(
     rawUrlOrSlug,
-    2800
+    2200
   );
 
   if (rankedItems.length === 0) {

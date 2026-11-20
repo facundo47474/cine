@@ -5,6 +5,7 @@ import {
 import { ITokenCryptoService } from "@/domain/interfaces/ITokenCryptoService";
 import { ITmdbGateway, TmdbCatalogItem } from "@/domain/interfaces/ITmdbGateway";
 import { IMirrorResolver } from "@/domain/interfaces/IMirrorResolver";
+import { ICacheService } from "@/domain/interfaces/ICacheService";
 import {
   MoviePlaybackDto,
   SignedMirrorStreamDto,
@@ -18,6 +19,10 @@ import {
 import { Movie, MovieProps } from "@/domain/entities/Movie";
 import { MirrorFormat } from "@/domain/enums/MirrorFormat";
 import { MirrorStatus } from "@/domain/enums/MirrorStatus";
+import {
+  buildMovieContingencyMirrors,
+  isBrokenOrLegacyContingencyUrl,
+} from "@/domain/utils/contingencyMirrors";
 import {
   FALLBACK_IF_EMPTY,
   STRICT_STREAMWISH_ONLY,
@@ -43,7 +48,8 @@ export class CatalogService {
     private readonly movieRepository: IMovieRepository,
     private readonly tokenCryptoService: ITokenCryptoService,
     private readonly tmdbGateway: ITmdbGateway,
-    private readonly mirrorResolver: IMirrorResolver
+    private readonly mirrorResolver: IMirrorResolver,
+    private readonly cacheService?: ICacheService
   ) {}
 
   /**
@@ -151,86 +157,105 @@ export class CatalogService {
    * @returns Objeto `HomeFeedDto` listo para renderizar los carruseles y el banner principal.
    */
   public async getHomeFeed(): Promise<HomeFeedDto> {
-    const localMovies = await this.movieRepository.findAvailableCatalog();
-    const localByMediaKey = this.buildLocalMediaLookupMap(localMovies);
-    const localVipCards = localMovies
-      .filter((item) => item.mediaType === "MOVIE")
-      .map((movie) => this.mapMovieEntityToCard(movie));
+    const cacheKey = "catalog:home-feed:v1";
+    const cachedFeed = this.cacheService?.get<HomeFeedDto>(cacheKey);
+    if (cachedFeed) {
+      return cachedFeed;
+    }
 
-    const [
-      trendingResult,
-      nowPlayingResult,
-      topRatedResult,
-      netflixResult,
-      disneyResult,
-      maxResult,
-      primeResult,
-      trendingTvResult,
-    ] = await Promise.allSettled([
-      this.tmdbGateway.getTrendingMovies(1),
-      this.tmdbGateway.getNowPlayingMovies(1),
-      this.tmdbGateway.getTopRatedMovies(1),
-      this.tmdbGateway.discoverMovies({
-        watchProviderId: 8,
-        watchRegion: "AR",
-        page: 1,
-      }),
-      this.tmdbGateway.discoverMovies({
-        watchProviderId: 337,
-        watchRegion: "AR",
-        page: 1,
-      }),
-      this.tmdbGateway.discoverMovies({
-        watchProviderId: 1899,
-        watchRegion: "AR",
-        page: 1,
-      }),
-      this.tmdbGateway.discoverMovies({
-        watchProviderId: 119,
-        watchRegion: "AR",
-        page: 1,
-      }),
-      this.tmdbGateway.getTrendingTv(1),
-    ]);
+    return this.playbackOperationCoalescer.executeSingleFlight(
+      "catalog:home-feed",
+      async () => {
+        const rechecked = this.cacheService?.get<HomeFeedDto>(cacheKey);
+        if (rechecked) {
+          return rechecked;
+        }
 
-    const extractFulfilledCards = (
-      settledResult: PromiseSettledResult<{ items: TmdbCatalogItem[] }>
-    ): CatalogCardDto[] => {
-      if (settledResult.status !== "fulfilled") return [];
-      return settledResult.value.items.map((item) =>
-        this.mapTmdbItemToCard(item, localByMediaKey)
-      );
-    };
+        const localMovies = await this.movieRepository.findAvailableCatalog();
+        const localByMediaKey = this.buildLocalMediaLookupMap(localMovies);
+        const localVipCards = localMovies
+          .filter((item) => item.mediaType === "MOVIE")
+          .map((movie) => this.mapMovieEntityToCard(movie));
 
-    const trending = extractFulfilledCards(trendingResult);
-    const nowPlaying = extractFulfilledCards(nowPlayingResult);
-    const topRated = extractFulfilledCards(topRatedResult);
-    const netflix = extractFulfilledCards(netflixResult);
-    const disney = extractFulfilledCards(disneyResult);
-    const max = extractFulfilledCards(maxResult);
-    const prime = extractFulfilledCards(primeResult);
-    const series = extractFulfilledCards(trendingTvResult);
+        const [
+          trendingResult,
+          nowPlayingResult,
+          topRatedResult,
+          netflixResult,
+          disneyResult,
+          maxResult,
+          primeResult,
+          trendingTvResult,
+        ] = await Promise.allSettled([
+          this.tmdbGateway.getTrendingMovies(1),
+          this.tmdbGateway.getNowPlayingMovies(1),
+          this.tmdbGateway.getTopRatedMovies(1),
+          this.tmdbGateway.discoverMovies({
+            watchProviderId: 8,
+            watchRegion: "AR",
+            page: 1,
+          }),
+          this.tmdbGateway.discoverMovies({
+            watchProviderId: 337,
+            watchRegion: "AR",
+            page: 1,
+          }),
+          this.tmdbGateway.discoverMovies({
+            watchProviderId: 1899,
+            watchRegion: "AR",
+            page: 1,
+          }),
+          this.tmdbGateway.discoverMovies({
+            watchProviderId: 119,
+            watchRegion: "AR",
+            page: 1,
+          }),
+          this.tmdbGateway.getTrendingTv(1),
+        ]);
 
-    const featured =
-      trending.find((card) => Boolean(card.backdropUrl)) ||
-      localVipCards.find((card) => Boolean(card.backdropUrl)) ||
-      trending[0] ||
-      localVipCards[0] ||
-      null;
+        const extractFulfilledCards = (
+          settledResult: PromiseSettledResult<{ items: TmdbCatalogItem[] }>
+        ): CatalogCardDto[] => {
+          if (settledResult.status !== "fulfilled") return [];
+          return settledResult.value.items.map((item) =>
+            this.mapTmdbItemToCard(item, localByMediaKey)
+          );
+        };
 
-    return {
-      tmdbConnected: this.tmdbGateway.isConfigured(),
-      featured,
-      localVip: localVipCards,
-      trending,
-      nowPlaying,
-      topRated,
-      netflix,
-      disney,
-      max,
-      prime,
-      series,
-    };
+        const trending = extractFulfilledCards(trendingResult);
+        const nowPlaying = extractFulfilledCards(nowPlayingResult);
+        const topRated = extractFulfilledCards(topRatedResult);
+        const netflix = extractFulfilledCards(netflixResult);
+        const disney = extractFulfilledCards(disneyResult);
+        const max = extractFulfilledCards(maxResult);
+        const prime = extractFulfilledCards(primeResult);
+        const series = extractFulfilledCards(trendingTvResult);
+
+        const featured =
+          trending.find((card) => Boolean(card.backdropUrl)) ||
+          localVipCards.find((card) => Boolean(card.backdropUrl)) ||
+          trending[0] ||
+          localVipCards[0] ||
+          null;
+
+        const feed: HomeFeedDto = {
+          tmdbConnected: this.tmdbGateway.isConfigured(),
+          featured,
+          localVip: localVipCards,
+          trending,
+          nowPlaying,
+          topRated,
+          netflix,
+          disney,
+          max,
+          prime,
+          series,
+        };
+
+        this.cacheService?.set(cacheKey, feed, 120);
+        return feed;
+      }
+    );
   }
 
   /**
@@ -390,7 +415,7 @@ export class CatalogService {
     if (playableMirrors.length === 0) return true;
 
     const hasLegacyAggregator = playableMirrors.some((mirror) =>
-      isMultiEmbedAggregatorUrl(mirror.rawUrl)
+      isBrokenOrLegacyContingencyUrl(mirror.rawUrl)
     );
     if (hasLegacyAggregator) return true;
 
@@ -512,48 +537,7 @@ export class CatalogService {
   private construirMirrorsDeContingenciaParaPelicula(
     tmdbId: number
   ): CreateMirrorInput[] {
-    return [
-      {
-        serverName: "VidLink-Contingencia",
-        language: "Inglés (Sub)",
-        rawUrl: `https://vidlink.pro/movie/${tmdbId}`,
-        format: MirrorFormat.EMBED,
-        quality: "1080p",
-        priority: 70,
-        isStreamwish: false,
-        isDirty: true,
-      },
-      {
-        serverName: "VidSrcCC-Contingencia",
-        language: "Inglés (Sub)",
-        rawUrl: `https://vidsrc.cc/v2/embed/movie/${tmdbId}`,
-        format: MirrorFormat.EMBED,
-        quality: "1080p",
-        priority: 80,
-        isStreamwish: false,
-        isDirty: true,
-      },
-      {
-        serverName: "AutoEmbed-Contingencia",
-        language: "Inglés (Sub)",
-        rawUrl: `https://autoembed.cc/movie/tmdb/${tmdbId}`,
-        format: MirrorFormat.EMBED,
-        quality: "1080p",
-        priority: 90,
-        isStreamwish: false,
-        isDirty: true,
-      },
-      {
-        serverName: "Backup-Sub",
-        language: "Inglés (Sub)",
-        rawUrl: `https://vidsrc.me/embed/movie?tmdb=${tmdbId}&ds_lang=es`,
-        format: MirrorFormat.EMBED,
-        quality: "1080p",
-        priority: 99,
-        isStreamwish: false,
-        isDirty: true,
-      },
-    ];
+    return buildMovieContingencyMirrors(tmdbId);
   }
 
   private appendMovieContingencyMirrors(

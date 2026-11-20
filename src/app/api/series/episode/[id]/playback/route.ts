@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { seriesService } from "@/infrastructure/container";
 import { getAuthenticatedUserId } from "@/infrastructure/auth/sessionHelper";
+import {
+  apiRateLimiter,
+  getClientIp,
+} from "@/infrastructure/security/RateLimiter";
 
 export const dynamic = "force-dynamic";
 
@@ -9,11 +13,37 @@ export const dynamic = "force-dynamic";
  * (`GET /api/series/episode/[id]/playback`).
  */
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
+    const rateLimit = apiRateLimiter.checkLimit(
+      `ep-play:${getClientIp(request)}`,
+      90,
+      60_000
+    );
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "Demasiadas peticiones. Intenta nuevamente en unos segundos.",
+        },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(rateLimit.retryAfterSeconds),
+          },
+        }
+      );
+    }
+
     const userId = await getAuthenticatedUserId();
+    if (!userId) {
+      return NextResponse.json(
+        { ok: false, error: "No autorizado." },
+        { status: 401 }
+      );
+    }
 
     const playback = await seriesService.getEpisodePlaybackData(
       params.id,

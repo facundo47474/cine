@@ -4,6 +4,10 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from "react"
 import Hls from "hls.js";
 import { ShieldCheck, ExternalLink, X } from "lucide-react";
 import { isStreamwish } from "@/domain/utils/streamwishMatcher";
+import {
+  PLUS_STRICT_IFRAME_SANDBOX,
+  isSandboxCompatibleEmbedUrl,
+} from "@/domain/utils/contingencyMirrors";
 
 export type SmartPlayerStatus = "loading" | "playing_native" | "playing_iframe";
 
@@ -13,17 +17,25 @@ export type SmartPlayerEnv =
   | "ios-safari"
   | "android";
 
+export interface NativeStreamCandidate {
+  streamUrl: string;
+  type: "hls" | "mp4";
+  referer?: string;
+}
+
 export interface ExtractorResponseData {
   success: boolean;
   streamUrl?: string;
   type?: "hls" | "mp4";
   referer?: string;
+  backupStreams?: NativeStreamCandidate[];
   fallbackUrl?: string;
   reason?: string;
   durationSeconds?: number;
   posterUrl?: string;
   isStreamwish?: boolean;
   isDirty?: boolean;
+  checkedSiblings?: boolean;
 }
 
 export interface ExtractedNativeStream {
@@ -49,6 +61,7 @@ export interface SmartPlayerProps {
   onNativeStreamReady?: (stream: ExtractedNativeStream | null) => void;
   hideInlineHelperBar?: boolean;
   modoEscudoActivo?: boolean;
+  isMembershipLoading?: boolean;
   onRequestModoEscudo?: () => void;
   videoElementRef?: React.MutableRefObject<HTMLVideoElement | null>;
   iframeElementRef?: React.MutableRefObject<HTMLIFrameElement | null>;
@@ -359,6 +372,7 @@ export default function SmartPlayer({
   onNativeStreamReady,
   hideInlineHelperBar = false,
   modoEscudoActivo = true,
+  isMembershipLoading = false,
   onRequestModoEscudo,
   videoElementRef,
   iframeElementRef,
@@ -367,7 +381,10 @@ export default function SmartPlayer({
   const [streamData, setStreamData] = useState<ExtractorResponseData | null>(
     null
   );
-  const [shieldActive, setShieldActive] = useState<boolean>(modoEscudoActivo);
+  const [nativeStreamQueue, setNativeStreamQueue] = useState<
+    NativeStreamCandidate[]
+  >([]);
+  const [activeNativeIndex, setActiveNativeIndex] = useState<number>(0);
 
   const internalVideoRef = useRef<HTMLVideoElement | null>(null);
   const internalIframeRef = useRef<HTMLIFrameElement | null>(null);
@@ -447,39 +464,34 @@ export default function SmartPlayer({
     updateStatus("playing_iframe");
   }, [destroyHlsInstance, updateStatus]);
 
-  // Escudo anti-anuncios y neutralizador de popups en modo fallback iframe (solo cuentas PRO)
+  // Neutralizador de popups en modo fallback iframe (solo cuentas PRO)
   useEffect(() => {
     if (status !== "playing_iframe" || !modoEscudoActivo) return;
 
     const originalWindowOpen = window.open;
     window.open = () => null;
 
-    const handleWindowBlur = () => {
-      if (document.activeElement === internalIframeRef.current) {
-        setTimeout(() => {
-          try {
-            window.focus();
-          } catch { }
-        }, 30);
-      }
-    };
-
-    window.addEventListener("blur", handleWindowBlur);
-
     return () => {
       window.open = originalWindowOpen;
-      window.removeEventListener("blur", handleWindowBlur);
     };
   }, [status, modoEscudoActivo]);
 
-  // 1. Al montar, cambiar embedUrl o conmutar Modo Escudo: usar extractor solo si Modo Escudo está activo
+  // 1. Al montar, cambiar embedUrl o conmutar Modo Escudo: esperar hidratación de membresía y usar extractor si Modo Escudo está activo
   useEffect(() => {
     if (!embedUrl) return;
+
+    if (isMembershipLoading && !modoEscudoActivo) {
+      destroyHlsInstance();
+      onNativeStreamReadyRef.current?.(null);
+      updateStatus("loading");
+      return;
+    }
 
     if (!modoEscudoActivo) {
       destroyHlsInstance();
       initialSeekDoneRef.current = false;
-      setShieldActive(false);
+      setNativeStreamQueue([]);
+      setActiveNativeIndex(0);
       setStreamData({
         success: false,
         fallbackUrl: embedUrl,
@@ -495,7 +507,8 @@ export default function SmartPlayer({
 
     destroyHlsInstance();
     initialSeekDoneRef.current = false;
-    setShieldActive(true);
+    setNativeStreamQueue([]);
+    setActiveNativeIndex(0);
     updateStatus("loading");
     setStreamData(null);
     onNativeStreamReadyRef.current?.(null);
@@ -504,7 +517,7 @@ export default function SmartPlayer({
       const candidateUrls = [
         embedUrl,
         ...backupEmbedUrlsRef.current.filter((u) => Boolean(u) && u !== embedUrl),
-      ].slice(0, 2);
+      ].slice(0, 3);
       let firstFailureData: ExtractorResponseData | null = null;
 
       for (const candidateUrl of candidateUrls) {
@@ -524,6 +537,24 @@ export default function SmartPlayer({
           if (cancelled) return;
 
           if (data.success && data.streamUrl) {
+            const queueMap = new Map<string, NativeStreamCandidate>();
+            queueMap.set(data.streamUrl, {
+              streamUrl: data.streamUrl,
+              type: data.type || "hls",
+              referer: data.referer,
+            });
+            for (const backup of data.backupStreams || []) {
+              if (backup?.streamUrl && !queueMap.has(backup.streamUrl)) {
+                queueMap.set(backup.streamUrl, {
+                  streamUrl: backup.streamUrl,
+                  type: backup.type || "hls",
+                  referer: backup.referer ?? data.referer,
+                });
+              }
+            }
+            const nextQueue = Array.from(queueMap.values());
+            setNativeStreamQueue(nextQueue);
+            setActiveNativeIndex(0);
             setStreamData(data);
             onNativeStreamReadyRef.current?.({
               streamUrl: data.streamUrl,
@@ -543,6 +574,9 @@ export default function SmartPlayer({
 
           if (!firstFailureData) {
             firstFailureData = data;
+          }
+          if (data.checkedSiblings) {
+            break;
           }
         } catch {
           if (cancelled) return;
@@ -578,18 +612,55 @@ export default function SmartPlayer({
     embedUrl,
     isDirty,
     modoEscudoActivo,
+    isMembershipLoading,
     destroyHlsInstance,
     switchToImmediateIframe,
     updateStatus,
   ]);
 
+  const activeNativeStream: NativeStreamCandidate | null = useMemo(() => {
+    if (nativeStreamQueue[activeNativeIndex]) {
+      return nativeStreamQueue[activeNativeIndex];
+    }
+    if (streamData?.success && streamData.streamUrl) {
+      return {
+        streamUrl: streamData.streamUrl,
+        type: streamData.type || "hls",
+        referer: streamData.referer,
+      };
+    }
+    return null;
+  }, [nativeStreamQueue, activeNativeIndex, streamData]);
+
+  const advanceToNextNativeStreamOrFallback = useCallback(() => {
+    const nextIdx = activeNativeIndex + 1;
+    if (nextIdx < nativeStreamQueue.length) {
+      const nextStream = nativeStreamQueue[nextIdx];
+      destroyHlsInstance();
+      onNativeStreamReadyRef.current?.({
+        streamUrl: nextStream.streamUrl,
+        proxiedUrl: `/api/stream-proxy?url=${encodeURIComponent(
+          nextStream.streamUrl
+        )}&referer=${encodeURIComponent(nextStream.referer || "")}`,
+        type: nextStream.type,
+        referer: nextStream.referer,
+        posterUrl: streamData?.posterUrl,
+      });
+      setActiveNativeIndex(nextIdx);
+      return;
+    }
+    switchToImmediateIframe();
+  }, [
+    activeNativeIndex,
+    nativeStreamQueue,
+    streamData?.posterUrl,
+    destroyHlsInstance,
+    switchToImmediateIframe,
+  ]);
+
   // 2. Inicialización de reproducción nativa con hls.js o HTML5 <video> vía /api/stream-proxy
   useEffect(() => {
-    if (
-      status !== "playing_native" ||
-      !streamData?.success ||
-      !streamData.streamUrl
-    ) {
+    if (status !== "playing_native" || !activeNativeStream?.streamUrl) {
       return;
     }
 
@@ -598,9 +669,9 @@ export default function SmartPlayer({
 
     destroyHlsInstance();
 
-    const refererParam = streamData.referer || "";
+    const refererParam = activeNativeStream.referer || "";
     const proxiedStreamUrl = `/api/stream-proxy?url=${encodeURIComponent(
-      streamData.streamUrl
+      activeNativeStream.streamUrl
     )}&referer=${encodeURIComponent(refererParam)}`;
 
     const resumeTarget = initialTimeSecondsRef.current;
@@ -627,12 +698,21 @@ export default function SmartPlayer({
       }
     };
 
-    if (streamData.type === "hls") {
+    if (activeNativeStream.type === "hls") {
       if (Hls.isSupported()) {
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: false,
-          backBufferLength: 90,
+          startFragPrefetch: true,
+          maxBufferLength: 20,
+          maxMaxBufferLength: 45,
+          backBufferLength: 30,
+          manifestLoadingTimeOut: 8000,
+          manifestLoadingMaxRetry: 3,
+          levelLoadingTimeOut: 8000,
+          levelLoadingMaxRetry: 3,
+          fragLoadingTimeOut: 12000,
+          fragLoadingMaxRetry: 4,
           startPosition: resumeTarget > 5 ? resumeTarget : -1,
         });
         hlsRef.current = hls;
@@ -645,21 +725,31 @@ export default function SmartPlayer({
           video.play().catch(() => { });
         });
 
-        let mediaRecoveryAttempted = false;
+        let mediaRecoveryCount = 0;
+        let networkRecoveryCount = 0;
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (!data.fatal) return;
 
           if (
-            data.type === Hls.ErrorTypes.MEDIA_ERROR &&
-            !mediaRecoveryAttempted
+            data.type === Hls.ErrorTypes.NETWORK_ERROR &&
+            networkRecoveryCount < 2
           ) {
-            mediaRecoveryAttempted = true;
+            networkRecoveryCount += 1;
+            hls.startLoad();
+            return;
+          }
+
+          if (
+            data.type === Hls.ErrorTypes.MEDIA_ERROR &&
+            mediaRecoveryCount < 2
+          ) {
+            mediaRecoveryCount += 1;
             hls.recoverMediaError();
             return;
           }
 
-          // Si hls.js emite un error fatal irrecuperable, pasa automáticamente a playing_iframe
-          switchToImmediateIframe();
+          // Rota al siguiente stream nativo extraído (ej. hls2) antes de pasar a iframe limpio
+          advanceToNextNativeStreamOrFallback();
         });
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
         // HLS nativo en Safari iOS / macOS
@@ -667,7 +757,7 @@ export default function SmartPlayer({
         video.addEventListener("loadedmetadata", applyInitialResume);
         video.play().catch(() => { });
       } else {
-        switchToImmediateIframe();
+        advanceToNextNativeStreamOrFallback();
       }
     } else {
       // Archivo directo MP4 a través de /api/stream-proxy
@@ -680,7 +770,12 @@ export default function SmartPlayer({
       video.removeEventListener("loadedmetadata", applyInitialResume);
       destroyHlsInstance();
     };
-  }, [status, streamData, destroyHlsInstance, switchToImmediateIframe]);
+  }, [
+    status,
+    activeNativeStream,
+    destroyHlsInstance,
+    advanceToNextNativeStreamOrFallback,
+  ]);
 
   const rawTargetIframeUrl = streamData?.fallbackUrl || embedUrl;
   const targetIframeUrl = useMemo(() => {
@@ -701,6 +796,14 @@ export default function SmartPlayer({
       !targetIframeUrl.startsWith("/api/stream/") &&
       !isStreamwish({ url: targetIframeUrl }))
   );
+
+  const iframeSandboxAttribute =
+    modoEscudoActivo &&
+    targetIframeUrl &&
+    !targetIframeUrl.startsWith("/api/stream/") &&
+    isSandboxCompatibleEmbedUrl(targetIframeUrl)
+      ? PLUS_STRICT_IFRAME_SANDBOX
+      : undefined;
 
   const playerViewport = (
     <div className="relative w-full h-full aspect-video bg-black overflow-hidden select-none">
@@ -744,7 +847,7 @@ export default function SmartPlayer({
             );
             onTimeUpdate?.(cur, dur);
           }}
-          onError={() => switchToImmediateIframe()}
+          onError={() => advanceToNextNativeStreamOrFallback()}
         />
       )}
 
@@ -753,30 +856,15 @@ export default function SmartPlayer({
         <div className="relative w-full h-full">
           <iframe
             ref={setIframeRefs}
-            key={`${targetIframeUrl}-clean`}
+            key={`${targetIframeUrl}-${iframeSandboxAttribute ? "sbx" : "clean"}`}
             src={targetIframeUrl}
             title={title || "Reproductor de video"}
             className="w-full h-full border-0"
-            sandbox={undefined}
+            sandbox={iframeSandboxAttribute}
             allow="autoplay *; fullscreen *; picture-in-picture *; encrypted-media *"
             allowFullScreen
             onError={() => onFatalError?.()}
           />
-          {modoEscudoActivo && shieldActive && (
-            <div
-              onClick={() => {
-                setShieldActive(false);
-                window.focus();
-              }}
-              onTouchStart={() => {
-                setShieldActive(false);
-                window.focus();
-              }}
-              className="absolute inset-0 z-20 bg-transparent cursor-pointer"
-              title="Click para reproducir"
-              aria-hidden="true"
-            />
-          )}
         </div>
       )}
     </div>

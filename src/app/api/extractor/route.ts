@@ -1,6 +1,6 @@
 import dns from "dns";
 import { NextRequest, NextResponse } from "next/server";
-import { tokenCryptoService } from "@/infrastructure/container";
+import { cacheService, tokenCryptoService } from "@/infrastructure/container";
 import { prisma } from "@/infrastructure/database/prismaClient";
 import { getAuthenticatedUserSession } from "@/infrastructure/auth/sessionHelper";
 import { prismaMembershipRepository } from "@/infrastructure/repositories/PrismaMembershipRepository";
@@ -30,6 +30,7 @@ import { resolveRankedEmbedsFromPlayLatinByUrl } from "@/infrastructure/provider
 import {
   ExtractedStreamCandidate,
   extractStreamCandidatesFromHtmlAndScripts,
+  resolveFirstNonNull,
   verifyExtractedStreamCandidateAlive,
 } from "@/infrastructure/providers/StreamManifestExtractor";
 
@@ -50,9 +51,28 @@ interface CandidateEmbedDescriptor {
   isDirty: boolean;
 }
 
+interface NativeStreamOption {
+  streamUrl: string;
+  type: "hls" | "mp4";
+  referer: string;
+}
+
 interface ProbeHitResult extends ExtractedStreamCandidate {
   referer: string;
   sourceEmbedUrl: string;
+  isStreamwish: boolean;
+  isDirty: boolean;
+  backupStreams?: NativeStreamOption[];
+}
+
+interface CachedExtractorSuccessPayload {
+  success: true;
+  streamUrl: string;
+  type: "hls" | "mp4";
+  referer: string;
+  backupStreams?: NativeStreamOption[];
+  durationSeconds?: number;
+  posterUrl?: string;
   isStreamwish: boolean;
   isDirty: boolean;
 }
@@ -150,16 +170,18 @@ async function probeSingleExtractionTarget(
         Accept:
           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       },
-      signal: AbortSignal.timeout(6000),
+      redirect: "follow",
+      signal: AbortSignal.timeout(4000),
     });
 
     if (!response.ok) return null;
 
+    const finalUrl = response.url || target.fetchUrl;
+    const fetchOrigin = new URL(finalUrl).origin;
+    const streamReferer = `${fetchOrigin}/`;
     const html = await response.text();
     const unpackedScript = unpackDeanEdwardsPackedScripts(html);
     const combinedText = `${html}\n${unpackedScript}`;
-    const fetchOrigin = new URL(target.fetchUrl).origin;
-    const streamReferer = `${fetchOrigin}/`;
 
     const extractedCandidates = extractStreamCandidatesFromHtmlAndScripts(
       combinedText,
@@ -167,26 +189,45 @@ async function probeSingleExtractionTarget(
     );
     if (extractedCandidates.length === 0) return null;
 
-    const aliveChecks = await Promise.all(
-      extractedCandidates.map(async (candidate) => {
+    const limitedCandidates = extractedCandidates.slice(0, 4);
+    const aliveList: (ExtractedStreamCandidate | null)[] = new Array(
+      limitedCandidates.length
+    ).fill(null);
+
+    const firstAliveCandidate = await resolveFirstNonNull(
+      limitedCandidates.map(async (candidate, idx) => {
         const isAlive = await verifyExtractedStreamCandidateAlive(
           candidate,
-          streamReferer
+          streamReferer,
+          2200
         );
-        return isAlive ? candidate : null;
+        if (isAlive) {
+          aliveList[idx] = candidate;
+          return candidate;
+        }
+        return null;
       })
     );
 
-    const firstAliveCandidate = aliveChecks.find((candidate) =>
-      Boolean(candidate)
-    );
     if (firstAliveCandidate) {
+      const backupStreams: NativeStreamOption[] = [];
+      for (const candidate of limitedCandidates) {
+        if (candidate.streamUrl === firstAliveCandidate.streamUrl) continue;
+        // Prefer already-verified candidates or secondary page HLS candidates (e.g. hls2 alongside hls4)
+        backupStreams.push({
+          streamUrl: candidate.streamUrl,
+          type: candidate.type,
+          referer: streamReferer,
+        });
+      }
+
       return {
         ...firstAliveCandidate,
         referer: streamReferer,
         sourceEmbedUrl: target.sourceEmbedUrl,
         isStreamwish: meta.isStreamwish,
         isDirty: meta.isDirty,
+        backupStreams,
       };
     }
 
@@ -197,7 +238,7 @@ async function probeSingleExtractionTarget(
 }
 
 /**
- * Ejecuta una fase de extracción en paralelo sobre un lote de descriptores de embeds.
+ * Ejecuta una fase de extracción en paralelo resolviendo inmediatamente con el primer stream vivo.
  *
  * @param descriptors Lista de descriptores de embeds a evaluar.
  * @returns El primer flujo nativo vivo encontrado o `null`.
@@ -237,18 +278,13 @@ async function executeParallelExtractionPhase(
     }
   }
 
-  const probeResults = await Promise.all(
+  return resolveFirstNonNull(
     targetsWithMeta.map((entry) =>
       probeSingleExtractionTarget(entry.target, {
         isStreamwish: entry.isStreamwish,
         isDirty: entry.isDirty,
       })
     )
-  );
-
-  return (
-    probeResults.find((result): result is ProbeHitResult => Boolean(result)) ||
-    null
   );
 }
 
@@ -434,6 +470,13 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    const extractorCacheKey = `extractor:v2:${decryptedEpisodeId || decryptedMovieId || "direct"}:${targetEmbedUrl}`;
+    const cachedHit =
+      cacheService.get<CachedExtractorSuccessPayload>(extractorCacheKey);
+    if (cachedHit) {
+      return NextResponse.json(cachedHit);
+    }
+
     // 1. Si ya es un enlace directo .m3u8 o .mp4, retornarlo de inmediato
     if (/\.m3u8(\?|$)/i.test(parsedInitialUrl.pathname)) {
       return NextResponse.json({
@@ -477,6 +520,11 @@ export async function GET(request: NextRequest) {
       ? targetEmbedUrl
       : null;
 
+    const isExternalNonScraperAggregator =
+      isMultiEmbedAggregatorUrl(targetEmbedUrl) &&
+      !targetEmbedUrl.includes("embed69.org") &&
+      !targetEmbedUrl.includes("playlatinsrc.co");
+
     if (
       !embed69LookupUrl &&
       decryptedMovieId &&
@@ -504,10 +552,22 @@ export async function GET(request: NextRequest) {
         for (const sibling of siblingMirrors) {
           if (!sibling.rawUrl || sibling.rawUrl === targetEmbedUrl) continue;
           if (sibling.rawUrl.includes("embed69.org/f/")) {
-            if (!embed69LookupUrl && !isStreamwishUrl(targetEmbedUrl)) {
+            if (
+              !isExternalNonScraperAggregator &&
+              !embed69LookupUrl &&
+              !isStreamwishUrl(targetEmbedUrl)
+            ) {
               embed69LookupUrl = sibling.rawUrl;
             }
-          } else if (!sibling.rawUrl.includes("vidsrc.me")) {
+          } else if (
+            !sibling.rawUrl.includes("vidsrc.me") &&
+            (!isExternalNonScraperAggregator ||
+              (!isMultiEmbedAggregatorUrl(sibling.rawUrl) &&
+                isExtractableCleanHost({
+                  serverName: sibling.serverName,
+                  url: sibling.rawUrl,
+                })))
+          ) {
             rawCandidates.push({
               url: isStreamwishUrl(sibling.rawUrl)
                 ? normalizeStreamwishEmbedUrl(sibling.rawUrl)
@@ -562,8 +622,11 @@ export async function GET(request: NextRequest) {
           fallbackUrl: fallbackIframeUrl,
           isStreamwish: false,
           isDirty: true,
-          reason:
-            "No se encontraron servidores Streamwish disponibles bajo el modo estricto.",
+          checkedSiblings:
+            Boolean(decryptedMovieId) || isExternalNonScraperAggregator,
+          reason: isExternalNonScraperAggregator
+            ? "Servidor embebido externo (sin extracción directa)."
+            : "No se encontraron servidores Streamwish disponibles bajo el modo estricto.",
         },
         { status: 200 }
       );
@@ -623,16 +686,20 @@ export async function GET(request: NextRequest) {
         });
       }
 
-      return NextResponse.json({
+      const responsePayload: CachedExtractorSuccessPayload = {
         success: true,
         streamUrl: extractionHit.streamUrl,
         type: extractionHit.type,
         referer: extractionHit.referer,
+        backupStreams: extractionHit.backupStreams,
         durationSeconds: extractionHit.durationSeconds,
         posterUrl: extractionHit.posterUrl,
         isStreamwish: extractionHit.isStreamwish,
         isDirty: extractionHit.isDirty,
-      });
+      };
+      cacheService.set(extractorCacheKey, responsePayload, 600);
+
+      return NextResponse.json(responsePayload);
     }
 
     const firstDescriptor = prioritizedDescriptors[0];
@@ -643,6 +710,7 @@ export async function GET(request: NextRequest) {
         isStreamwish:
           firstDescriptor?.isStreamwish ?? initialBelongsToStreamwish,
         isDirty: firstDescriptor?.isDirty ?? !initialBelongsToStreamwish,
+        checkedSiblings: Boolean(decryptedMovieId),
         reason:
           "No se encontró un manifiesto .m3u8 o archivo .mp4 directo o el servidor bloqueó la IP.",
       },

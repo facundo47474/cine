@@ -7,7 +7,6 @@ import {
   ArrowLeft,
   Cast,
   Clock,
-  Film,
   Languages,
   ShieldCheck,
   ShieldOff,
@@ -181,7 +180,12 @@ export default function WatchMoviePage() {
           </Link>
 
           <Link className="flex items-center gap-2" href="/">
-            <Film className="w-4 h-4 text-netflix-red" />
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/logo.jpg"
+              alt="PILOTO Logo"
+              className="w-7 h-7 rounded-full object-cover border border-white/25 bg-white"
+            />
             <span className="font-black tracking-tight text-netflix-red text-sm sm:text-base">
               PILOTO
             </span>

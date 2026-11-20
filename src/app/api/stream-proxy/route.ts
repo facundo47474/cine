@@ -2,6 +2,10 @@ import dns from "dns";
 import { NextRequest, NextResponse } from "next/server";
 import { DEFAULT_SCRAPER_USER_AGENT } from "@/infrastructure/providers/Embed69Decoder";
 import { isSafePublicHttpUrl } from "@/infrastructure/security/SecurityGuard";
+import {
+  apiRateLimiter,
+  getClientIp,
+} from "@/infrastructure/security/RateLimiter";
 
 try {
   dns.setDefaultResultOrder("ipv4first");
@@ -16,6 +20,47 @@ export const maxDuration = 60;
  * Límite seguro por debajo de los 4.5 MB máximos de payload por invocación Serverless en Vercel.
  */
 const MAX_VERCEL_MP4_CHUNK_BYTES = 3_500_000;
+const MAX_BUFFERED_SEGMENT_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Lee el cuerpo de una respuesta aplicando un límite estricto de bytes en memoria para evitar OOM.
+ */
+async function readBoundedBuffer(
+  response: Response,
+  maxBytes: number
+): Promise<Buffer | null> {
+  if (!response.body) {
+    return Buffer.alloc(0);
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel().catch(() => {});
+        return null;
+      }
+      chunks.push(value);
+    }
+
+    return Buffer.concat(
+      chunks.map((chunk) =>
+        Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)
+      ),
+      totalBytes
+    );
+  } finally {
+    reader.releaseLock();
+  }
+}
 
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -116,7 +161,7 @@ function stripCamouflagedMpegTsHeader(rawBuffer: Buffer): Buffer {
     return rawBuffer;
   }
 
-  const maxInspectOffset = Math.min(rawBuffer.length - 376, 1024);
+  const maxInspectOffset = Math.min(rawBuffer.length - 376, 4096);
   for (let offset = 0; offset < maxInspectOffset; offset++) {
     if (
       rawBuffer[offset] === 0x47 &&
@@ -138,6 +183,24 @@ function stripCamouflagedMpegTsHeader(rawBuffer: Buffer): Buffer {
  * evitando bloqueos `403 Forbidden` y errores CORS.
  */
 export async function GET(request: NextRequest) {
+  const rateLimit = apiRateLimiter.checkLimit(
+    `stream-proxy:${getClientIp(request)}`,
+    300,
+    60_000
+  );
+  if (!rateLimit.allowed) {
+    return NextResponse.json(
+      { error: "Demasiadas solicitudes de reproducción." },
+      {
+        status: 429,
+        headers: {
+          ...CORS_HEADERS,
+          "Retry-After": String(rateLimit.retryAfterSeconds),
+        },
+      }
+    );
+  }
+
   const streamUrl = request.nextUrl.searchParams.get("url")?.trim() || "";
   const rawReferer = request.nextUrl.searchParams.get("referer")?.trim() || "";
 
@@ -174,18 +237,18 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  let refererHeader = rawReferer || `${parsedStreamUrl.origin}/`;
+  let refererHeader = `${parsedStreamUrl.origin}/`;
   let originHeader = parsedStreamUrl.origin;
 
-  try {
-    if (rawReferer) {
+  if (rawReferer && isSafePublicHttpUrl(rawReferer)) {
+    try {
       const parsedReferer = new URL(rawReferer);
       refererHeader = parsedReferer.toString();
       originHeader = parsedReferer.origin;
+    } catch {
+      refererHeader = `${parsedStreamUrl.origin}/`;
+      originHeader = parsedStreamUrl.origin;
     }
-  } catch {
-    refererHeader = `${parsedStreamUrl.origin}/`;
-    originHeader = parsedStreamUrl.origin;
   }
 
   const upstreamHeaders: Record<string, string> = {
@@ -220,6 +283,7 @@ export async function GET(request: NextRequest) {
       method: "GET",
       headers: upstreamHeaders,
       redirect: "follow",
+      signal: AbortSignal.timeout(15000),
     });
 
     if (
@@ -282,7 +346,52 @@ export async function GET(request: NextRequest) {
       contentType.includes("audio/mp4");
 
     if (!isMp4OrIsoSegment) {
-      const rawBuffer = Buffer.from(await upstreamResponse.arrayBuffer());
+      const contentLengthHeader = Number(
+        upstreamResponse.headers.get("content-length") || "0"
+      );
+      if (
+        Number.isFinite(contentLengthHeader) &&
+        contentLengthHeader > MAX_BUFFERED_SEGMENT_BYTES
+      ) {
+        await upstreamResponse.body?.cancel().catch(() => {});
+        return NextResponse.json(
+          { error: "Segmento demasiado grande." },
+          { status: 413, headers: CORS_HEADERS }
+        );
+      }
+
+      const rawBuffer = await readBoundedBuffer(
+        upstreamResponse,
+        MAX_BUFFERED_SEGMENT_BYTES
+      );
+      if (rawBuffer === null) {
+        return NextResponse.json(
+          { error: "Segmento demasiado grande." },
+          { status: 413, headers: CORS_HEADERS }
+        );
+      }
+      if (rawBuffer.length < 512_000) {
+        const textPreview = rawBuffer
+          .subarray(0, Math.min(rawBuffer.length, 64))
+          .toString("utf8");
+        if (textPreview.includes("#EXTM3U")) {
+          const proxyOrigin = resolvePublicProxyOrigin(request);
+          const modifiedManifest = rewriteHlsManifestLines(
+            rawBuffer.toString("utf8"),
+            finalBaseUrl,
+            refererHeader,
+            proxyOrigin
+          );
+          return new NextResponse(modifiedManifest, {
+            status: 200,
+            headers: {
+              ...CORS_HEADERS,
+              "Content-Type": "application/vnd.apple.mpegurl; charset=utf-8",
+              "Cache-Control": "no-store, no-cache, must-revalidate",
+            },
+          });
+        }
+      }
       const cleanTsBuffer = stripCamouflagedMpegTsHeader(rawBuffer);
 
       return new NextResponse(new Uint8Array(cleanTsBuffer), {

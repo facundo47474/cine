@@ -373,7 +373,8 @@ export default function SmartVideoPlayer({
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const presentationConnectionRef = useRef<PresentationConnection | null>(null);
-  const { isPro, isModoEscudoActive, openUpgradeModal } = useMembership();
+  const { isPro, isModoEscudoActive, loadingMembership, openUpgradeModal } =
+    useMembership();
 
   const fallbackDurationSec = Math.max(600, (durationMins || 120) * 60);
   const [playbackStarted, setPlaybackStarted] = useState<boolean>(
@@ -396,6 +397,7 @@ export default function SmartVideoPlayer({
   const initialResumeSecRef = useRef<number>(
     Math.max(0, Math.floor(initialProgressSeconds || 0))
   );
+  const lastInternalInteractionRef = useRef<number>(0);
 
   // Estados interactivos para TV Series (Fase 4)
   const [dismissedNextOverlay, setDismissedNextOverlay] = useState<boolean>(false);
@@ -543,24 +545,47 @@ export default function SmartVideoPlayer({
   }, [asegurarContextoGoogleCastInicializado]);
 
   useEffect(() => {
+    if (currentStream?.format !== MirrorFormat.EMBED) return;
+
+    const handleInternalInteraction = (event: Event) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("a, button, [role='button'], input, select")) {
+        lastInternalInteractionRef.current = Date.now();
+      }
+    };
+
+    const handleTopRedirectGuard = (event: BeforeUnloadEvent) => {
+      if (
+        Date.now() - lastInternalInteractionRef.current >= 2500 &&
+        iframeRef.current &&
+        document.activeElement === iframeRef.current
+      ) {
+        event.preventDefault();
+        event.returnValue = "";
+      }
+    };
+
+    document.addEventListener("pointerdown", handleInternalInteraction, true);
+    document.addEventListener("click", handleInternalInteraction, true);
+    document.addEventListener("keydown", handleInternalInteraction, true);
+    window.addEventListener("beforeunload", handleTopRedirectGuard);
+
+    return () => {
+      document.removeEventListener("pointerdown", handleInternalInteraction, true);
+      document.removeEventListener("click", handleInternalInteraction, true);
+      document.removeEventListener("keydown", handleInternalInteraction, true);
+      window.removeEventListener("beforeunload", handleTopRedirectGuard);
+    };
+  }, [currentStream?.format]);
+
+  useEffect(() => {
     if (!isModoEscudoActive) return;
 
     const originalWindowOpen = window.open;
     window.open = () => null;
 
-    const handleWindowBlur = () => {
-      if (document.activeElement === iframeRef.current) {
-        setTimeout(() => {
-          window.focus();
-        }, 50);
-      }
-    };
-
-    window.addEventListener("blur", handleWindowBlur);
-
     return () => {
       window.open = originalWindowOpen;
-      window.removeEventListener("blur", handleWindowBlur);
     };
   }, [isModoEscudoActive]);
 
@@ -1078,6 +1103,7 @@ export default function SmartVideoPlayer({
 
   const handleGoToNextEpisode = useCallback(() => {
     if (!nextEpisode) return;
+    lastInternalInteractionRef.current = Date.now();
     if (onEpisodeSelect) {
       onEpisodeSelect(nextEpisode.id);
     } else {
@@ -1196,6 +1222,7 @@ export default function SmartVideoPlayer({
           )}
           hideInlineHelperBar={true}
           modoEscudoActivo={isModoEscudoActive}
+          isMembershipLoading={loadingMembership}
           onRequestModoEscudo={() => openUpgradeModal("modo_escudo")}
           onStatusChange={setSmartPlayerStatus}
           onNativeStreamReady={setExtractedNativeStream}

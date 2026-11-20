@@ -13,6 +13,13 @@ export async function GET(
 ) {
   try {
     const userId = await getAuthenticatedUserId();
+    if (!userId) {
+      return NextResponse.json(
+        { ok: false, error: "No autorizado." },
+        { status: 401 }
+      );
+    }
+
     const details = await seriesService.getSeriesDetails(params.id, userId);
 
     if (!details) {

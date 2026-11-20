@@ -83,11 +83,23 @@ export const STREAMWISH_LABEL_REGEX =
 export const MULTI_EMBED_AGGREGATOR_HOSTS: readonly string[] = [
   "embed69.org",
   "playlatinsrc.co",
+  "cinesrc.st",
+  "embedwave.cc",
+  "web.nxsha.app",
+  "vidsrc.me",
+  "vidsrc.sh",
+  "vidsrc.to",
+  "vidsrc.pk",
+  "embed.vidsrc.pk",
+  "vidfast.pro",
+  "vidfast.vc",
+  "vidrock.net",
+  "2embed.cc",
+  "multiembed.mov",
+  "streamingnow.mov",
   "vidlink.pro",
   "autoembed.cc",
   "vidsrc.cc",
-  "vidsrc.me",
-  "multiembed.mov",
 ];
 
 export interface StreamwishCandidateInput {

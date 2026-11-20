@@ -19,9 +19,13 @@ export default function HeroBanner({ movie }: HeroBannerProps) {
 
   return (
     <section className="relative w-full min-h-[460px] sm:min-h-[520px] sm:h-[74vh] flex items-end pt-28 sm:pt-24 pb-14 sm:pb-16 overflow-hidden">
-      <div
-        className="absolute inset-0 bg-cover bg-center scale-105 transition-transform duration-1000"
-        style={{ backgroundImage: `url(${bgImage})` }}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={bgImage}
+        alt={movie.title}
+        fetchPriority="high"
+        decoding="async"
+        className="absolute inset-0 w-full h-full object-cover scale-105 transition-transform duration-1000"
       />
       <div className="absolute inset-0 bg-gradient-to-r from-[#141414] via-[#141414]/85 to-transparent" />
       <div className="absolute inset-0 bg-gradient-to-t from-[#141414] via-[#141414]/35 to-black/40" />

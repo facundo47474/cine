@@ -531,6 +531,12 @@ export async function fetchEmbed69PageHtml(
   };
 }
 
+const embed69SourceCache = new Map<
+  string,
+  { value: SeparatedLanguageSources; expiresAt: number }
+>();
+const EMBED69_CACHE_TTL_MS = 10 * 60 * 1000;
+
 /**
  * Extrae y clasifica por idioma todas las fuentes de `embed69.org` para un `imdbId` o slug de episodio,
  * separando estrictamente los mirrors de Streamwish de los servidores de respaldo.
@@ -552,9 +558,31 @@ export async function extractCategorizedSourcesFromEmbed69(
     ? slugOrImdbId.split("?")[0]
     : `https://embed69.org/f/${slugOrImdbId}`;
 
-  const pageResult = await fetchEmbed69PageHtml(baseUrl, 2800);
+  const cachedEntry = embed69SourceCache.get(baseUrl);
+  if (cachedEntry) {
+    if (Date.now() <= cachedEntry.expiresAt) {
+      return cachedEntry.value;
+    }
+    embed69SourceCache.delete(baseUrl);
+  }
+
+  const cacheResult = (value: SeparatedLanguageSources) => {
+    if (embed69SourceCache.size >= 400) {
+      const oldestKey = embed69SourceCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        embed69SourceCache.delete(oldestKey);
+      }
+    }
+    embed69SourceCache.set(baseUrl, {
+      value,
+      expiresAt: Date.now() + EMBED69_CACHE_TTL_MS,
+    });
+    return value;
+  };
+
+  const pageResult = await fetchEmbed69PageHtml(baseUrl, 1800);
   if (!pageResult.html) {
-    return emptyResult;
+    return cacheResult(emptyResult);
   }
 
   const domEntries = extractDomServerEntriesFromEmbed69Html(pageResult.html);
@@ -564,7 +592,7 @@ export async function extractCategorizedSourcesFromEmbed69(
       : extractEncryptedDataLinkEntriesFromEmbed69Html(pageResult.html);
 
   if (allEntries.length === 0) {
-    return emptyResult;
+    return cacheResult(emptyResult);
   }
 
   const entriesByLanguage: Record<
@@ -603,12 +631,12 @@ export async function extractCategorizedSourcesFromEmbed69(
       )
     );
 
-  return {
+  return cacheResult({
     streamwishLat: uniqueUrls(latinoPool, true),
     streamwishSub: uniqueUrls(subtituladoPool, true),
     fallbackLat: uniqueUrls(latinoPool, false),
     fallbackSub: uniqueUrls(subtituladoPool, false),
-  };
+  });
 }
 
 /**

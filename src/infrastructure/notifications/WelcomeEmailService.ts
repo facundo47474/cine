@@ -597,7 +597,22 @@ export class WelcomeEmailService {
       }
     }
 
-    // 3. Fallback real a servidor SMTP de prueba Ethereal para inspección inmediata
+    // 3. En producción no se utiliza Ethereal de prueba; reportar fallo de entrega limpio
+    if (process.env.NODE_ENV === "production") {
+      console.error(
+        `[WelcomeEmailService] Falló el envío real en producción (${params.contextLabel}):`,
+        errors.join(" | ") || "Sin proveedor de correo operativo."
+      );
+      return {
+        sent: false,
+        recipientEmail: normalizedRecipient,
+        provider: "none",
+        previewUrl: null,
+        errorMessage: "No se pudo enviar el correo en este momento.",
+      };
+    }
+
+    // Fallback de desarrollo a servidor SMTP de prueba Ethereal para inspección inmediata
     try {
       const testAccount = await this.getEtherealTestAccount();
       const { messageId, rawInfo } = await this.sendViaSmtp({

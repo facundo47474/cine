@@ -14,6 +14,12 @@ export async function GET(
 ) {
   try {
     const userId = await getAuthenticatedUserId();
+    if (!userId) {
+      return NextResponse.json(
+        { ok: false, error: "No autorizado." },
+        { status: 401 }
+      );
+    }
 
     const episodes = await seriesService.getSeasonEpisodes(
       params.id,

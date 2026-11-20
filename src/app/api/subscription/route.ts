@@ -162,13 +162,16 @@ export async function POST(request: NextRequest) {
         return buildMissingEmailErrorResponse();
       }
       if (!mercadoPagoService.isConfigured()) {
+        console.error(
+          "[POST /api/subscription] MERCADOPAGO_ACCESS_TOKEN no configurado."
+        );
         return NextResponse.json(
           {
             ok: false,
             error:
-              "Configurá MERCADOPAGO_ACCESS_TOKEN en tu archivo .env para habilitar el cobro con MercadoPago.",
+              "El servicio de pagos no está disponible temporalmente. Intentá nuevamente más tarde.",
           },
-          { status: 400 }
+          { status: 503 }
         );
       }
 

@@ -27,7 +27,7 @@ interface MovieCardProps {
  * Soporta tanto grillas de exploración (`fullWidth = true`) como carruseles horizontales,
  * incluyendo barra de progreso roja e insignia de capítulo en curso (`SERIE • T1:E3`).
  */
-export default function MovieCard({
+function MovieCard({
   id,
   title,
   posterUrl,
@@ -49,19 +49,24 @@ export default function MovieCard({
       : `/series/${id}`
     : `/watch/${id}`;
 
+  const optimizedPosterUrl = posterUrl.includes("image.tmdb.org/t/p/w500/")
+    ? posterUrl.replace("/t/p/w500/", "/t/p/w342/")
+    : posterUrl;
+
   return (
     <Link
       href={href}
-      className={`group relative rounded-xl overflow-hidden bg-zinc-900 border border-white/10 hover:border-netflix-red/80 transition-all duration-300 sm:hover:scale-[1.04] hover:z-20 shadow-lg ${
+      className={`group relative rounded-xl overflow-hidden bg-zinc-900 border border-white/10 hover:border-netflix-red/80 transition-transform duration-200 sm:hover:scale-[1.04] hover:z-20 shadow-lg ${
         fullWidth ? "w-full" : "flex-shrink-0 w-36 sm:w-52"
       }`}
     >
       <div className="relative aspect-[2/3] w-full overflow-hidden bg-zinc-800">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src={posterUrl}
+          src={optimizedPosterUrl}
           alt={title}
           loading="lazy"
+          decoding="async"
           className="w-full h-full object-cover object-center sm:group-hover:scale-110 transition-transform duration-500"
         />
 
@@ -136,3 +141,5 @@ export default function MovieCard({
     </Link>
   );
 }
+
+export default React.memo(MovieCard);

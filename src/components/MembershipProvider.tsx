@@ -41,6 +41,76 @@ interface MembershipContextValue {
 }
 
 const DEFAULT_FREE_MEMBERSHIP = construirEstadoMembresia({ plan: "FREE" });
+const MEMBERSHIP_CACHE_PREFIX = "piloto_membership_v1_";
+const MEMBERSHIP_CACHE_TTL_MS = 5 * 60 * 1000;
+
+interface CachedMembershipSnapshot {
+  membership: UserMembershipStatusDto;
+  userEmail: string | null;
+  savedAt: number;
+}
+
+function getMembershipCacheKey(
+  userId?: string | null,
+  email?: string | null
+): string | null {
+  const identity = userId || email?.trim().toLowerCase();
+  return identity ? `${MEMBERSHIP_CACHE_PREFIX}${identity}` : null;
+}
+
+function readMembershipCache(
+  cacheKey: string | null
+): CachedMembershipSnapshot | null {
+  if (typeof window === "undefined" || !cacheKey) return null;
+  try {
+    const raw = sessionStorage.getItem(cacheKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as CachedMembershipSnapshot;
+    if (
+      !parsed?.membership ||
+      typeof parsed.savedAt !== "number" ||
+      Date.now() - parsed.savedAt > MEMBERSHIP_CACHE_TTL_MS
+    ) {
+      sessionStorage.removeItem(cacheKey);
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeMembershipCache(
+  cacheKey: string | null,
+  membership: UserMembershipStatusDto,
+  userEmail: string | null
+): void {
+  if (typeof window === "undefined" || !cacheKey) return;
+  try {
+    const snapshot: CachedMembershipSnapshot = {
+      membership,
+      userEmail,
+      savedAt: Date.now(),
+    };
+    sessionStorage.setItem(cacheKey, JSON.stringify(snapshot));
+  } catch {
+    // Silencioso si sessionStorage no está disponible
+  }
+}
+
+function clearAllMembershipCaches(): void {
+  if (typeof window === "undefined") return;
+  try {
+    for (let i = sessionStorage.length - 1; i >= 0; i--) {
+      const key = sessionStorage.key(i);
+      if (key && key.startsWith(MEMBERSHIP_CACHE_PREFIX)) {
+        sessionStorage.removeItem(key);
+      }
+    }
+  } catch {
+    // Silencioso
+  }
+}
 
 const MembershipContext = createContext<MembershipContextValue | null>(null);
 
@@ -81,26 +151,36 @@ export function MembershipProvider({
   const [myList, setMyList] = useState<CatalogCardDto[]>([]);
   const activeUserEmail = resolvedUserEmail || session?.user?.email || null;
 
-  const refreshMembership = useCallback(async () => {
-    setLoadingMembership(true);
-    try {
-      const response = await fetch("/api/subscription", { cache: "no-store" });
-      const data = await response.json();
-      if (response.ok && data.ok && data.membership) {
-        setMembership(data.membership as UserMembershipStatusDto);
-        setResolvedUserEmail(
-          typeof data.userEmail === "string" ? data.userEmail : null
-        );
-      } else {
-        setMembership(DEFAULT_FREE_MEMBERSHIP);
-        setResolvedUserEmail(null);
+  const refreshMembership = useCallback(
+    async (backgroundRevalidate: boolean = false) => {
+      if (!backgroundRevalidate) {
+        setLoadingMembership(true);
       }
-    } catch {
-      setMembership(DEFAULT_FREE_MEMBERSHIP);
-    } finally {
-      setLoadingMembership(false);
-    }
-  }, []);
+      const cacheKey = getMembershipCacheKey(userId, sessionEmail);
+      try {
+        const response = await fetch("/api/subscription", { cache: "no-store" });
+        const data = await response.json();
+        if (response.ok && data.ok && data.membership) {
+          const nextMembership = data.membership as UserMembershipStatusDto;
+          const nextEmail =
+            typeof data.userEmail === "string" ? data.userEmail : null;
+          setMembership(nextMembership);
+          setResolvedUserEmail(nextEmail);
+          writeMembershipCache(cacheKey, nextMembership, nextEmail);
+        } else if (!backgroundRevalidate) {
+          setMembership(DEFAULT_FREE_MEMBERSHIP);
+          setResolvedUserEmail(null);
+        }
+      } catch {
+        if (!backgroundRevalidate) {
+          setMembership(DEFAULT_FREE_MEMBERSHIP);
+        }
+      } finally {
+        setLoadingMembership(false);
+      }
+    },
+    [userId, sessionEmail]
+  );
 
   useEffect(() => {
     if (sessionStatus === "loading") return;
@@ -109,9 +189,19 @@ export function MembershipProvider({
       setResolvedUserEmail(null);
       setShowPaymentThankYou(false);
       setLoadingMembership(false);
+      clearAllMembershipCaches();
       return;
     }
-    void refreshMembership();
+
+    const cacheKey = getMembershipCacheKey(userId, sessionEmail);
+    const cached = readMembershipCache(cacheKey);
+    if (cached) {
+      setMembership(cached.membership);
+      setResolvedUserEmail(cached.userEmail);
+      setLoadingMembership(false);
+    }
+
+    void refreshMembership(Boolean(cached));
   }, [sessionStatus, userId, sessionEmail, refreshMembership]);
 
   // Procesa el retorno desde MercadoPago Checkout Pro (?mp_status=approved|pending|failure)
@@ -246,10 +336,20 @@ export function MembershipProvider({
           setActionError(data.error || fallbackError);
           return;
         }
-        setMembership(data.membership as UserMembershipStatusDto);
+        const nextMembership = data.membership as UserMembershipStatusDto;
+        const nextEmail =
+          typeof data.userEmail === "string"
+            ? data.userEmail
+            : activeUserEmail;
+        setMembership(nextMembership);
         if (typeof data.userEmail === "string") {
           setResolvedUserEmail(data.userEmail);
         }
+        writeMembershipCache(
+          getMembershipCacheKey(userId, sessionEmail),
+          nextMembership,
+          nextEmail
+        );
         if (data.emailNotification) {
           setLastEmailNotification(
             data.emailNotification as EmailDispatchResult
@@ -266,7 +366,7 @@ export function MembershipProvider({
         setBusy(false);
       }
     },
-    []
+    [userId, sessionEmail, activeUserEmail]
   );
 
   const upgradeToPro = useCallback(

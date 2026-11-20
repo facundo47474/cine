@@ -44,10 +44,18 @@ export async function GET(request: NextRequest) {
 
     if (mode === "home") {
       const feed = await catalogService.getHomeFeed();
-      return NextResponse.json({
-        ok: true,
-        ...feed,
-      });
+      return NextResponse.json(
+        {
+          ok: true,
+          ...feed,
+        },
+        {
+          headers: {
+            "Cache-Control":
+              "private, max-age=60, stale-while-revalidate=300",
+          },
+        }
+      );
     }
 
     const query = searchParams.get("q") || undefined;
@@ -72,12 +80,19 @@ export async function GET(request: NextRequest) {
       mediaType,
     });
 
-    return NextResponse.json({
-      ok: true,
-      ...result,
-      // Mantiene compatibilidad retroactiva con la propiedad `movies`
-      movies: result.items,
-    });
+    return NextResponse.json(
+      {
+        ok: true,
+        ...result,
+        // Mantiene compatibilidad retroactiva con la propiedad `movies`
+        movies: result.items,
+      },
+      {
+        headers: {
+          "Cache-Control": "private, max-age=30, stale-while-revalidate=120",
+        },
+      }
+    );
   } catch (error) {
     console.error("[GET /api/movies] Error:", error);
     return NextResponse.json(

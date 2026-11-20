@@ -4,6 +4,10 @@ import { CreateMirrorInput } from "@/domain/interfaces/IMovieRepository";
 import { ITmdbGateway } from "@/domain/interfaces/ITmdbGateway";
 import { MirrorFormat } from "@/domain/enums/MirrorFormat";
 import {
+  buildMovieContingencyMirrors,
+  buildTvEpisodeContingencyMirrors,
+} from "@/domain/utils/contingencyMirrors";
+import {
   FALLBACK_IF_EMPTY,
   STRICT_STREAMWISH_ONLY,
   extractHostname,
@@ -120,7 +124,7 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
 
   /**
    * Construye la lista final priorizada de mirrors fusionando las fuentes extraídas de
-   * `Embed69` y `PlayLatinSrc` junto con los servidores multi-mirror de contingencia (`VidLink`, `VidSrcCC`, `AutoEmbed`, `VidSrc`).
+   * `Embed69` y `PlayLatinSrc` junto con los servidores multi-mirror de contingencia (`VidSrc`, `VidFast`, `VidSrcPK`, `SuperEmbed`).
    */
   private buildPrioritizedMirrorList(
     embed69Sources: SeparatedLanguageSources,
@@ -295,40 +299,7 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
       ]);
     }
 
-    const movieContingencyMirrors: CreateMirrorInput[] = [
-      {
-        serverName: "VidLink-Contingencia",
-        language: "Inglés (Sub)",
-        rawUrl: `https://vidlink.pro/movie/${tmdbId}`,
-        format: MirrorFormat.EMBED,
-        quality: "1080p",
-        priority: 70,
-      },
-      {
-        serverName: "VidSrcCC-Contingencia",
-        language: "Inglés (Sub)",
-        rawUrl: `https://vidsrc.cc/v2/embed/movie/${tmdbId}`,
-        format: MirrorFormat.EMBED,
-        quality: "1080p",
-        priority: 80,
-      },
-      {
-        serverName: "AutoEmbed-Contingencia",
-        language: "Inglés (Sub)",
-        rawUrl: `https://autoembed.cc/movie/tmdb/${tmdbId}`,
-        format: MirrorFormat.EMBED,
-        quality: "1080p",
-        priority: 90,
-      },
-      {
-        serverName: "Backup-Sub",
-        language: "Inglés (Sub)",
-        rawUrl: `https://vidsrc.me/embed/movie?tmdb=${tmdbId}&ds_lang=es`,
-        format: MirrorFormat.EMBED,
-        quality: "1080p",
-        priority: 99,
-      },
-    ];
+    const movieContingencyMirrors = buildMovieContingencyMirrors(tmdbId);
 
     return this.buildPrioritizedMirrorList(
       embed69Sources,
@@ -383,40 +354,11 @@ export class AutoEmbedMirrorResolver implements IMirrorResolver {
       ]);
     }
 
-    const tvContingencyMirrors: CreateMirrorInput[] = [
-      {
-        serverName: "VidLink-Contingencia",
-        language: "Inglés (Sub)",
-        rawUrl: `https://vidlink.pro/tv/${tmdbId}/${seasonNumber}/${episodeNumber}`,
-        format: MirrorFormat.EMBED,
-        quality: "1080p",
-        priority: 70,
-      },
-      {
-        serverName: "VidSrcCC-Contingencia",
-        language: "Inglés (Sub)",
-        rawUrl: `https://vidsrc.cc/v2/embed/tv/${tmdbId}/${seasonNumber}/${episodeNumber}`,
-        format: MirrorFormat.EMBED,
-        quality: "1080p",
-        priority: 80,
-      },
-      {
-        serverName: "AutoEmbed-Contingencia",
-        language: "Inglés (Sub)",
-        rawUrl: `https://autoembed.cc/tv/tmdb/${tmdbId}-${seasonNumber}-${episodeNumber}`,
-        format: MirrorFormat.EMBED,
-        quality: "1080p",
-        priority: 90,
-      },
-      {
-        serverName: "Backup-Sub",
-        language: "Inglés (Sub)",
-        rawUrl: `https://vidsrc.me/embed/tv?tmdb=${tmdbId}&season=${seasonNumber}&episode=${episodeNumber}&ds_lang=es`,
-        format: MirrorFormat.EMBED,
-        quality: "1080p",
-        priority: 99,
-      },
-    ];
+    const tvContingencyMirrors = buildTvEpisodeContingencyMirrors(
+      tmdbId,
+      seasonNumber,
+      episodeNumber
+    );
 
     return this.buildPrioritizedMirrorList(
       embed69Sources,

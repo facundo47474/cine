@@ -123,7 +123,7 @@ class MercadoPagoService {
     const accessToken = this.getAccessToken();
     if (!accessToken) {
       throw new Error(
-        "Configurá MERCADOPAGO_ACCESS_TOKEN en tu archivo .env para habilitar el cobro con MercadoPago."
+        "El servicio de pagos de MercadoPago no está disponible en este momento."
       );
     }
 
