@@ -4,7 +4,7 @@ import LegalDocumentLayout, {
 } from "@/components/LegalDocumentLayout";
 
 export const metadata: Metadata = {
-  title: "Condiciones de Servicio | PILOTO Streaming",
+  title: "Condiciones de Servicio",
   description:
     "Condiciones de Servicio, términos de acceso mediante Google OAuth 2.0, suscripción mensual Piloto Plus en MercadoPago y reglas de uso de PILOTO Streaming.",
   alternates: {

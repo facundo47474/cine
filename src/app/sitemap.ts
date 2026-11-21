@@ -1,33 +1,36 @@
 import type { MetadataRoute } from "next";
+import { SITE_URL } from "@/config/seo";
 
+/**
+ * Sitemap XML dinámico con todas las rutas públicas indexables (HTTP 200 OK).
+ */
 export default function sitemap(): MetadataRoute.Sitemap {
-  const baseUrl = "https://cine-ddbt.vercel.app";
-  const lastModified = new Date("2026-11-16T00:00:00.000Z");
+  const lastModified = new Date("2026-11-21T00:00:00.000Z");
 
   return [
     {
-      url: `${baseUrl}/`,
+      url: `${SITE_URL}/`,
       lastModified,
       changeFrequency: "daily",
       priority: 1.0,
     },
     {
-      url: `${baseUrl}/privacidad`,
+      url: `${SITE_URL}/privacidad`,
       lastModified,
       changeFrequency: "monthly",
-      priority: 0.9,
+      priority: 0.8,
     },
     {
-      url: `${baseUrl}/condiciones`,
+      url: `${SITE_URL}/condiciones`,
       lastModified,
       changeFrequency: "monthly",
-      priority: 0.9,
+      priority: 0.8,
     },
     {
-      url: `${baseUrl}/login`,
+      url: `${SITE_URL}/login`,
       lastModified,
       changeFrequency: "monthly",
-      priority: 0.5,
+      priority: 0.7,
     },
   ];
 }

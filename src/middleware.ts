@@ -10,16 +10,10 @@ export default withAuth({
 export const config = {
   matcher: [
     /*
-     * Protege todas las rutas excepto:
-     * - /login (pantalla de inicio de sesión)
-     * - /privacidad y /condiciones (documentación legal pública indexable por Google Search Console)
-     * - /robots.txt, /sitemap.xml, /logo.jpg (metadatos SEO y logo público)
-     * - /api/auth (endpoints OAuth de Google)
-     * - /api/mercadopago (callback y webhook públicos de MercadoPago)
-     * - /api/stream, /api/stream-proxy, /api/extractor (protegidos para streaming HLS/MP4 y receptores Smart TV)
-     * - /api/health/cron (protegido por su propio CRON_SECRET)
-     * - archivos estáticos (_next/static, _next/image, favicon.ico, icon.svg)
+     * Permite acceso público e indexación en `/` (landing SSR / catálogo autenticado)
+     * y protege con sesión las rutas privadas (/watch, /series, APIs internas),
+     * excluyendo además rutas SEO, legales, autenticación y archivos estáticos:
      */
-    "/((?!login|privacidad|condiciones|robots\\.txt|sitemap\\.xml|logo\\.jpg|api/auth|api/mercadopago|api/stream|api/stream-proxy|api/extractor|api/health/cron|_next/static|_next/image|favicon.ico|icon.svg).*)",
+    "/((?!login|privacidad|condiciones|robots\\.txt|sitemap\\.xml|manifest\\.webmanifest|opengraph-image|twitter-image|logo\\.jpg|google[a-zA-Z0-9-]+\\.html|api/auth|api/mercadopago|api/stream|api/stream-proxy|api/extractor|api/health/cron|_next/static|_next/image|favicon\\.ico|icon\\.svg).+)",
   ],
 };

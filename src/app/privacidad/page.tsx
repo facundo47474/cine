@@ -4,7 +4,7 @@ import LegalDocumentLayout, {
 } from "@/components/LegalDocumentLayout";
 
 export const metadata: Metadata = {
-  title: "Políticas y Privacidad | PILOTO Streaming",
+  title: "Políticas y Privacidad",
   description:
     "Política de Privacidad, Protección de Datos Personales, Google OAuth 2.0, Pagos con MercadoPago, Cookies y Derechos del Usuario en PILOTO Streaming.",
   alternates: {
