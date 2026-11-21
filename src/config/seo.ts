@@ -31,4 +31,8 @@ export const SITE_KEYWORDS = [
 export const GOOGLE_SITE_VERIFICATION =
   process.env.GOOGLE_SITE_VERIFICATION?.trim() || undefined;
 
+export const BING_SITE_VERIFICATION =
+  process.env.BING_SITE_VERIFICATION?.trim() ||
+  "5C26B3A83482E9630F8550451C24C821";
+
 export const SUPPORT_EMAIL = "facundotomas018@gmail.com";

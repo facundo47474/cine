@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import AuthSessionProvider from "@/components/AuthSessionProvider";
 import {
+  BING_SITE_VERIFICATION,
   GOOGLE_SITE_VERIFICATION,
   SITE_DESCRIPTION,
   SITE_KEYWORDS,
@@ -33,13 +34,12 @@ export const metadata: Metadata = {
       es: "/",
     },
   },
-  ...(GOOGLE_SITE_VERIFICATION
-    ? {
-        verification: {
-          google: GOOGLE_SITE_VERIFICATION,
-        },
-      }
-    : {}),
+  verification: {
+    ...(GOOGLE_SITE_VERIFICATION ? { google: GOOGLE_SITE_VERIFICATION } : {}),
+    other: {
+      "msvalidate.01": BING_SITE_VERIFICATION,
+    },
+  },
   icons: {
     icon: [
       { url: "/logo.jpg", type: "image/jpeg" },
