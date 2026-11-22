@@ -304,7 +304,7 @@ export default function HomeCatalogClient() {
                 </div>
               ) : (
                 <>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 sm:gap-4">
                     {exploreItems.map((movie) => (
                       <MovieCard
                         fullWidth
@@ -316,6 +316,7 @@ export default function HomeCatalogClient() {
                         releaseYear={movie.releaseYear}
                         title={movie.title}
                         mediaType={movie.mediaType}
+                        catalogItem={movie}
                       />
                     ))}
                   </div>
@@ -345,7 +346,7 @@ export default function HomeCatalogClient() {
             <div id="catalogo" className="space-y-4">
               {continueWatching.length > 0 && (
                 <section className="space-y-3 py-2">
-                  <div className="px-4 sm:px-8 max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
+                  <div className="px-3 sm:px-8 max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
                     <h2 className="text-lg sm:text-xl font-bold text-white">
                       Continuar viendo
                     </h2>
@@ -363,8 +364,8 @@ export default function HomeCatalogClient() {
                       </button>
                     )}
                   </div>
-                  <div className="px-4 sm:px-8 max-w-7xl mx-auto">
-                    <div className="flex items-stretch gap-4 overflow-x-auto no-scrollbar pb-3 pt-1">
+                  <div className="px-3 sm:px-8 max-w-7xl mx-auto">
+                    <div className="flex items-stretch gap-3 sm:gap-4 overflow-x-auto no-scrollbar pb-3 pt-1 snap-x snap-mandatory sm:snap-none">
                       {continueWatching.map((item) => (
                         <MovieCard
                           id={item.movieId}
@@ -379,6 +380,25 @@ export default function HomeCatalogClient() {
                           seasonNumber={item.seasonNumber}
                           episodeNumber={item.episodeNumber}
                           episodeTitle={item.episodeTitle}
+                          catalogItem={{
+                            id: item.movieId,
+                            tmdbId: null,
+                            mediaType: item.mediaType,
+                            title: item.title,
+                            originalTitle: null,
+                            synopsis: "",
+                            posterUrl: item.posterUrl,
+                            backdropUrl: item.backdropUrl,
+                            releaseYear: item.releaseYear,
+                            durationMins: Math.max(
+                              1,
+                              Math.round((item.durationSeconds || 5400) / 60)
+                            ),
+                            rating: 7.5,
+                            qualityBadge: item.qualityBadge,
+                            genres: [],
+                            isLocalVip: true,
+                          }}
                         />
                       ))}
                     </div>
@@ -388,7 +408,7 @@ export default function HomeCatalogClient() {
 
               {myList.length > 0 && (
                 <section className="space-y-3 py-2">
-                  <div className="px-4 sm:px-8 max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
+                  <div className="px-3 sm:px-8 max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <BookmarkCheck className="w-5 h-5 text-netflix-red flex-shrink-0" />
                       <h2 className="text-lg sm:text-xl font-bold text-white">
@@ -413,8 +433,8 @@ export default function HomeCatalogClient() {
                       </button>
                     )}
                   </div>
-                  <div className="px-4 sm:px-8 max-w-7xl mx-auto">
-                    <div className="flex items-stretch gap-4 overflow-x-auto no-scrollbar pb-3 pt-1">
+                  <div className="px-3 sm:px-8 max-w-7xl mx-auto">
+                    <div className="flex items-stretch gap-3 sm:gap-4 overflow-x-auto no-scrollbar pb-3 pt-1 snap-x snap-mandatory sm:snap-none">
                       {myList.map((movie) => (
                         <MovieCard
                           id={movie.id}
@@ -425,6 +445,7 @@ export default function HomeCatalogClient() {
                           releaseYear={movie.releaseYear}
                           title={movie.title}
                           mediaType={movie.mediaType}
+                          catalogItem={movie}
                         />
                       ))}
                     </div>

@@ -8,6 +8,7 @@ import {
   PLUS_STRICT_IFRAME_SANDBOX,
   isSandboxCompatibleEmbedUrl,
 } from "@/domain/utils/contingencyMirrors";
+import { buildStreamProxyUrl } from "@/config/streamProxy";
 
 export type SmartPlayerStatus = "loading" | "playing_native" | "playing_iframe";
 
@@ -558,9 +559,7 @@ export default function SmartPlayer({
             setStreamData(data);
             onNativeStreamReadyRef.current?.({
               streamUrl: data.streamUrl,
-              proxiedUrl: `/api/stream-proxy?url=${encodeURIComponent(
-                data.streamUrl
-              )}&referer=${encodeURIComponent(data.referer || "")}`,
+              proxiedUrl: buildStreamProxyUrl(data.streamUrl, data.referer),
               type: data.type || "hls",
               referer: data.referer,
               posterUrl: data.posterUrl,
@@ -639,9 +638,7 @@ export default function SmartPlayer({
       destroyHlsInstance();
       onNativeStreamReadyRef.current?.({
         streamUrl: nextStream.streamUrl,
-        proxiedUrl: `/api/stream-proxy?url=${encodeURIComponent(
-          nextStream.streamUrl
-        )}&referer=${encodeURIComponent(nextStream.referer || "")}`,
+        proxiedUrl: buildStreamProxyUrl(nextStream.streamUrl, nextStream.referer),
         type: nextStream.type,
         referer: nextStream.referer,
         posterUrl: streamData?.posterUrl,
@@ -670,9 +667,10 @@ export default function SmartPlayer({
     destroyHlsInstance();
 
     const refererParam = activeNativeStream.referer || "";
-    const proxiedStreamUrl = `/api/stream-proxy?url=${encodeURIComponent(
-      activeNativeStream.streamUrl
-    )}&referer=${encodeURIComponent(refererParam)}`;
+    const proxiedStreamUrl = buildStreamProxyUrl(
+      activeNativeStream.streamUrl,
+      refererParam
+    );
 
     const resumeTarget = initialTimeSecondsRef.current;
 

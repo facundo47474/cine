@@ -99,7 +99,7 @@ export default function ProviderFilterBar({
           )}
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 sm:gap-2.5">
+        <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-0.5 sm:grid sm:grid-cols-3 lg:grid-cols-6 sm:gap-2.5 sm:overflow-visible sm:pb-0">
           {STREAMING_PROVIDERS.map((prov) => {
             const isSelected = selectedProviderId === prov.id;
             return (
@@ -107,7 +107,7 @@ export default function ProviderFilterBar({
                 type="button"
                 key={prov.name}
                 onClick={() => onSelectProvider(prov.id)}
-                className={`relative min-w-0 overflow-hidden rounded-xl px-3 sm:px-4 py-2.5 sm:py-3 text-left transition-all border ${
+                className={`relative flex-shrink-0 sm:flex-shrink min-w-max sm:min-w-0 overflow-hidden rounded-full sm:rounded-xl px-3.5 sm:px-4 py-2 sm:py-3 text-left transition-all border ${
                   isSelected
                     ? `bg-gradient-to-br ${prov.badgeColor} text-white border-white/40 shadow-lg sm:scale-[1.02]`
                     : "bg-zinc-800/70 hover:bg-zinc-800 text-zinc-300 border-white/5 hover:border-white/20"
@@ -118,7 +118,7 @@ export default function ProviderFilterBar({
                     {prov.name}
                   </span>
                   <Film
-                    className={`w-3.5 h-3.5 sm:w-4 sm:h-4 flex-shrink-0 ${
+                    className={`hidden sm:block w-4 h-4 flex-shrink-0 ${
                       isSelected ? "text-white" : "text-zinc-500"
                     }`}
                   />

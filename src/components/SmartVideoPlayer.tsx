@@ -24,6 +24,7 @@ import SmartPlayer, {
   ExtractorResponseData,
   SmartPlayerStatus,
 } from "@/components/video/SmartPlayer";
+import { buildStreamProxyUrl } from "@/config/streamProxy";
 import { useMembership } from "@/components/MembershipProvider";
 import {
   FALLBACK_IF_EMPTY,
@@ -237,9 +238,7 @@ async function resolverStreamNativoBajoDemandaParaCast(
 
     return {
       streamUrl: data.streamUrl,
-      proxiedUrl: `/api/stream-proxy?url=${encodeURIComponent(
-        data.streamUrl
-      )}&referer=${encodeURIComponent(data.referer || "")}`,
+      proxiedUrl: buildStreamProxyUrl(data.streamUrl, data.referer),
       type: data.type || "hls",
       referer: data.referer,
       posterUrl: data.posterUrl,
@@ -927,9 +926,7 @@ export default function SmartVideoPlayer({
         const resolvedProxiedUrl =
           typeof payload.proxiedUrl === "string" && payload.proxiedUrl
             ? payload.proxiedUrl
-            : `/api/stream-proxy?url=${encodeURIComponent(
-                payload.streamUrl
-              )}&referer=${encodeURIComponent(resolvedReferer)}`;
+            : buildStreamProxyUrl(payload.streamUrl, resolvedReferer);
 
         setExtractedNativeStream({
           streamUrl: payload.streamUrl,
@@ -1412,7 +1409,7 @@ export default function SmartVideoPlayer({
           onClick={handleCastClick}
           title={isCasting ? "Desconectar de la TV" : "Transmitir a TV"}
           aria-label={isCasting ? "Desconectar de la TV" : "Transmitir a TV"}
-          className={`inline-flex items-center justify-center gap-1.5 h-8 px-2.5 sm:px-3 sm:py-1.5 rounded-lg text-white text-xs font-semibold border border-white/15 backdrop-blur-md shadow-lg transition ${
+          className={`inline-flex items-center justify-center gap-1.5 h-9 min-w-[36px] px-2.5 sm:h-8 sm:px-3 sm:py-1.5 rounded-lg text-white text-xs font-semibold border border-white/15 backdrop-blur-md shadow-lg transition ${
             isCasting
               ? "bg-netflix-red hover:bg-red-700"
               : "bg-black/75 hover:bg-netflix-red"

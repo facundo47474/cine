@@ -317,6 +317,15 @@ export function isSameOriginMutation(request: Request): boolean {
 
   const allowedHosts = new Set<string>(["cine-ddbt.vercel.app"]);
 
+  const publicSiteUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim();
+  if (publicSiteUrl) {
+    try {
+      allowedHosts.add(new URL(publicSiteUrl).host.toLowerCase());
+    } catch {
+      // Ignora si NEXT_PUBLIC_SITE_URL no es válida
+    }
+  }
+
   const forwardedHost = request.headers
     .get("x-forwarded-host")
     ?.split(",")[0]

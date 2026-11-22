@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import LegalDocumentLayout, {
   LegalSectionItem,
 } from "@/components/LegalDocumentLayout";
+import { SITE_URL } from "@/config/seo";
 
 export const metadata: Metadata = {
   title: "Condiciones de Servicio",
@@ -22,7 +23,7 @@ export const metadata: Metadata = {
     title: "Condiciones de Servicio | PILOTO Streaming",
     description:
       "Términos y condiciones que rigen el acceso a la plataforma PILOTO Streaming y a la suscripción mensual Piloto Plus.",
-    url: "https://cine-ddbt.vercel.app/condiciones",
+    url: `${SITE_URL}/condiciones`,
     siteName: "PILOTO Streaming",
     locale: "es_AR",
     type: "article",
@@ -35,8 +36,8 @@ const TERMS_SECTIONS: LegalSectionItem[] = [
     id: "aceptacion",
     title: "1. Aceptación de las Condiciones",
     paragraphs: [
-      "Las presentes Condiciones de Servicio regulan el acceso y uso de la plataforma web PILOTO Streaming, disponible en https://cine-ddbt.vercel.app, operada por Facundo Argüello.",
-      "Al iniciar sesión o utilizar cualquiera de las funcionalidades del sitio, el usuario declara haber leído, comprendido y aceptado íntegramente estas Condiciones de Servicio junto con la Política de Privacidad disponible en https://cine-ddbt.vercel.app/privacidad.",
+      `Las presentes Condiciones de Servicio regulan el acceso y uso de la plataforma web PILOTO Streaming, disponible en ${SITE_URL}, operada por Facundo Argüello.`,
+      `Al iniciar sesión o utilizar cualquiera de las funcionalidades del sitio, el usuario declara haber leído, comprendido y aceptado íntegramente estas Condiciones de Servicio junto con la Política de Privacidad disponible en ${SITE_URL}/privacidad.`,
     ],
   },
   {
@@ -117,7 +118,7 @@ const TERMS_SECTIONS: LegalSectionItem[] = [
     id: "modificaciones-contacto",
     title: "9. Modificaciones, Legislación Aplicable y Contacto",
     paragraphs: [
-      "Nos reservamos la facultad de actualizar estas Condiciones de Servicio cuando resulte necesario por mejoras técnicas, cambios operativos o exigencias legales. Las modificaciones entrarán en vigencia desde su publicación en https://cine-ddbt.vercel.app/condiciones.",
+      `Nos reservamos la facultad de actualizar estas Condiciones de Servicio cuando resulte necesario por mejoras técnicas, cambios operativos o exigencias legales. Las modificaciones entrarán en vigencia desde su publicación en ${SITE_URL}/condiciones.`,
       "Estas condiciones se rigen por las leyes vigentes de la República Argentina. Ante cualquier duda, sugerencia o reclamo podés contactarte directamente a facundotomas018@gmail.com.",
     ],
   },

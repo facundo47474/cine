@@ -70,9 +70,9 @@ export default function HeroBanner({ movie }: HeroBannerProps) {
             ))}
           </div>
 
-          <div className="pt-1 sm:pt-2 flex flex-wrap items-center gap-2.5 sm:gap-3">
+          <div className="pt-1 sm:pt-2 grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2.5 sm:gap-3">
             <Link
-              className="inline-flex items-center justify-center gap-2 w-full sm:w-auto min-h-[44px] px-7 py-3 rounded-lg bg-netflix-red text-white font-bold text-sm hover:bg-red-700 active:scale-[0.99] transition shadow-lg"
+              className="inline-flex items-center justify-center gap-2 w-full sm:w-auto min-h-[44px] px-4 sm:px-7 py-3 rounded-lg bg-netflix-red text-white font-bold text-sm hover:bg-red-700 active:scale-[0.99] transition shadow-lg"
               href={watchHref}
             >
               <Play className="w-5 h-5 fill-white" />
@@ -82,7 +82,7 @@ export default function HeroBanner({ movie }: HeroBannerProps) {
             <button
               type="button"
               onClick={() => toggleMyListItem(movie)}
-              className={`inline-flex items-center justify-center gap-2 w-full sm:w-auto min-h-[44px] px-5 py-3 rounded-lg border text-sm font-bold transition shadow-lg ${
+              className={`inline-flex items-center justify-center gap-2 w-full sm:w-auto min-h-[44px] px-4 sm:px-5 py-3 rounded-lg border text-sm font-bold transition shadow-lg ${
                 inMyList
                   ? "bg-white/15 border-emerald-400/50 text-emerald-300 hover:bg-white/20"
                   : "bg-zinc-900/85 border-white/20 text-white hover:bg-white/15"

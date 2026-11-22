@@ -28,9 +28,13 @@ export default function SeriesHeroBanner({ series }: SeriesHeroBannerProps) {
   return (
     <section className="relative w-full min-h-[480px] sm:min-h-[540px] sm:h-[75vh] flex items-end pt-28 sm:pt-24 pb-12 sm:pb-16 overflow-hidden">
       {/* Fondo inmersivo */}
-      <div
-        className="absolute inset-0 bg-cover bg-center scale-105 transition-transform duration-1000"
-        style={{ backgroundImage: `url(${bgImage})` }}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={bgImage}
+        alt={series.title}
+        fetchPriority="high"
+        decoding="async"
+        className="absolute inset-0 w-full h-full object-cover scale-105 transition-transform duration-1000"
       />
       {/* Gradientes estilo Netflix */}
       <div className="absolute inset-0 bg-gradient-to-r from-[#141414] via-[#141414]/75 to-transparent" />
@@ -81,14 +85,16 @@ export default function SeriesHeroBanner({ series }: SeriesHeroBannerProps) {
           </div>
 
           {/* CTA Inteligente */}
-          <div className="pt-2 sm:pt-3 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+          <div className="pt-2 sm:pt-3 grid grid-cols-2 sm:flex sm:flex-row items-stretch sm:items-center gap-2.5 sm:gap-3">
             <div className="relative group w-full sm:w-auto inline-block">
               <Link
                 href={playHref}
-                className="inline-flex items-center justify-center gap-2.5 w-full sm:w-auto min-h-[44px] px-8 py-3.5 rounded-lg bg-white text-black font-black text-sm sm:text-base hover:bg-white/90 active:scale-[0.98] transition shadow-xl"
+                className="inline-flex items-center justify-center gap-2 w-full sm:w-auto min-h-[44px] px-4 sm:px-8 py-3 sm:py-3.5 rounded-lg bg-white text-black font-black text-xs sm:text-base hover:bg-white/90 active:scale-[0.98] transition shadow-xl truncate"
               >
-                <Play className="w-5 h-5 fill-black" />
-                {resume?.label || "Reproducir T1:E1"}
+                <Play className="w-4 h-4 sm:w-5 sm:h-5 fill-black flex-shrink-0" />
+                <span className="truncate">
+                  {resume?.label || "Reproducir T1:E1"}
+                </span>
               </Link>
 
               {/* Barra de progreso inferior si se dejó a mitad */}
@@ -122,7 +128,7 @@ export default function SeriesHeroBanner({ series }: SeriesHeroBannerProps) {
                   isLocalVip: true,
                 })
               }
-              className={`inline-flex items-center justify-center gap-2 w-full sm:w-auto min-h-[44px] px-5 py-3.5 rounded-lg border text-sm font-bold transition shadow-xl ${
+              className={`inline-flex items-center justify-center gap-2 w-full sm:w-auto min-h-[44px] px-4 sm:px-5 py-3 sm:py-3.5 rounded-lg border text-xs sm:text-sm font-bold transition shadow-xl ${
                 inMyList
                   ? "bg-white/15 border-emerald-400/50 text-emerald-300 hover:bg-white/20"
                   : "bg-zinc-900/85 border-white/20 text-white hover:bg-white/15"

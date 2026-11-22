@@ -1,4 +1,5 @@
 import { ImageResponse } from "next/og";
+import { SITE_URL } from "@/config/seo";
 
 export const runtime = "edge";
 export const alt = "PILOTO Streaming — Películas, Series y Estrenos en HD";
@@ -78,7 +79,7 @@ export default function OpenGraphImage() {
               fontWeight: 600,
             }}
           >
-            cine-ddbt.vercel.app
+            {new URL(SITE_URL).host}
           </div>
         </div>
 

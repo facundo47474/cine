@@ -5,17 +5,19 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import {
   ArrowLeft,
-  Cast,
+  Check,
   Clock,
   Languages,
   ChevronRight,
   ChevronLeft,
   Play,
+  Plus,
   Layers,
   ShieldCheck,
   ShieldOff,
 } from "lucide-react";
 import SmartVideoPlayer from "@/components/SmartVideoPlayer";
+import { CatalogCardDto } from "@/application/dto/CatalogFeedDto";
 import { EpisodePlaybackDto } from "@/application/dto/SeriesDto";
 import { useMembership } from "@/components/MembershipProvider";
 
@@ -53,7 +55,8 @@ export default function WatchEpisodePage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const episodeId = params.id;
-  const { isPro, openUpgradeModal } = useMembership();
+  const { isPro, openUpgradeModal, isInMyList, toggleMyListItem } =
+    useMembership();
 
   const [playback, setPlayback] = useState<EpisodePlaybackDto | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -158,12 +161,31 @@ export default function WatchEpisodePage() {
     }
   }, [playback, hasLatino, hasEnglish]);
 
+  const inMyList = playback ? isInMyList(playback.seriesId) : false;
+
   /**
-   * Dispara el evento global para abrir el selector nativo de Chromecast / AirPlay del reproductor.
+   * Agrega o quita la serie padre de la colección personal "Mi Lista".
    */
-  const handleNativeCastTrigger = useCallback(() => {
-    window.dispatchEvent(new CustomEvent("piloto:trigger-cast"));
-  }, []);
+  const handleToggleSeriesMyList = useCallback(() => {
+    if (!playback) return;
+    const seriesItem: CatalogCardDto = {
+      id: playback.seriesId,
+      tmdbId: playback.seriesTmdbId ?? null,
+      mediaType: "SERIES",
+      title: playback.seriesTitle,
+      originalTitle: null,
+      synopsis: playback.seriesSynopsis || playback.overview || "",
+      posterUrl: playback.seriesPosterUrl || playback.thumbnailUrl || "",
+      backdropUrl: playback.seriesBackdropUrl ?? null,
+      releaseYear: playback.seriesReleaseYear || new Date().getFullYear(),
+      durationMins: Math.max(1, Math.round(playback.durationSeconds / 60)),
+      rating: playback.seriesRating ?? 7.5,
+      qualityBadge: playback.seriesQualityBadge || "HD",
+      genres: playback.seriesGenres || [],
+      isLocalVip: true,
+    };
+    toggleMyListItem(seriesItem);
+  }, [playback, toggleMyListItem]);
 
   return (
     <div className="min-h-screen bg-[#141414] text-white flex flex-col">
@@ -198,7 +220,7 @@ export default function WatchEpisodePage() {
       </header>
 
       {/* Contenido principal */}
-      <main className="flex-1 max-w-7xl mx-auto px-3 sm:px-8 pt-20 pb-16 w-full space-y-6 sm:space-y-8">
+      <main className="flex-1 max-w-7xl mx-auto px-3 sm:px-8 pt-[68px] sm:pt-20 pb-12 sm:pb-16 w-full space-y-5 sm:space-y-8">
         {loading ? (
           <div className="w-full aspect-video rounded-2xl bg-zinc-900 border border-white/10 flex flex-col items-center justify-center space-y-3">
             <div className="w-10 h-10 border-4 border-netflix-red border-t-transparent rounded-full animate-spin" />
@@ -249,9 +271,9 @@ export default function WatchEpisodePage() {
               }
             />
 
-            {/* Metadatos del episodio y selector de idioma */}
+            {/* Metadatos del episodio, Mi Lista y selector de idioma */}
             <div className="bg-zinc-900/40 border border-white/10 rounded-xl sm:rounded-2xl p-4 sm:p-6 space-y-4">
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div className="space-y-2">
                 <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-xs font-semibold">
                   <span className="px-2.5 py-0.5 rounded bg-amber-500/90 text-black font-extrabold uppercase">
                     T{playback.seasonNumber}:E{playback.episodeNumber}
@@ -270,66 +292,76 @@ export default function WatchEpisodePage() {
                   </span>
                 </div>
 
-                {/* Selector de idioma + Transmitir a TV */}
-                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
-                  {(hasLatino || hasEnglish) && (
-                    <div className="flex sm:inline-flex items-center gap-1 bg-zinc-900 border border-white/10 rounded-full p-1 w-full sm:w-auto">
-                      <span className="pl-2 pr-1 text-zinc-400 flex items-center flex-shrink-0">
-                        <Languages className="w-3.5 h-3.5 text-netflix-red" />
-                      </span>
-                      {[
-                        { visible: hasLatino, value: "Latino" as const, label: "Audio Latino" },
-                        { visible: hasEnglish, value: "Inglés (Sub)" as const, label: "Inglés (Sub)" },
-                      ]
-                        .filter((lang) => lang.visible)
-                        .map((lang) => (
-                          <button
-                            key={lang.value}
-                            type="button"
-                            onClick={() => setSelectedLanguage(lang.value)}
-                            className={`flex-1 sm:flex-initial text-center px-3 py-1.5 sm:py-1 rounded-full text-xs transition ${
-                              selectedLanguage === lang.value
-                                ? "bg-netflix-red text-white font-bold shadow"
-                                : "text-zinc-400 hover:text-white"
-                            }`}
-                          >
-                            {lang.label}
-                          </button>
-                        ))}
-                    </div>
-                  )}
+                <h1 className="text-xl sm:text-2xl font-black text-white leading-tight">
+                  {playback.episodeTitle}
+                </h1>
+              </div>
+
+              {/* Selector de idioma + Mi Lista + Modo Escudo */}
+              <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2">
+                {(hasLatino || hasEnglish) && (
+                  <div className="flex sm:inline-flex items-center gap-1 bg-zinc-900 border border-white/10 rounded-full p-1 w-full sm:w-auto">
+                    <span className="pl-2 pr-1 text-zinc-400 flex items-center flex-shrink-0">
+                      <Languages className="w-3.5 h-3.5 text-netflix-red" />
+                    </span>
+                    {[
+                      { visible: hasLatino, value: "Latino" as const, label: "Audio Latino" },
+                      { visible: hasEnglish, value: "Inglés (Sub)" as const, label: "Inglés (Sub)" },
+                    ]
+                      .filter((lang) => lang.visible)
+                      .map((lang) => (
+                        <button
+                          key={lang.value}
+                          type="button"
+                          onClick={() => setSelectedLanguage(lang.value)}
+                          className={`flex-1 sm:flex-initial text-center px-3 py-1.5 sm:py-1 rounded-full text-xs transition ${
+                            selectedLanguage === lang.value
+                              ? "bg-netflix-red text-white font-bold shadow"
+                              : "text-zinc-400 hover:text-white"
+                          }`}
+                        >
+                          {lang.label}
+                        </button>
+                      ))}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleToggleSeriesMyList}
+                    aria-pressed={inMyList}
+                    className={`inline-flex items-center justify-center gap-1.5 min-h-[40px] sm:min-h-[34px] px-3.5 py-2 sm:py-1.5 rounded-full border text-xs font-bold transition ${
+                      inMyList
+                        ? "bg-emerald-500/15 border-emerald-400/50 text-emerald-300 hover:bg-emerald-500/25"
+                        : "bg-zinc-900 hover:bg-white/15 border-white/15 text-zinc-100 hover:text-white"
+                    }`}
+                  >
+                    {inMyList ? (
+                      <Check className="w-3.5 h-3.5 flex-shrink-0" />
+                    ) : (
+                      <Plus className="w-3.5 h-3.5 flex-shrink-0" />
+                    )}
+                    <span>{inMyList ? "En Mi Lista" : "Mi Lista"}</span>
+                  </button>
 
                   <button
                     type="button"
                     onClick={() => openUpgradeModal("modo_escudo")}
-                    className={`inline-flex items-center justify-center gap-1.5 w-full sm:w-auto px-3.5 py-2 sm:py-1.5 rounded-full border text-xs font-semibold transition ${
+                    className={`inline-flex items-center justify-center gap-1.5 min-h-[40px] sm:min-h-[34px] px-3.5 py-2 sm:py-1.5 rounded-full border text-xs font-semibold transition ${
                       isPro
                         ? "bg-emerald-500/15 border-emerald-400/50 text-emerald-300 hover:bg-emerald-500/25"
                         : "bg-zinc-900 hover:bg-netflix-red border-white/10 text-zinc-200 hover:text-white"
                     }`}
                   >
                     {isPro ? (
-                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
                     ) : (
-                      <ShieldOff className="w-3.5 h-3.5 text-amber-400" />
+                      <ShieldOff className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
                     )}
-                    <span>
+                    <span className="truncate">
                       {isPro ? "Modo Escudo Activo" : "Modo Escudo"}
                     </span>
-                    {!isPro && (
-                      <span className="px-1.5 py-0.5 rounded bg-netflix-red text-white text-[9px] font-black uppercase">
-                        PRO
-                      </span>
-                    )}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={handleNativeCastTrigger}
-                    className="inline-flex items-center justify-center gap-1.5 w-full sm:w-auto px-3.5 py-2 sm:py-1.5 rounded-full bg-zinc-900 hover:bg-netflix-red border border-white/10 text-xs font-semibold text-zinc-200 hover:text-white transition"
-                  >
-                    <Cast className="w-3.5 h-3.5 text-netflix-red group-hover:text-white" />
-                    <span>Transmitir a TV</span>
                     {!isPro && (
                       <span className="px-1.5 py-0.5 rounded bg-netflix-red text-white text-[9px] font-black uppercase">
                         PRO
@@ -339,15 +371,10 @@ export default function WatchEpisodePage() {
                 </div>
               </div>
 
-              <div>
-                <h1 className="text-xl sm:text-2xl font-black text-white leading-tight">
-                  {playback.episodeTitle}
-                </h1>
-                <p className="text-xs sm:text-sm text-zinc-300 leading-relaxed mt-1.5 max-w-3xl">
-                  {playback.overview ||
-                    "Disfruta de este capítulo en calidad Full HD sin anuncios invasivos."}
-                </p>
-              </div>
+              <p className="text-xs sm:text-sm text-zinc-300 leading-relaxed max-w-3xl">
+                {playback.overview ||
+                  "Disfruta de este capítulo en calidad Full HD sin anuncios invasivos."}
+              </p>
 
               {/* Botones de navegación Anterior / Siguiente */}
               <div className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2.5 pt-3 border-t border-zinc-800">

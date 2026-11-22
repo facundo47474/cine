@@ -68,6 +68,14 @@ export interface EpisodePlaybackDto {
   episodeId: string;
   seriesId: string;
   seriesTitle: string;
+  seriesTmdbId?: number | null;
+  seriesPosterUrl?: string;
+  seriesBackdropUrl?: string | null;
+  seriesSynopsis?: string;
+  seriesReleaseYear?: number;
+  seriesRating?: number;
+  seriesQualityBadge?: string;
+  seriesGenres?: string[];
   seasonNumber: number;
   episodeNumber: number;
   episodeTitle: string;

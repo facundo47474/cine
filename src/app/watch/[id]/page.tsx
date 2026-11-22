@@ -5,14 +5,16 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import {
   ArrowLeft,
-  Cast,
+  Check,
   Clock,
   Languages,
+  Plus,
   ShieldCheck,
   ShieldOff,
   Star,
 } from "lucide-react";
 import SmartVideoPlayer from "@/components/SmartVideoPlayer";
+import { CatalogCardDto } from "@/application/dto/CatalogFeedDto";
 import { MoviePlaybackDto } from "@/application/dto/PlaybackStreamDto";
 import { useMembership } from "@/components/MembershipProvider";
 
@@ -44,13 +46,14 @@ function esperarConAborto(
  * Página de reproducción dedicada para Películas (`/watch/[id]`).
  *
  * Carga los enlaces firmados de la película y el punto de reanudación del usuario,
- * permitiendo alternar entre Audio Latino e Inglés Subtitulado y transmitir a Smart TV.
+ * permitiendo alternar entre Audio Latino e Inglés Subtitulado y agregarla a "Mi Lista".
  */
 export default function WatchMoviePage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const movieId = params.id;
-  const { isPro, openUpgradeModal } = useMembership();
+  const { isPro, openUpgradeModal, isInMyList, toggleMyListItem } =
+    useMembership();
 
   const [movie, setMovie] = useState<MoviePlaybackDto | null>(null);
   const [savedProgress, setSavedProgress] = useState<number>(0);
@@ -160,12 +163,31 @@ export default function WatchMoviePage() {
     }
   }, [movie, hasLatino, hasEnglish]);
 
+  const inMyList = movie ? isInMyList(movie.id) : false;
+
   /**
-   * Emite el evento global para activar la transmisión a Chromecast o AirPlay desde el reproductor.
+   * Agrega o quita la película actual de la colección personal "Mi Lista".
    */
-  const handleNativeCastTrigger = useCallback(() => {
-    window.dispatchEvent(new CustomEvent("piloto:trigger-cast"));
-  }, []);
+  const handleToggleMovieMyList = useCallback(() => {
+    if (!movie) return;
+    const catalogMovie: CatalogCardDto = {
+      id: movie.id,
+      tmdbId: movie.tmdbId,
+      mediaType: "MOVIE",
+      title: movie.title,
+      originalTitle: movie.originalTitle,
+      synopsis: movie.synopsis,
+      posterUrl: movie.posterUrl,
+      backdropUrl: movie.backdropUrl,
+      releaseYear: movie.releaseYear,
+      durationMins: movie.durationMins,
+      rating: movie.rating,
+      qualityBadge: movie.qualityBadge,
+      genres: movie.genres,
+      isLocalVip: true,
+    };
+    toggleMyListItem(catalogMovie);
+  }, [movie, toggleMyListItem]);
 
   return (
     <div className="min-h-screen bg-[#141414] text-white pb-12 sm:pb-16">
@@ -232,8 +254,8 @@ export default function WatchMoviePage() {
               </div>
 
               <div className="md:col-span-3 space-y-3 sm:space-y-4">
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                  <div className="flex flex-wrap items-center gap-2.5 sm:gap-3 text-xs font-semibold">
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-xs font-semibold">
                     <span className="px-2.5 py-0.5 rounded bg-netflix-red text-white">
                       {movie.qualityBadge}
                     </span>
@@ -248,49 +270,73 @@ export default function WatchMoviePage() {
                     </span>
                   </div>
 
-                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
-                    {(hasLatino || hasEnglish) && (
-                      <div className="flex sm:inline-flex items-center gap-1 bg-zinc-900 border border-white/10 rounded-full p-1 w-full sm:w-auto">
-                        <span className="pl-2 pr-1 text-zinc-400 flex items-center flex-shrink-0">
-                          <Languages className="w-3.5 h-3.5 text-netflix-red" />
-                        </span>
-                        {[
-                          { visible: hasLatino, value: "Latino" as const, label: "Audio Latino" },
-                          { visible: hasEnglish, value: "Inglés (Sub)" as const, label: "Inglés (Sub)" },
-                        ]
-                          .filter((lang) => lang.visible)
-                          .map((lang) => (
-                            <button
-                              key={lang.value}
-                              type="button"
-                              onClick={() => setSelectedLanguage(lang.value)}
-                              className={`flex-1 sm:flex-initial text-center px-3 py-1.5 sm:py-1 rounded-full text-xs transition ${
-                                selectedLanguage === lang.value
-                                  ? "bg-netflix-red text-white font-bold shadow"
-                                  : "text-zinc-400 hover:text-white"
-                              }`}
-                            >
-                              {lang.label}
-                            </button>
-                          ))}
-                      </div>
-                    )}
+                  <h1 className="text-xl sm:text-3xl font-black text-white leading-tight">
+                    {movie.title}
+                  </h1>
+                </div>
+
+                <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2">
+                  {(hasLatino || hasEnglish) && (
+                    <div className="flex sm:inline-flex items-center gap-1 bg-zinc-900 border border-white/10 rounded-full p-1 w-full sm:w-auto">
+                      <span className="pl-2 pr-1 text-zinc-400 flex items-center flex-shrink-0">
+                        <Languages className="w-3.5 h-3.5 text-netflix-red" />
+                      </span>
+                      {[
+                        { visible: hasLatino, value: "Latino" as const, label: "Audio Latino" },
+                        { visible: hasEnglish, value: "Inglés (Sub)" as const, label: "Inglés (Sub)" },
+                      ]
+                        .filter((lang) => lang.visible)
+                        .map((lang) => (
+                          <button
+                            key={lang.value}
+                            type="button"
+                            onClick={() => setSelectedLanguage(lang.value)}
+                            className={`flex-1 sm:flex-initial text-center px-3 py-1.5 sm:py-1 rounded-full text-xs transition ${
+                              selectedLanguage === lang.value
+                                ? "bg-netflix-red text-white font-bold shadow"
+                                : "text-zinc-400 hover:text-white"
+                            }`}
+                          >
+                            {lang.label}
+                          </button>
+                        ))}
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleToggleMovieMyList}
+                      aria-pressed={inMyList}
+                      className={`inline-flex items-center justify-center gap-1.5 min-h-[40px] sm:min-h-[34px] px-3.5 py-2 sm:py-1.5 rounded-full border text-xs font-bold transition ${
+                        inMyList
+                          ? "bg-emerald-500/15 border-emerald-400/50 text-emerald-300 hover:bg-emerald-500/25"
+                          : "bg-zinc-900 hover:bg-white/15 border-white/15 text-zinc-100 hover:text-white"
+                      }`}
+                    >
+                      {inMyList ? (
+                        <Check className="w-3.5 h-3.5 flex-shrink-0" />
+                      ) : (
+                        <Plus className="w-3.5 h-3.5 flex-shrink-0" />
+                      )}
+                      <span>{inMyList ? "En Mi Lista" : "Mi Lista"}</span>
+                    </button>
 
                     <button
                       type="button"
                       onClick={() => openUpgradeModal("modo_escudo")}
-                      className={`inline-flex items-center justify-center gap-1.5 w-full sm:w-auto px-3.5 py-2 sm:py-1.5 rounded-full border text-xs font-semibold transition ${
+                      className={`inline-flex items-center justify-center gap-1.5 min-h-[40px] sm:min-h-[34px] px-3.5 py-2 sm:py-1.5 rounded-full border text-xs font-semibold transition ${
                         isPro
                           ? "bg-emerald-500/15 border-emerald-400/50 text-emerald-300 hover:bg-emerald-500/25"
                           : "bg-zinc-900 hover:bg-netflix-red border-white/10 text-zinc-200 hover:text-white"
                       }`}
                     >
                       {isPro ? (
-                        <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                        <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
                       ) : (
-                        <ShieldOff className="w-3.5 h-3.5 text-amber-400" />
+                        <ShieldOff className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
                       )}
-                      <span>
+                      <span className="truncate">
                         {isPro ? "Modo Escudo Activo" : "Modo Escudo"}
                       </span>
                       {!isPro && (
@@ -299,26 +345,8 @@ export default function WatchMoviePage() {
                         </span>
                       )}
                     </button>
-
-                    <button
-                      type="button"
-                      onClick={handleNativeCastTrigger}
-                      className="inline-flex items-center justify-center gap-1.5 w-full sm:w-auto px-3.5 py-2 sm:py-1.5 rounded-full bg-zinc-900 hover:bg-netflix-red border border-white/10 text-xs font-semibold text-zinc-200 hover:text-white transition"
-                    >
-                      <Cast className="w-3.5 h-3.5 text-netflix-red group-hover:text-white" />
-                      <span>Transmitir a TV</span>
-                      {!isPro && (
-                        <span className="px-1.5 py-0.5 rounded bg-netflix-red text-white text-[9px] font-black uppercase">
-                          PRO
-                        </span>
-                      )}
-                    </button>
                   </div>
                 </div>
-
-                <h1 className="text-xl sm:text-3xl font-black text-white leading-tight">
-                  {movie.title}
-                </h1>
 
                 <p className="text-xs sm:text-base text-zinc-300 leading-relaxed">
                   {movie.synopsis}

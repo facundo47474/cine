@@ -35,7 +35,7 @@ function MovieRow({ title, subtitle, movies }: MovieRowProps) {
       className="space-y-3 py-3 relative group/row"
       style={{ contentVisibility: "auto", containIntrinsicSize: "340px" }}
     >
-      <div className="px-4 sm:px-8 max-w-7xl mx-auto flex items-end justify-between">
+      <div className="px-3 sm:px-8 max-w-7xl mx-auto flex items-end justify-between">
         <div>
           <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">
             {title}
@@ -61,10 +61,10 @@ function MovieRow({ title, subtitle, movies }: MovieRowProps) {
         </div>
       </div>
 
-      <div className="px-4 sm:px-8 max-w-7xl mx-auto">
+      <div className="px-3 sm:px-8 max-w-7xl mx-auto">
         <div
           ref={rowRef}
-          className="flex items-stretch gap-4 overflow-x-auto no-scrollbar pb-3 pt-1 scroll-smooth"
+          className="flex items-stretch gap-3 sm:gap-4 overflow-x-auto no-scrollbar pb-3 pt-1 scroll-smooth snap-x snap-mandatory sm:snap-none"
         >
           {movies.map((movie) => (
             <MovieCard
@@ -77,6 +77,7 @@ function MovieRow({ title, subtitle, movies }: MovieRowProps) {
               rating={movie.rating}
               isLocalVip={movie.isLocalVip}
               mediaType={movie.mediaType}
+              catalogItem={movie}
             />
           ))}
         </div>

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import LegalDocumentLayout, {
   LegalSectionItem,
 } from "@/components/LegalDocumentLayout";
+import { SITE_URL } from "@/config/seo";
 
 export const metadata: Metadata = {
   title: "Políticas y Privacidad",
@@ -22,7 +23,7 @@ export const metadata: Metadata = {
     title: "Políticas y Privacidad | PILOTO Streaming",
     description:
       "Conoce cómo recopilamos, utilizamos y protegemos tus datos personales, tu cuenta de Google y tus pagos en PILOTO Streaming.",
-    url: "https://cine-ddbt.vercel.app/privacidad",
+    url: `${SITE_URL}/privacidad`,
     siteName: "PILOTO Streaming",
     locale: "es_AR",
     type: "article",
@@ -35,7 +36,7 @@ const POLICY_SECTIONS: LegalSectionItem[] = [
     id: "responsable",
     title: "1. Responsable del Tratamiento e Información General",
     paragraphs: [
-      "PILOTO Streaming (disponible en https://cine-ddbt.vercel.app) respeta la privacidad de sus usuarios y se compromete a proteger los datos personales recopilados durante el uso de la plataforma, en cumplimiento de los principios de transparencia, finalidad, minimización y seguridad de la información (incluyendo la Ley N.º 25.326 de Protección de Datos Personales de la República Argentina).",
+      `PILOTO Streaming (disponible en ${SITE_URL}) respeta la privacidad de sus usuarios y se compromete a proteger los datos personales recopilados durante el uso de la plataforma, en cumplimiento de los principios de transparencia, finalidad, minimización y seguridad de la información (incluyendo la Ley N.º 25.326 de Protección de Datos Personales de la República Argentina).`,
       "El responsable de la plataforma es Facundo Argüello. Para cualquier consulta, reclamo o solicitud vinculada con esta Política de Privacidad, podés comunicarte en cualquier momento por correo electrónico a facundotomas018@gmail.com.",
     ],
   },
@@ -122,7 +123,7 @@ const POLICY_SECTIONS: LegalSectionItem[] = [
     title: "9. Menores de Edad y Actualizaciones",
     paragraphs: [
       "El uso de PILOTO Streaming está destinado a personas mayores de 18 años o menores que cuenten con autorización y supervisión de un adulto responsable.",
-      "PILOTO Streaming podrá actualizar esta Política de Privacidad para reflejar mejoras técnicas, nuevos requisitos legales o cambios en los servicios integrados. Cualquier modificación sustancial será publicada en esta misma URL (https://cine-ddbt.vercel.app/privacidad) con su fecha de vigencia actualizada.",
+      `PILOTO Streaming podrá actualizar esta Política de Privacidad para reflejar mejoras técnicas, nuevos requisitos legales o cambios en los servicios integrados. Cualquier modificación sustancial será publicada en esta misma URL (${SITE_URL}/privacidad) con su fecha de vigencia actualizada.`,
     ],
   },
 ];

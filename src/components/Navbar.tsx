@@ -249,7 +249,11 @@ export default function Navbar({
                   <span>Piloto</span>
                 </>
               ) : (
-                <span>Activar Piloto Plus</span>
+                <>
+                  <Rocket className="w-3.5 h-3.5 sm:hidden flex-shrink-0" />
+                  <span className="sm:hidden">Plus</span>
+                  <span className="hidden sm:inline">Activar Piloto Plus</span>
+                </>
               )}
             </button>
           )}

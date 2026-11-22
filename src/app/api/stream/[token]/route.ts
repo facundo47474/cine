@@ -10,6 +10,7 @@ import {
 import { MirrorFormat } from "@/domain/enums/MirrorFormat";
 import { authOptions } from "@/infrastructure/auth/authOptions";
 import { prismaMembershipRepository } from "@/infrastructure/repositories/PrismaMembershipRepository";
+import { getStreamProxyBaseUrl } from "@/config/streamProxy";
 import {
   apiRateLimiter,
   getClientIp,
@@ -322,9 +323,11 @@ function buildStreamTunnelPlayerHtml(params: {
       var startSec = ${resumeSeconds};
       var switchedToIframe = false;
       var streamRefererValue = ${JSON.stringify(streamwishReferer)};
+      var streamProxyBase = ${JSON.stringify(getStreamProxyBaseUrl())};
 
       var activeHlsSource =
-        "/api/stream-proxy?url=" +
+        streamProxyBase +
+        "?url=" +
         encodeURIComponent(hlsUrl) +
         "&referer=" +
         encodeURIComponent(streamRefererValue);
@@ -373,7 +376,8 @@ function buildStreamTunnelPlayerHtml(params: {
         var streamRefererValue = ${JSON.stringify(streamwishReferer)};
         var posterUrlValue = ${JSON.stringify(streamwishHls.posterUrl || "")};
         var proxiedStreamUrl =
-          "/api/stream-proxy?url=" +
+          streamProxyBase +
+          "?url=" +
           encodeURIComponent(hlsUrl) +
           "&referer=" +
           encodeURIComponent(streamRefererValue);

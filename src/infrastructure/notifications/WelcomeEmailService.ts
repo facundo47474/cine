@@ -1,6 +1,7 @@
 import nodemailer from "nodemailer";
+import { SITE_URL } from "@/config/seo";
 
-const DEFAULT_APP_URL = "https://cine-ddbt.vercel.app";
+const DEFAULT_APP_URL = SITE_URL;
 
 export interface WelcomeEmailParams {
   toEmail: string;

@@ -1,5 +1,6 @@
 import React from "react";
 import Link from "next/link";
+import { SITE_URL } from "@/config/seo";
 
 export interface LegalSectionItem {
   id: string;
@@ -83,10 +84,10 @@ export default function LegalDocumentLayout({
           <p className="text-xs sm:text-sm text-neutral-500">
             Última actualización: {lastUpdated} · Sitio web:{" "}
             <a
-              href="https://cine-ddbt.vercel.app"
+              href={SITE_URL}
               className="underline hover:text-neutral-800"
             >
-              https://cine-ddbt.vercel.app
+              {SITE_URL}
             </a>{" "}
             · Contacto:{" "}
             <a
