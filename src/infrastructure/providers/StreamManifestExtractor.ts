@@ -175,6 +175,206 @@ export async function resolveFirstNonNull<T>(
 }
 
 /**
+ * Selecciona la variante de mayor ancho de banda desde un manifiesto maestro `#EXT-X-STREAM-INF`.
+ */
+function selectBestVariantFromMasterPlaylist(
+  masterText: string,
+  masterFinalUrl: string
+): string | null {
+  const lines = masterText.split(/\r?\n/);
+  let pendingBandwidth: number | null = null;
+  let bestUrl: string | null = null;
+  let bestBandwidth = -1;
+  let firstFallbackUri: string | null = null;
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) continue;
+
+    if (trimmed.startsWith("#")) {
+      if (
+        trimmed.startsWith("#EXT-X-STREAM-INF:") &&
+        !trimmed.startsWith("#EXT-X-I-FRAME-STREAM-INF")
+      ) {
+        const bwMatch = trimmed.match(/BANDWIDTH=(\d+)/i);
+        pendingBandwidth = bwMatch ? Number(bwMatch[1]) || 0 : 0;
+      }
+      continue;
+    }
+
+    let resolvedVariantUrl: string;
+    try {
+      resolvedVariantUrl = new URL(trimmed, masterFinalUrl).toString();
+    } catch {
+      pendingBandwidth = null;
+      continue;
+    }
+
+    if (!firstFallbackUri) {
+      firstFallbackUri = resolvedVariantUrl;
+    }
+
+    if (pendingBandwidth !== null) {
+      if (pendingBandwidth > bestBandwidth) {
+        bestBandwidth = pendingBandwidth;
+        bestUrl = resolvedVariantUrl;
+      }
+      pendingBandwidth = null;
+    }
+  }
+
+  return bestUrl || firstFallbackUri;
+}
+
+/**
+ * Reescribe todas las URLs de segmentos, llaves `#EXT-X-KEY` y `#EXT-X-MAP` en un manifiesto HLS
+ * hacia la ruta absoluta `/api/stream-proxy?url=...&referer=...`.
+ */
+function rewriteMediaPlaylistToInternalProxy(
+  playlistText: string,
+  baseUrl: string,
+  referer: string,
+  internalProxyBaseUrl: string
+): string {
+  const normalizedBase = internalProxyBaseUrl.replace(/\/+$/, "");
+  const buildUrl = (absUrl: string): string =>
+    `${normalizedBase}?url=${encodeURIComponent(
+      absUrl
+    )}&referer=${encodeURIComponent(referer)}`;
+
+  return playlistText
+    .split(/\r?\n/)
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return line;
+
+      if (trimmed.startsWith("#")) {
+        return trimmed.replace(/URI="([^"]+)"/gi, (fullMatch, uriValue: string) => {
+          try {
+            const resolvedUri = new URL(uriValue, baseUrl).toString();
+            return `URI="${buildUrl(resolvedUri)}"`;
+          } catch {
+            return fullMatch;
+          }
+        });
+      }
+
+      try {
+        const resolvedSegmentUrl = new URL(trimmed, baseUrl).toString();
+        return buildUrl(resolvedSegmentUrl);
+      } catch {
+        return trimmed;
+      }
+    })
+    .join("\n");
+}
+
+/**
+ * Descarga y resuelve en la misma IP del extractor el manifiesto maestro -> variante HLS
+ * más rápida y reescribe todas las rutas de segmentos a URLs absolutas de `/api/stream-proxy`
+ * para reproducirse mediante `Blob URL` sin errores de discrepancia de IP en Netlify.
+ */
+export async function resolveInlineHlsManifestForInternalProxy(
+  candidate: ExtractedStreamCandidate,
+  referer: string,
+  internalProxyBaseUrl: string,
+  timeoutMs: number = 2200
+): Promise<string | null> {
+  if (candidate.type !== "hls") return null;
+
+  const originHeader = (() => {
+    try {
+      return new URL(referer).origin;
+    } catch {
+      try {
+        return new URL(candidate.streamUrl).origin;
+      } catch {
+        return referer;
+      }
+    }
+  })();
+
+  try {
+    const res = await fetch(candidate.streamUrl, {
+      method: "GET",
+      headers: {
+        "User-Agent": DEFAULT_SCRAPER_USER_AGENT,
+        Referer: referer,
+        Origin: originHeader,
+        Accept: "*/*",
+      },
+      redirect: "follow",
+      cache: "no-store",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => {});
+      return null;
+    }
+
+    const masterText = await res.text();
+    if (!masterText.includes("#EXTM3U")) {
+      return null;
+    }
+
+    let mediaText = masterText;
+    let mediaFinalUrl = res.url || candidate.streamUrl;
+
+    if (masterText.includes("#EXT-X-STREAM-INF")) {
+      const variantUrl = selectBestVariantFromMasterPlaylist(
+        masterText,
+        mediaFinalUrl
+      );
+      if (!variantUrl) return null;
+
+      const varRes = await fetch(variantUrl, {
+        method: "GET",
+        headers: {
+          "User-Agent": DEFAULT_SCRAPER_USER_AGENT,
+          Referer: referer,
+          Origin: originHeader,
+          Accept: "*/*",
+        },
+        redirect: "follow",
+        cache: "no-store",
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+
+      if (!varRes.ok) {
+        await varRes.body?.cancel().catch(() => {});
+        return null;
+      }
+
+      const varText = await varRes.text();
+      if (!varText.includes("#EXTM3U")) {
+        return null;
+      }
+
+      mediaText = varText;
+      mediaFinalUrl = varRes.url || variantUrl;
+    }
+
+    const hasSegmentLine = mediaText
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .some((l) => Boolean(l) && !l.startsWith("#"));
+    if (!hasSegmentLine) {
+      return null;
+    }
+
+    return rewriteMediaPlaylistToInternalProxy(
+      mediaText,
+      mediaFinalUrl,
+      referer,
+      internalProxyBaseUrl
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Verifica que un candidato de stream esté vivo y devuelva un manifiesto `#EXTM3U` válido
  * cuando es de tipo HLS, o cabecera/rango válido cuando es MP4 directo.
  *
@@ -188,15 +388,16 @@ export async function verifyExtractedStreamCandidateAlive(
   referer: string,
   timeoutMs: number = 2200
 ): Promise<boolean> {
+  const originHeader = (() => {
+    try {
+      return new URL(referer).origin;
+    } catch {
+      return new URL(candidate.streamUrl).origin;
+    }
+  })();
+
   if (candidate.type === "mp4") {
     try {
-      const originHeader = (() => {
-        try {
-          return new URL(referer).origin;
-        } catch {
-          return new URL(candidate.streamUrl).origin;
-        }
-      })();
       const response = await fetch(candidate.streamUrl, {
         method: "GET",
         headers: {
@@ -206,6 +407,8 @@ export async function verifyExtractedStreamCandidateAlive(
           Range: "bytes=0-1023",
           Accept: "*/*",
         },
+        redirect: "follow",
+        cache: "no-store",
         signal: AbortSignal.timeout(timeoutMs),
       });
       await response.body?.cancel().catch(() => {});
@@ -221,12 +424,16 @@ export async function verifyExtractedStreamCandidateAlive(
       headers: {
         "User-Agent": DEFAULT_SCRAPER_USER_AGENT,
         Referer: referer,
+        Origin: originHeader,
         Accept: "*/*",
       },
+      redirect: "follow",
+      cache: "no-store",
       signal: AbortSignal.timeout(timeoutMs),
     });
 
     if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
       return false;
     }
 
@@ -242,10 +449,12 @@ export async function verifyExtractedStreamCandidateAlive(
  * usando carrera rápida al primer espejo vivo y proxificado mediante `/api/stream-proxy`.
  *
  * @param embedUrl URL del embed de Streamwish, Vidhide o Dropload.
+ * @param internalProxyBaseUrl URL base absoluta de `/api/stream-proxy` para reescritura inline del manifiesto HLS.
  * @returns Información del stream listo para reproducir vía `/api/stream-proxy` o `null`.
  */
 export async function extractDirectHlsFromStreamwishEmbed(
-  embedUrl: string
+  embedUrl: string,
+  internalProxyBaseUrl?: string
 ): Promise<DirectHlsStreamInfo | null> {
   try {
     const codeMatch = embedUrl.match(/\/(?:e|embed|f|d)\/([a-zA-Z0-9_-]+)/i);
@@ -278,11 +487,17 @@ export async function extractDirectHlsFromStreamwishEmbed(
     }): Promise<DirectHlsStreamInfo | null> => {
       try {
         const response = await fetch(target.url, {
+          method: "GET",
           headers: {
             "User-Agent": DEFAULT_SCRAPER_USER_AGENT,
             Referer: target.referer,
+            Origin: target.origin,
+            Accept:
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
           },
-          signal: AbortSignal.timeout(3200),
+          redirect: "follow",
+          cache: "no-store",
+          signal: AbortSignal.timeout(3000),
         });
         if (!response.ok) return null;
 
@@ -299,23 +514,40 @@ export async function extractDirectHlsFromStreamwishEmbed(
         );
         if (candidates.length === 0) return null;
 
-        const firstAlive = await resolveFirstNonNull(
-          candidates.slice(0, 4).map(async (candidate) => {
-            const ok = await verifyExtractedStreamCandidateAlive(
+        for (const candidate of candidates.slice(0, 2)) {
+          if (candidate.type === "hls" && internalProxyBaseUrl) {
+            const inlineM3u8 = await resolveInlineHlsManifestForInternalProxy(
               candidate,
               streamReferer,
+              internalProxyBaseUrl,
               2200
             );
-            return ok ? candidate : null;
-          })
-        );
-        if (!firstAlive) return null;
+            if (inlineM3u8) {
+              return {
+                hlsUrl: candidate.streamUrl,
+                inlineM3u8,
+                posterUrl: candidate.posterUrl || "",
+                durationSeconds: candidate.durationSeconds,
+              };
+            }
+            continue;
+          }
 
-        return {
-          hlsUrl: firstAlive.streamUrl,
-          posterUrl: firstAlive.posterUrl || "",
-          durationSeconds: firstAlive.durationSeconds,
-        };
+          const ok = await verifyExtractedStreamCandidateAlive(
+            candidate,
+            streamReferer,
+            2200
+          );
+          if (ok) {
+            return {
+              hlsUrl: candidate.streamUrl,
+              posterUrl: candidate.posterUrl || "",
+              durationSeconds: candidate.durationSeconds,
+            };
+          }
+        }
+
+        return null;
       } catch {
         return null;
       }

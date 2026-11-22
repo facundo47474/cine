@@ -70,6 +70,12 @@ const CORS_HEADERS: Record<string, string> = {
     "Content-Length, Content-Range, Accept-Ranges, Content-Type",
 };
 
+const NO_CDN_CACHE_HEADERS: Record<string, string> = {
+  "Cache-Control": "private, no-store, no-cache, must-revalidate",
+  "Netlify-CDN-Cache-Control": "no-store",
+  "CDN-Cache-Control": "no-store",
+};
+
 /**
  * Responde a las pre-peticiones CORS (`OPTIONS`).
  */
@@ -283,6 +289,7 @@ export async function GET(request: NextRequest) {
       method: "GET",
       headers: upstreamHeaders,
       redirect: "follow",
+      cache: "no-store",
       signal: AbortSignal.timeout(15000),
     });
 
@@ -333,7 +340,7 @@ export async function GET(request: NextRequest) {
         headers: {
           ...CORS_HEADERS,
           "Content-Type": "application/vnd.apple.mpegurl; charset=utf-8",
-          "Cache-Control": "no-store, no-cache, must-revalidate",
+          ...NO_CDN_CACHE_HEADERS,
         },
       });
     }
@@ -387,7 +394,7 @@ export async function GET(request: NextRequest) {
             headers: {
               ...CORS_HEADERS,
               "Content-Type": "application/vnd.apple.mpegurl; charset=utf-8",
-              "Cache-Control": "no-store, no-cache, must-revalidate",
+              ...NO_CDN_CACHE_HEADERS,
             },
           });
         }
@@ -400,7 +407,7 @@ export async function GET(request: NextRequest) {
           ...CORS_HEADERS,
           "Content-Type": "video/mp2t",
           "Content-Length": String(cleanTsBuffer.length),
-          "Cache-Control": "public, max-age=3600",
+          ...NO_CDN_CACHE_HEADERS,
         },
       });
     }
@@ -412,7 +419,6 @@ export async function GET(request: NextRequest) {
       "content-length",
       "content-range",
       "accept-ranges",
-      "cache-control",
     ];
 
     for (const headerName of passthroughHeaderNames) {
@@ -420,6 +426,12 @@ export async function GET(request: NextRequest) {
       if (headerValue) {
         responseHeaders.set(headerName, headerValue);
       }
+    }
+
+    for (const [headerKey, headerValue] of Object.entries(
+      NO_CDN_CACHE_HEADERS
+    )) {
+      responseHeaders.set(headerKey, headerValue);
     }
 
     if (!responseHeaders.has("content-type")) {

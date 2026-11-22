@@ -21,6 +21,7 @@ export interface NativeStreamCandidate {
   streamUrl: string;
   type: "hls" | "mp4";
   referer?: string;
+  inlineM3u8?: string;
 }
 
 export interface ExtractorResponseData {
@@ -28,6 +29,7 @@ export interface ExtractorResponseData {
   streamUrl?: string;
   type?: "hls" | "mp4";
   referer?: string;
+  inlineM3u8?: string;
   backupStreams?: NativeStreamCandidate[];
   fallbackUrl?: string;
   reason?: string;
@@ -542,6 +544,7 @@ export default function SmartPlayer({
               streamUrl: data.streamUrl,
               type: data.type || "hls",
               referer: data.referer,
+              inlineM3u8: data.inlineM3u8,
             });
             for (const backup of data.backupStreams || []) {
               if (backup?.streamUrl && !queueMap.has(backup.streamUrl)) {
@@ -549,6 +552,7 @@ export default function SmartPlayer({
                   streamUrl: backup.streamUrl,
                   type: backup.type || "hls",
                   referer: backup.referer ?? data.referer,
+                  inlineM3u8: backup.inlineM3u8,
                 });
               }
             }
@@ -627,6 +631,7 @@ export default function SmartPlayer({
         streamUrl: streamData.streamUrl,
         type: streamData.type || "hls",
         referer: streamData.referer,
+        inlineM3u8: streamData.inlineM3u8,
       };
     }
     return null;
@@ -669,6 +674,7 @@ export default function SmartPlayer({
 
     destroyHlsInstance();
 
+    let inlineBlobUrl: string | null = null;
     const refererParam = activeNativeStream.referer || "";
     const proxiedStreamUrl = `/api/stream-proxy?url=${encodeURIComponent(
       activeNativeStream.streamUrl
@@ -700,6 +706,13 @@ export default function SmartPlayer({
 
     if (activeNativeStream.type === "hls") {
       if (Hls.isSupported()) {
+        if (activeNativeStream.inlineM3u8) {
+          inlineBlobUrl = URL.createObjectURL(
+            new Blob([activeNativeStream.inlineM3u8], {
+              type: "application/vnd.apple.mpegurl",
+            })
+          );
+        }
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: false,
@@ -717,7 +730,7 @@ export default function SmartPlayer({
         });
         hlsRef.current = hls;
 
-        hls.loadSource(proxiedStreamUrl);
+        hls.loadSource(inlineBlobUrl || proxiedStreamUrl);
         hls.attachMedia(video);
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -753,7 +766,24 @@ export default function SmartPlayer({
         });
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
         // HLS nativo en Safari iOS / macOS
-        video.src = proxiedStreamUrl;
+        let safariHlsSrc = proxiedStreamUrl;
+        if (activeNativeStream.inlineM3u8) {
+          try {
+            const utf8Bytes = new TextEncoder().encode(
+              activeNativeStream.inlineM3u8
+            );
+            let binaryStr = "";
+            for (let i = 0; i < utf8Bytes.length; i += 1) {
+              binaryStr += String.fromCharCode(utf8Bytes[i]);
+            }
+            safariHlsSrc = `data:application/vnd.apple.mpegurl;base64,${btoa(
+              binaryStr
+            )}`;
+          } catch {
+            safariHlsSrc = proxiedStreamUrl;
+          }
+        }
+        video.src = safariHlsSrc;
         video.addEventListener("loadedmetadata", applyInitialResume);
         video.play().catch(() => { });
       } else {
@@ -769,6 +799,9 @@ export default function SmartPlayer({
     return () => {
       video.removeEventListener("loadedmetadata", applyInitialResume);
       destroyHlsInstance();
+      if (inlineBlobUrl) {
+        URL.revokeObjectURL(inlineBlobUrl);
+      }
     };
   }, [
     status,

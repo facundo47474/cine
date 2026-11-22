@@ -31,6 +31,7 @@ import {
   ExtractedStreamCandidate,
   extractStreamCandidatesFromHtmlAndScripts,
   resolveFirstNonNull,
+  resolveInlineHlsManifestForInternalProxy,
   verifyExtractedStreamCandidateAlive,
 } from "@/infrastructure/providers/StreamManifestExtractor";
 
@@ -42,6 +43,32 @@ try {
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
+
+const NO_CDN_CACHE_HEADERS: Record<string, string> = {
+  "Cache-Control": "private, no-store, no-cache, must-revalidate",
+  "Netlify-CDN-Cache-Control": "no-store",
+  "CDN-Cache-Control": "no-store",
+};
+
+function resolvePublicOrigin(request: NextRequest): string {
+  const forwardedProto = request.headers
+    .get("x-forwarded-proto")
+    ?.split(",")[0]
+    ?.trim();
+  const forwardedHost =
+    request.headers.get("x-forwarded-host")?.split(",")[0]?.trim() ||
+    request.headers.get("host")?.split(",")[0]?.trim();
+
+  if (forwardedHost) {
+    const protocol =
+      forwardedProto ||
+      request.nextUrl.protocol.replace(/:$/, "") ||
+      "https";
+    return `${protocol}://${forwardedHost}`.replace(/\/+$/, "");
+  }
+
+  return request.nextUrl.origin.replace(/\/+$/, "");
+}
 
 interface CandidateEmbedDescriptor {
   url: string;
@@ -55,6 +82,7 @@ interface NativeStreamOption {
   streamUrl: string;
   type: "hls" | "mp4";
   referer: string;
+  inlineM3u8?: string;
 }
 
 interface ProbeHitResult extends ExtractedStreamCandidate {
@@ -62,6 +90,7 @@ interface ProbeHitResult extends ExtractedStreamCandidate {
   sourceEmbedUrl: string;
   isStreamwish: boolean;
   isDirty: boolean;
+  inlineM3u8?: string;
   backupStreams?: NativeStreamOption[];
 }
 
@@ -70,6 +99,7 @@ interface CachedExtractorSuccessPayload {
   streamUrl: string;
   type: "hls" | "mp4";
   referer: string;
+  inlineM3u8?: string;
   backupStreams?: NativeStreamOption[];
   durationSeconds?: number;
   posterUrl?: string;
@@ -159,19 +189,30 @@ async function resolveMultiEmbedAggregatorToDirectEmbeds(
  */
 async function probeSingleExtractionTarget(
   target: StreamwishExtractionTarget,
-  meta: { isStreamwish: boolean; isDirty: boolean }
+  meta: { isStreamwish: boolean; isDirty: boolean },
+  internalProxyBaseUrl: string
 ): Promise<ProbeHitResult | null> {
   try {
+    const targetOrigin = (() => {
+      try {
+        return new URL(target.fetchUrl).origin;
+      } catch {
+        return target.referer;
+      }
+    })();
+
     const response = await fetch(target.fetchUrl, {
       method: "GET",
       headers: {
         "User-Agent": DEFAULT_SCRAPER_USER_AGENT,
         Referer: target.referer,
+        Origin: targetOrigin,
         Accept:
           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       },
       redirect: "follow",
-      signal: AbortSignal.timeout(4000),
+      cache: "no-store",
+      signal: AbortSignal.timeout(3000),
     });
 
     if (!response.ok) return null;
@@ -189,44 +230,52 @@ async function probeSingleExtractionTarget(
     );
     if (extractedCandidates.length === 0) return null;
 
-    const limitedCandidates = extractedCandidates.slice(0, 4);
-    const aliveList: (ExtractedStreamCandidate | null)[] = new Array(
-      limitedCandidates.length
-    ).fill(null);
+    const limitedCandidates = extractedCandidates.slice(0, 2);
 
-    const firstAliveCandidate = await resolveFirstNonNull(
-      limitedCandidates.map(async (candidate, idx) => {
-        const isAlive = await verifyExtractedStreamCandidateAlive(
+    for (const candidate of limitedCandidates) {
+      let resolvedInlineM3u8: string | undefined;
+      let alive = false;
+
+      if (candidate.type === "hls") {
+        const inlineM3u8 = await resolveInlineHlsManifestForInternalProxy(
+          candidate,
+          streamReferer,
+          internalProxyBaseUrl,
+          2200
+        );
+        if (inlineM3u8) {
+          resolvedInlineM3u8 = inlineM3u8;
+          alive = true;
+        }
+      } else {
+        alive = await verifyExtractedStreamCandidateAlive(
           candidate,
           streamReferer,
           2200
         );
-        if (isAlive) {
-          aliveList[idx] = candidate;
-          return candidate;
-        }
-        return null;
-      })
-    );
+      }
 
-    if (firstAliveCandidate) {
+      if (!alive) continue;
+
       const backupStreams: NativeStreamOption[] = [];
-      for (const candidate of limitedCandidates) {
-        if (candidate.streamUrl === firstAliveCandidate.streamUrl) continue;
-        // Prefer already-verified candidates or secondary page HLS candidates (e.g. hls2 alongside hls4)
+      for (const secondaryCandidate of limitedCandidates) {
+        if (secondaryCandidate.streamUrl === candidate.streamUrl) {
+          continue;
+        }
         backupStreams.push({
-          streamUrl: candidate.streamUrl,
-          type: candidate.type,
+          streamUrl: secondaryCandidate.streamUrl,
+          type: secondaryCandidate.type,
           referer: streamReferer,
         });
       }
 
       return {
-        ...firstAliveCandidate,
+        ...candidate,
         referer: streamReferer,
         sourceEmbedUrl: target.sourceEmbedUrl,
         isStreamwish: meta.isStreamwish,
         isDirty: meta.isDirty,
+        inlineM3u8: resolvedInlineM3u8,
         backupStreams,
       };
     }
@@ -241,10 +290,12 @@ async function probeSingleExtractionTarget(
  * Ejecuta una fase de extracción en paralelo resolviendo inmediatamente con el primer stream vivo.
  *
  * @param descriptors Lista de descriptores de embeds a evaluar.
+ * @param internalProxyBaseUrl URL base absoluta de `/api/stream-proxy` para reescritura inline del manifiesto HLS.
  * @returns El primer flujo nativo vivo encontrado o `null`.
  */
 async function executeParallelExtractionPhase(
-  descriptors: CandidateEmbedDescriptor[]
+  descriptors: CandidateEmbedDescriptor[],
+  internalProxyBaseUrl: string
 ): Promise<ProbeHitResult | null> {
   if (descriptors.length === 0) return null;
 
@@ -280,10 +331,14 @@ async function executeParallelExtractionPhase(
 
   return resolveFirstNonNull(
     targetsWithMeta.map((entry) =>
-      probeSingleExtractionTarget(entry.target, {
-        isStreamwish: entry.isStreamwish,
-        isDirty: entry.isDirty,
-      })
+      probeSingleExtractionTarget(
+        entry.target,
+        {
+          isStreamwish: entry.isStreamwish,
+          isDirty: entry.isDirty,
+        },
+        internalProxyBaseUrl
+      )
     )
   );
 }
@@ -470,34 +525,43 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const extractorCacheKey = `extractor:v2:${decryptedEpisodeId || decryptedMovieId || "direct"}:${targetEmbedUrl}`;
+    const publicOrigin = resolvePublicOrigin(request);
+    const internalProxyBaseUrl = `${publicOrigin}/api/stream-proxy`;
+
+    const extractorCacheKey = `extractor:v5:${publicOrigin}:${decryptedEpisodeId || decryptedMovieId || "direct"}:${targetEmbedUrl}`;
     const cachedHit =
       cacheService.get<CachedExtractorSuccessPayload>(extractorCacheKey);
     if (cachedHit) {
-      return NextResponse.json(cachedHit);
+      return NextResponse.json(cachedHit, { headers: NO_CDN_CACHE_HEADERS });
     }
 
     // 1. Si ya es un enlace directo .m3u8 o .mp4, retornarlo de inmediato
     if (/\.m3u8(\?|$)/i.test(parsedInitialUrl.pathname)) {
-      return NextResponse.json({
-        success: true,
-        streamUrl: targetEmbedUrl,
-        type: "hls",
-        referer: initialOrigin,
-        isStreamwish: initialBelongsToStreamwish,
-        isDirty: !initialBelongsToStreamwish,
-      });
+      return NextResponse.json(
+        {
+          success: true,
+          streamUrl: targetEmbedUrl,
+          type: "hls",
+          referer: initialOrigin,
+          isStreamwish: initialBelongsToStreamwish,
+          isDirty: !initialBelongsToStreamwish,
+        },
+        { headers: NO_CDN_CACHE_HEADERS }
+      );
     }
 
     if (/\.mp4(\?|$)/i.test(parsedInitialUrl.pathname)) {
-      return NextResponse.json({
-        success: true,
-        streamUrl: targetEmbedUrl,
-        type: "mp4",
-        referer: initialOrigin,
-        isStreamwish: initialBelongsToStreamwish,
-        isDirty: !initialBelongsToStreamwish,
-      });
+      return NextResponse.json(
+        {
+          success: true,
+          streamUrl: targetEmbedUrl,
+          type: "mp4",
+          referer: initialOrigin,
+          isStreamwish: initialBelongsToStreamwish,
+          isDirty: !initialBelongsToStreamwish,
+        },
+        { headers: NO_CDN_CACHE_HEADERS }
+      );
     }
 
     const rawCandidates: {
@@ -628,7 +692,7 @@ export async function GET(request: NextRequest) {
             ? "Servidor embebido externo (sin extracción directa)."
             : "No se encontraron servidores Streamwish disponibles bajo el modo estricto.",
         },
-        { status: 200 }
+        { status: 200, headers: NO_CDN_CACHE_HEADERS }
       );
     }
 
@@ -637,7 +701,8 @@ export async function GET(request: NextRequest) {
       (descriptor) => descriptor.isStreamwish
     );
     let extractionHit = await executeParallelExtractionPhase(
-      streamwishDescriptors
+      streamwishDescriptors,
+      internalProxyBaseUrl
     );
 
     // FASE 2 CONTINGENCIA: Solo si Streamwish falló por completo y está habilitado el fallback
@@ -653,7 +718,10 @@ export async function GET(request: NextRequest) {
       );
 
       if (extractableDirty.length > 0) {
-        extractionHit = await executeParallelExtractionPhase(extractableDirty);
+        extractionHit = await executeParallelExtractionPhase(
+          extractableDirty,
+          internalProxyBaseUrl
+        );
       }
       if (!extractionHit) {
         const remainingDirty = dirtyDescriptors.filter(
@@ -663,7 +731,10 @@ export async function GET(request: NextRequest) {
               url: descriptor.url,
             })
         );
-        extractionHit = await executeParallelExtractionPhase(remainingDirty);
+        extractionHit = await executeParallelExtractionPhase(
+          remainingDirty,
+          internalProxyBaseUrl
+        );
       }
     }
 
@@ -691,15 +762,20 @@ export async function GET(request: NextRequest) {
         streamUrl: extractionHit.streamUrl,
         type: extractionHit.type,
         referer: extractionHit.referer,
+        ...(extractionHit.inlineM3u8
+          ? { inlineM3u8: extractionHit.inlineM3u8 }
+          : {}),
         backupStreams: extractionHit.backupStreams,
         durationSeconds: extractionHit.durationSeconds,
         posterUrl: extractionHit.posterUrl,
         isStreamwish: extractionHit.isStreamwish,
         isDirty: extractionHit.isDirty,
       };
-      cacheService.set(extractorCacheKey, responsePayload, 600);
+      cacheService.set(extractorCacheKey, responsePayload, 180);
 
-      return NextResponse.json(responsePayload);
+      return NextResponse.json(responsePayload, {
+        headers: NO_CDN_CACHE_HEADERS,
+      });
     }
 
     const firstDescriptor = prioritizedDescriptors[0];
@@ -714,7 +790,7 @@ export async function GET(request: NextRequest) {
         reason:
           "No se encontró un manifiesto .m3u8 o archivo .mp4 directo o el servidor bloqueó la IP.",
       },
-      { status: 200 }
+      { status: 200, headers: NO_CDN_CACHE_HEADERS }
     );
   } catch {
     return NextResponse.json(
@@ -725,7 +801,7 @@ export async function GET(request: NextRequest) {
         isDirty: true,
         reason: "Error al intentar extraer el stream.",
       },
-      { status: 200 }
+      { status: 200, headers: NO_CDN_CACHE_HEADERS }
     );
   }
 }
