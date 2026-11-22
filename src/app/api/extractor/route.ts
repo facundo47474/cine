@@ -31,8 +31,10 @@ import {
 import { resolveRankedEmbedsFromPlayLatinByUrl } from "@/infrastructure/providers/PlayLatinClient";
 import {
   ExtractedStreamCandidate,
+  StreamSegmentTransport,
   extractStreamCandidatesFromHtmlAndScripts,
   resolveFirstNonNull,
+  resolvePlayableHlsManifest,
   verifyExtractedStreamCandidateAlive,
 } from "@/infrastructure/providers/StreamManifestExtractor";
 
@@ -57,6 +59,8 @@ interface NativeStreamOption {
   streamUrl: string;
   type: "hls" | "mp4";
   referer: string;
+  inlineM3u8?: string;
+  transport?: StreamSegmentTransport;
 }
 
 interface ProbeHitResult extends ExtractedStreamCandidate {
@@ -64,6 +68,8 @@ interface ProbeHitResult extends ExtractedStreamCandidate {
   sourceEmbedUrl: string;
   isStreamwish: boolean;
   isDirty: boolean;
+  inlineM3u8?: string;
+  transport?: StreamSegmentTransport;
   backupStreams?: NativeStreamOption[];
 }
 
@@ -72,11 +78,33 @@ interface CachedExtractorSuccessPayload {
   streamUrl: string;
   type: "hls" | "mp4";
   referer: string;
+  inlineM3u8?: string;
+  transport?: StreamSegmentTransport;
   backupStreams?: NativeStreamOption[];
   durationSeconds?: number;
   posterUrl?: string;
   isStreamwish: boolean;
   isDirty: boolean;
+}
+
+function resolvePublicOrigin(request: NextRequest): string {
+  const forwardedProto = request.headers
+    .get("x-forwarded-proto")
+    ?.split(",")[0]
+    ?.trim();
+  const forwardedHost =
+    request.headers.get("x-forwarded-host")?.split(",")[0]?.trim() ||
+    request.headers.get("host")?.split(",")[0]?.trim();
+
+  if (forwardedHost) {
+    const protocol =
+      forwardedProto ||
+      request.nextUrl.protocol.replace(/:$/, "") ||
+      "https";
+    return `${protocol}://${forwardedHost}`.replace(/\/+$/, "");
+  }
+
+  return request.nextUrl.origin.replace(/\/+$/, "");
 }
 
 /**
@@ -182,7 +210,8 @@ async function resolveMultiEmbedAggregatorToDirectEmbeds(
  */
 async function probeSingleExtractionTarget(
   target: StreamwishExtractionTarget,
-  meta: { isStreamwish: boolean; isDirty: boolean }
+  meta: { isStreamwish: boolean; isDirty: boolean },
+  internalProxyBaseUrl?: string
 ): Promise<ProbeHitResult | null> {
   try {
     const response = await fetch(target.fetchUrl, {
@@ -213,43 +242,78 @@ async function probeSingleExtractionTarget(
     if (extractedCandidates.length === 0) return null;
 
     const limitedCandidates = extractedCandidates.slice(0, 2);
-    const aliveList: (ExtractedStreamCandidate | null)[] = new Array(
+    type ResolvedEntry = {
+      candidate: ExtractedStreamCandidate;
+      inlineM3u8?: string;
+      transport?: StreamSegmentTransport;
+    };
+    const resolvedList: (ResolvedEntry | null)[] = new Array(
       limitedCandidates.length
     ).fill(null);
 
-    const firstAliveCandidate = await resolveFirstNonNull(
+    const firstAliveEntry = await resolveFirstNonNull(
       limitedCandidates.map(async (candidate, idx) => {
+        if (candidate.type === "hls") {
+          const resolvedManifest = await resolvePlayableHlsManifest(
+            candidate,
+            streamReferer,
+            { timeoutMs: 1800, internalProxyBaseUrl }
+          );
+          if (resolvedManifest) {
+            const entry: ResolvedEntry = {
+              candidate,
+              inlineM3u8: resolvedManifest.inlineM3u8,
+              transport: resolvedManifest.transport,
+            };
+            resolvedList[idx] = entry;
+            return entry;
+          }
+          return null;
+        }
+
         const isAlive = await verifyExtractedStreamCandidateAlive(
           candidate,
           streamReferer,
           1500
         );
         if (isAlive) {
-          aliveList[idx] = candidate;
-          return candidate;
+          const entry: ResolvedEntry = { candidate };
+          resolvedList[idx] = entry;
+          return entry;
         }
         return null;
       })
     );
 
-    if (firstAliveCandidate) {
+    if (firstAliveEntry) {
       const backupStreams: NativeStreamOption[] = [];
-      for (const candidate of limitedCandidates) {
-        if (candidate.streamUrl === firstAliveCandidate.streamUrl) continue;
-        // Prefer already-verified candidates or secondary page HLS candidates (e.g. hls2 alongside hls4)
+      for (let i = 0; i < limitedCandidates.length; i++) {
+        const candidate = limitedCandidates[i];
+        if (candidate.streamUrl === firstAliveEntry.candidate.streamUrl) {
+          continue;
+        }
+        const secondaryResolved = resolvedList[i];
         backupStreams.push({
           streamUrl: candidate.streamUrl,
           type: candidate.type,
           referer: streamReferer,
+          ...(secondaryResolved?.inlineM3u8
+            ? { inlineM3u8: secondaryResolved.inlineM3u8 }
+            : {}),
+          ...(secondaryResolved?.transport
+            ? { transport: secondaryResolved.transport }
+            : {}),
         });
       }
 
       return {
-        ...firstAliveCandidate,
+        ...firstAliveEntry.candidate,
         referer: streamReferer,
         sourceEmbedUrl: target.sourceEmbedUrl,
         isStreamwish: meta.isStreamwish,
         isDirty: meta.isDirty,
+        inlineM3u8: firstAliveEntry.inlineM3u8,
+        transport: firstAliveEntry.transport,
         backupStreams,
       };
     }
@@ -264,10 +328,12 @@ async function probeSingleExtractionTarget(
  * Ejecuta una fase de extracción en paralelo resolviendo inmediatamente con el primer stream vivo.
  *
  * @param descriptors Lista de descriptores de embeds a evaluar.
+ * @param internalProxyBaseUrl URL base absoluta de `/api/stream-proxy` para segmentos fallback.
  * @returns El primer flujo nativo vivo encontrado o `null`.
  */
 async function executeParallelExtractionPhase(
-  descriptors: CandidateEmbedDescriptor[]
+  descriptors: CandidateEmbedDescriptor[],
+  internalProxyBaseUrl?: string
 ): Promise<ProbeHitResult | null> {
   if (descriptors.length === 0) return null;
 
@@ -303,10 +369,14 @@ async function executeParallelExtractionPhase(
 
   return resolveFirstNonNull(
     targetsWithMeta.map((entry) =>
-      probeSingleExtractionTarget(entry.target, {
-        isStreamwish: entry.isStreamwish,
-        isDirty: entry.isDirty,
-      })
+      probeSingleExtractionTarget(
+        entry.target,
+        {
+          isStreamwish: entry.isStreamwish,
+          isDirty: entry.isDirty,
+        },
+        internalProxyBaseUrl
+      )
     )
   );
 }
@@ -494,7 +564,10 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const extractorCacheKey = `extractor:v3:${isExternalStreamProxyConfigured() ? "ext" : "local"}:${decryptedEpisodeId || decryptedMovieId || "direct"}:${targetEmbedUrl}`;
+    const publicOrigin = resolvePublicOrigin(request);
+    const internalProxyBaseUrl = `${publicOrigin}/api/stream-proxy`;
+
+    const extractorCacheKey = `extractor:v4:${isExternalStreamProxyConfigured() ? "ext" : "local"}:${publicOrigin}:${decryptedEpisodeId || decryptedMovieId || "direct"}:${targetEmbedUrl}`;
     const cachedHit =
       cacheService.get<CachedExtractorSuccessPayload>(extractorCacheKey);
     if (cachedHit) {
@@ -670,7 +743,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // FASE UNIFICADA: Evaluar Streamwish y servidores extraíbles limpios en paralelo bajo presupuesto Netlify (< 4.8s)
+    // TIER 1 (0 GB ancho de banda Netlify): Streamwish y Vidhide primero
     const streamwishDescriptors = prioritizedDescriptors.filter(
       (descriptor) => descriptor.isStreamwish
     );
@@ -683,27 +756,63 @@ export async function GET(request: NextRequest) {
         url: descriptor.url,
       })
     );
+    const vidhideDirty = extractableDirty.filter((descriptor) =>
+      /morencius\.com|vidhide/i.test(
+        `${descriptor.serverName} ${descriptor.url}`
+      )
+    );
+    const otherExtractableDirty = extractableDirty.filter(
+      (descriptor) =>
+        !/morencius\.com|vidhide/i.test(
+          `${descriptor.serverName} ${descriptor.url}`
+        )
+    );
 
-    const primaryDescriptors =
+    const zeroBandwidthTier =
       !STRICT_STREAMWISH_ONLY || FALLBACK_IF_EMPTY
-        ? [...streamwishDescriptors, ...extractableDirty]
+        ? [...streamwishDescriptors, ...vidhideDirty]
         : streamwishDescriptors;
 
-    const remainingPrimaryBudgetMs = Math.max(
-      1200,
-      4800 - (Date.now() - extractionStartedAt)
-    );
-    let extractionHit = await withTimeout(
-      executeParallelExtractionPhase(primaryDescriptors),
-      remainingPrimaryBudgetMs,
-      null
-    );
+    let extractionHit: ProbeHitResult | null = null;
+
+    if (zeroBandwidthTier.length > 0) {
+      const elapsedMs = Date.now() - extractionStartedAt;
+      const tier1BudgetMs =
+        otherExtractableDirty.length > 0
+          ? Math.min(3000, Math.max(1500, 5200 - elapsedMs))
+          : Math.max(1500, 5200 - elapsedMs);
+      extractionHit = await withTimeout(
+        executeParallelExtractionPhase(zeroBandwidthTier, internalProxyBaseUrl),
+        tier1BudgetMs,
+        null
+      );
+    }
+
+    // TIER 2: Otros hosts extraíbles (Dropload, Mixdrop, Filemoon) si Tier 1 no resolvió
+    if (
+      !extractionHit &&
+      (!STRICT_STREAMWISH_ONLY || FALLBACK_IF_EMPTY) &&
+      otherExtractableDirty.length > 0
+    ) {
+      const tier2BudgetMs = Math.max(
+        1200,
+        5200 - (Date.now() - extractionStartedAt)
+      );
+      extractionHit = await withTimeout(
+        executeParallelExtractionPhase(
+          otherExtractableDirty,
+          internalProxyBaseUrl
+        ),
+        tier2BudgetMs,
+        null
+      );
+    }
 
     // Contingencia rápida solo si queda margen dentro del límite seguro
     if (
       !extractionHit &&
       (!STRICT_STREAMWISH_ONLY || FALLBACK_IF_EMPTY) &&
-      Date.now() - extractionStartedAt < 2800
+      Date.now() - extractionStartedAt < 3000
     ) {
       const remainingDirty = dirtyDescriptors.filter(
         (descriptor) =>
@@ -713,13 +822,13 @@ export async function GET(request: NextRequest) {
           })
       );
       if (remainingDirty.length > 0) {
-        const remainingContingencyBudgetMs = Math.max(
+        const contingencyBudgetMs = Math.max(
           800,
-          4800 - (Date.now() - extractionStartedAt)
+          5200 - (Date.now() - extractionStartedAt)
         );
         extractionHit = await withTimeout(
-          executeParallelExtractionPhase(remainingDirty),
-          remainingContingencyBudgetMs,
+          executeParallelExtractionPhase(remainingDirty, internalProxyBaseUrl),
+          contingencyBudgetMs,
           null
         );
       }
@@ -749,13 +858,19 @@ export async function GET(request: NextRequest) {
         streamUrl: extractionHit.streamUrl,
         type: extractionHit.type,
         referer: extractionHit.referer,
+        ...(extractionHit.inlineM3u8
+          ? { inlineM3u8: extractionHit.inlineM3u8 }
+          : {}),
+        ...(extractionHit.transport
+          ? { transport: extractionHit.transport }
+          : {}),
         backupStreams: extractionHit.backupStreams,
         durationSeconds: extractionHit.durationSeconds,
         posterUrl: extractionHit.posterUrl,
         isStreamwish: extractionHit.isStreamwish,
         isDirty: extractionHit.isDirty,
       };
-      cacheService.set(extractorCacheKey, responsePayload, 600);
+      cacheService.set(extractorCacheKey, responsePayload, 180);
 
       return NextResponse.json(responsePayload);
     }

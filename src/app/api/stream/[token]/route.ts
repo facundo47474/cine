@@ -108,6 +108,26 @@ function appendResumeTimeParam(rawUrl: string, startSeconds: number): string {
  * @param request Petición `NextRequest` entrante.
  * @returns `true` si el origen es válido; `false` si debe bloquearse.
  */
+function resolvePublicOrigin(request: NextRequest): string {
+  const forwardedProto = request.headers
+    .get("x-forwarded-proto")
+    ?.split(",")[0]
+    ?.trim();
+  const forwardedHost =
+    request.headers.get("x-forwarded-host")?.split(",")[0]?.trim() ||
+    request.headers.get("host")?.split(",")[0]?.trim();
+
+  if (forwardedHost) {
+    const protocol =
+      forwardedProto ||
+      request.nextUrl.protocol.replace(/:$/, "") ||
+      "https";
+    return `${protocol}://${forwardedHost}`.replace(/\/+$/, "");
+  }
+
+  return request.nextUrl.origin.replace(/\/+$/, "");
+}
+
 function isRefererHostAllowed(request: NextRequest): boolean {
   const referer = request.headers.get("referer");
   if (!referer) return true;
@@ -331,6 +351,16 @@ function buildStreamTunnelPlayerHtml(params: {
         encodeURIComponent(hlsUrl) +
         "&referer=" +
         encodeURIComponent(streamRefererValue);
+
+      if (inlineM3u8 && window.Blob && window.URL && window.URL.createObjectURL) {
+        try {
+          activeHlsSource = window.URL.createObjectURL(
+            new window.Blob([inlineM3u8], {
+              type: "application/vnd.apple.mpegurl"
+            })
+          );
+        } catch (e) {}
+      }
 
       function switchToEmbedIframe() {
         if (switchedToIframe || !root) return;
@@ -754,9 +784,14 @@ export async function GET(
           url: finalEmbedUrl,
         });
 
+      const internalProxyBaseUrl = `${resolvePublicOrigin(request)}/api/stream-proxy`;
+
       streamwishHls =
         canExtractNativeHls && serverAllowsShieldMode
-          ? await extractDirectHlsFromStreamwishEmbed(finalEmbedUrl)
+          ? await extractDirectHlsFromStreamwishEmbed(
+              finalEmbedUrl,
+              internalProxyBaseUrl
+            )
           : null;
 
       if (serverAllowsShieldMode) {

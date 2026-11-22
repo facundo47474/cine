@@ -22,6 +22,8 @@ export interface NativeStreamCandidate {
   streamUrl: string;
   type: "hls" | "mp4";
   referer?: string;
+  inlineM3u8?: string;
+  transport?: "external" | "direct" | "internal";
 }
 
 export interface ExtractorResponseData {
@@ -29,6 +31,8 @@ export interface ExtractorResponseData {
   streamUrl?: string;
   type?: "hls" | "mp4";
   referer?: string;
+  inlineM3u8?: string;
+  transport?: "external" | "direct" | "internal";
   backupStreams?: NativeStreamCandidate[];
   fallbackUrl?: string;
   reason?: string;
@@ -37,6 +41,22 @@ export interface ExtractorResponseData {
   isStreamwish?: boolean;
   isDirty?: boolean;
   checkedSiblings?: boolean;
+}
+
+function resolveNativeProxyUrl(
+  streamUrl: string,
+  referer?: string,
+  transport?: "external" | "direct" | "internal"
+): string {
+  if (transport === "direct") {
+    return streamUrl;
+  }
+  if (transport === "internal") {
+    return `/api/stream-proxy?url=${encodeURIComponent(
+      streamUrl
+    )}&referer=${encodeURIComponent(referer || "")}`;
+  }
+  return buildStreamProxyUrl(streamUrl, referer);
 }
 
 export interface ExtractedNativeStream {
@@ -524,7 +544,7 @@ export default function SmartPlayer({
     const controller = new AbortController();
     const extractionTimeoutId = window.setTimeout(
       () => controller.abort(),
-      5500
+      6800
     );
 
     destroyHlsInstance();
@@ -571,6 +591,8 @@ export default function SmartPlayer({
                 streamUrl: data.streamUrl,
                 type: data.type || "hls",
                 referer: data.referer,
+                inlineM3u8: data.inlineM3u8,
+                transport: data.transport,
               });
               for (const backup of data.backupStreams || []) {
                 if (backup?.streamUrl && !queueMap.has(backup.streamUrl)) {
@@ -578,6 +600,8 @@ export default function SmartPlayer({
                     streamUrl: backup.streamUrl,
                     type: backup.type || "hls",
                     referer: backup.referer ?? data.referer,
+                    inlineM3u8: backup.inlineM3u8,
+                    transport: backup.transport,
                   });
                 }
               }
@@ -587,7 +611,11 @@ export default function SmartPlayer({
               setStreamData(data);
               onNativeStreamReadyRef.current?.({
                 streamUrl: data.streamUrl,
-                proxiedUrl: buildStreamProxyUrl(data.streamUrl, data.referer),
+                proxiedUrl: resolveNativeProxyUrl(
+                  data.streamUrl,
+                  data.referer,
+                  data.transport
+                ),
                 type: data.type || "hls",
                 referer: data.referer,
                 posterUrl: data.posterUrl,
@@ -659,6 +687,8 @@ export default function SmartPlayer({
         streamUrl: streamData.streamUrl,
         type: streamData.type || "hls",
         referer: streamData.referer,
+        inlineM3u8: streamData.inlineM3u8,
+        transport: streamData.transport,
       };
     }
     return null;
@@ -671,7 +701,11 @@ export default function SmartPlayer({
       destroyHlsInstance();
       onNativeStreamReadyRef.current?.({
         streamUrl: nextStream.streamUrl,
-        proxiedUrl: buildStreamProxyUrl(nextStream.streamUrl, nextStream.referer),
+        proxiedUrl: resolveNativeProxyUrl(
+          nextStream.streamUrl,
+          nextStream.referer,
+          nextStream.transport
+        ),
         type: nextStream.type,
         referer: nextStream.referer,
         posterUrl: streamData?.posterUrl,
@@ -689,7 +723,7 @@ export default function SmartPlayer({
     switchToImmediateIframe,
   ]);
 
-  // 2. Inicialización de reproducción nativa con hls.js o HTML5 <video> vía /api/stream-proxy
+  // 2. Inicialización de reproducción nativa con hls.js o HTML5 <video> vía proxy/CDN óptima
   useEffect(() => {
     if (status !== "playing_native" || !activeNativeStream?.streamUrl) {
       return;
@@ -700,10 +734,12 @@ export default function SmartPlayer({
 
     destroyHlsInstance();
 
+    let inlineBlobUrl: string | null = null;
     const refererParam = activeNativeStream.referer || "";
-    const proxiedStreamUrl = buildStreamProxyUrl(
+    const proxiedStreamUrl = resolveNativeProxyUrl(
       activeNativeStream.streamUrl,
-      refererParam
+      refererParam,
+      activeNativeStream.transport
     );
 
     const resumeTarget = initialTimeSecondsRef.current;
@@ -732,6 +768,13 @@ export default function SmartPlayer({
 
     if (activeNativeStream.type === "hls") {
       if (Hls.isSupported()) {
+        if (activeNativeStream.inlineM3u8) {
+          inlineBlobUrl = URL.createObjectURL(
+            new Blob([activeNativeStream.inlineM3u8], {
+              type: "application/vnd.apple.mpegurl",
+            })
+          );
+        }
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: false,
@@ -749,7 +792,7 @@ export default function SmartPlayer({
         });
         hlsRef.current = hls;
 
-        hls.loadSource(proxiedStreamUrl);
+        hls.loadSource(inlineBlobUrl || proxiedStreamUrl);
         hls.attachMedia(video);
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -802,14 +845,31 @@ export default function SmartPlayer({
         });
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
         // HLS nativo en Safari iOS / macOS
-        video.src = proxiedStreamUrl;
+        let safariHlsSrc = proxiedStreamUrl;
+        if (activeNativeStream.inlineM3u8) {
+          try {
+            const utf8Bytes = new TextEncoder().encode(
+              activeNativeStream.inlineM3u8
+            );
+            let binaryStr = "";
+            for (let i = 0; i < utf8Bytes.length; i += 1) {
+              binaryStr += String.fromCharCode(utf8Bytes[i]);
+            }
+            safariHlsSrc = `data:application/vnd.apple.mpegurl;base64,${btoa(
+              binaryStr
+            )}`;
+          } catch {
+            safariHlsSrc = proxiedStreamUrl;
+          }
+        }
+        video.src = safariHlsSrc;
         video.addEventListener("loadedmetadata", applyInitialResume);
         video.play().catch(() => { });
       } else {
         advanceToNextNativeStreamOrFallback();
       }
     } else {
-      // Archivo directo MP4 a través de /api/stream-proxy
+      // Archivo directo MP4 a través de proxy óptimo
       video.src = proxiedStreamUrl;
       video.addEventListener("loadedmetadata", applyInitialResume);
       video.play().catch(() => { });
@@ -818,6 +878,9 @@ export default function SmartPlayer({
     return () => {
       video.removeEventListener("loadedmetadata", applyInitialResume);
       destroyHlsInstance();
+      if (inlineBlobUrl) {
+        URL.revokeObjectURL(inlineBlobUrl);
+      }
     };
   }, [
     status,
