@@ -24,7 +24,6 @@ import SmartPlayer, {
   ExtractorResponseData,
   SmartPlayerStatus,
 } from "@/components/video/SmartPlayer";
-import { buildStreamProxyUrl } from "@/config/streamProxy";
 import { useMembership } from "@/components/MembershipProvider";
 import {
   FALLBACK_IF_EMPTY,
@@ -238,7 +237,9 @@ async function resolverStreamNativoBajoDemandaParaCast(
 
     return {
       streamUrl: data.streamUrl,
-      proxiedUrl: buildStreamProxyUrl(data.streamUrl, data.referer),
+      proxiedUrl: `/api/stream-proxy?url=${encodeURIComponent(
+        data.streamUrl
+      )}&referer=${encodeURIComponent(data.referer || "")}`,
       type: data.type || "hls",
       referer: data.referer,
       posterUrl: data.posterUrl,
@@ -926,7 +927,9 @@ export default function SmartVideoPlayer({
         const resolvedProxiedUrl =
           typeof payload.proxiedUrl === "string" && payload.proxiedUrl
             ? payload.proxiedUrl
-            : buildStreamProxyUrl(payload.streamUrl, resolvedReferer);
+            : `/api/stream-proxy?url=${encodeURIComponent(
+                payload.streamUrl
+              )}&referer=${encodeURIComponent(resolvedReferer)}`;
 
         setExtractedNativeStream({
           streamUrl: payload.streamUrl,
