@@ -283,7 +283,7 @@ export async function GET(request: NextRequest) {
       method: "GET",
       headers: upstreamHeaders,
       redirect: "follow",
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(8000),
     });
 
     if (

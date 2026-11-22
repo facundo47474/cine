@@ -434,12 +434,25 @@ function buildStreamTunnelPlayerHtml(params: {
       if (window.Hls && window.Hls.isSupported()) {
         var hls = new window.Hls({
           enableWorker: true,
+          manifestLoadingTimeOut: 4500,
+          manifestLoadingMaxRetry: 1,
+          levelLoadingTimeOut: 4500,
+          levelLoadingMaxRetry: 1,
+          fragLoadingTimeOut: 8000,
+          fragLoadingMaxRetry: 2,
           startPosition: startSec > 5 ? startSec : -1
         });
         hls.loadSource(activeHlsSource);
         hls.attachMedia(video);
         hls.on(window.Hls.Events.ERROR, function(_ev, data) {
-          if (data && data.fatal) {
+          var httpCode = data && data.response ? data.response.code : 0;
+          var isBlockedHttp =
+            httpCode === 401 ||
+            httpCode === 403 ||
+            httpCode === 404 ||
+            httpCode === 410 ||
+            httpCode === 530;
+          if ((data && data.fatal) || isBlockedHttp) {
             hls.destroy();
             switchToEmbedIframe();
           }
@@ -564,6 +577,8 @@ export async function GET(
   try {
     const isTvMode = request.nextUrl.searchParams.get("tv") === "1";
     const requestedShield = request.nextUrl.searchParams.get("escudo") !== "0";
+    const skipNativeExtraction =
+      request.nextUrl.searchParams.get("native_failed") === "1";
 
     const clientIp = getClientIp(request);
     const rateLimit = apiRateLimiter.checkLimit(
@@ -641,52 +656,77 @@ export async function GET(
       return redirectResponse;
     }
 
+    let serverAllowsShieldMode = false;
+    if (isTvMode) {
+      serverAllowsShieldMode = requestedShield;
+    } else if (requestedShield && authenticatedUserId) {
+      const membership = await prismaMembershipRepository.getMembershipByUserId(
+        authenticatedUserId,
+        authenticatedUserEmail
+      );
+      serverAllowsShieldMode = membership.isModoEscudoActive;
+    }
+
     let finalEmbedUrl = isStreamwishUrl(payload.rawUrl)
       ? normalizeStreamwishEmbedUrl(payload.rawUrl)
       : payload.rawUrl;
     let isSecondaryServer = Boolean(payload.isDirty);
+    let streamwishHls: DirectHlsStreamInfo | null = null;
+    let plusSafeFallbackUrl: string | null = null;
 
-    if (payload.rawUrl.includes("embed69.org/f/")) {
-      const embed69Result = await resolveBestEmbedFromEmbed69Url(
-        payload.rawUrl
-      );
-
-      if (embed69Result.url) {
-        finalEmbedUrl = embed69Result.url;
-        isSecondaryServer = !embed69Result.isStreamwish;
-      } else {
-        const playLatinFallback = await resolveBestEmbedFromPlayLatinByUrl(
+    if (skipNativeExtraction && serverAllowsShieldMode) {
+      if (!isSandboxCompatibleEmbedUrl(finalEmbedUrl)) {
+        const cleanReplacement =
+          await resolveContingencyFallbackFromPayload(payload);
+        if (cleanReplacement) {
+          plusSafeFallbackUrl = cleanReplacement;
+          finalEmbedUrl = cleanReplacement;
+          isSecondaryServer = true;
+        }
+      }
+    } else {
+      if (payload.rawUrl.includes("embed69.org/f/")) {
+        const embed69Result = await resolveBestEmbedFromEmbed69Url(
           payload.rawUrl
         );
 
-        if (playLatinFallback) {
-          finalEmbedUrl = playLatinFallback.url;
-          isSecondaryServer = !playLatinFallback.isStreamwish;
+        if (embed69Result.url) {
+          finalEmbedUrl = embed69Result.url;
+          isSecondaryServer = !embed69Result.isStreamwish;
         } else {
-          const contingencyFallback =
-            await resolveContingencyFallbackFromPayload(payload);
-          if (contingencyFallback) {
-            finalEmbedUrl = contingencyFallback;
-            isSecondaryServer = true;
-          } else if (
-            embed69Result.status === "NOT_FOUND" ||
-            (STRICT_STREAMWISH_ONLY && !FALLBACK_IF_EMPTY)
-          ) {
-            return buildStreamErrorHtmlResponse(payload.mirrorId);
+          const playLatinFallback = await resolveBestEmbedFromPlayLatinByUrl(
+            payload.rawUrl
+          );
+
+          if (playLatinFallback) {
+            finalEmbedUrl = playLatinFallback.url;
+            isSecondaryServer = !playLatinFallback.isStreamwish;
           } else {
-            finalEmbedUrl = embed69Result.cleanEmbedUrl;
-            isSecondaryServer = true;
+            const contingencyFallback =
+              await resolveContingencyFallbackFromPayload(payload);
+            if (contingencyFallback) {
+              finalEmbedUrl = contingencyFallback;
+              isSecondaryServer = true;
+            } else if (
+              embed69Result.status === "NOT_FOUND" ||
+              (STRICT_STREAMWISH_ONLY && !FALLBACK_IF_EMPTY)
+            ) {
+              return buildStreamErrorHtmlResponse(payload.mirrorId);
+            } else {
+              finalEmbedUrl = embed69Result.cleanEmbedUrl;
+              isSecondaryServer = true;
+            }
           }
         }
       }
-    }
 
-    if (isBrokenOrLegacyContingencyUrl(finalEmbedUrl)) {
-      const replacementEmbedUrl =
-        await resolveContingencyFallbackFromPayload(payload);
-      if (replacementEmbedUrl) {
-        finalEmbedUrl = replacementEmbedUrl;
-        isSecondaryServer = true;
+      if (isBrokenOrLegacyContingencyUrl(finalEmbedUrl)) {
+        const replacementEmbedUrl =
+          await resolveContingencyFallbackFromPayload(payload);
+        if (replacementEmbedUrl) {
+          finalEmbedUrl = replacementEmbedUrl;
+          isSecondaryServer = true;
+        }
       }
     }
 
@@ -706,39 +746,29 @@ export async function GET(
       Math.floor(Number(request.nextUrl.searchParams.get("t") || "0") || 0)
     );
 
-    let serverAllowsShieldMode = false;
-    if (isTvMode) {
-      serverAllowsShieldMode = requestedShield;
-    } else if (requestedShield && authenticatedUserId) {
-      const membership = await prismaMembershipRepository.getMembershipByUserId(
-        authenticatedUserId,
-        authenticatedUserEmail
-      );
-      serverAllowsShieldMode = membership.isModoEscudoActive;
-    }
+    if (!skipNativeExtraction) {
+      const canExtractNativeHls =
+        resolvedIsStreamwish ||
+        isExtractableCleanHost({
+          serverName: payload.serverName,
+          url: finalEmbedUrl,
+        });
 
-    const canExtractNativeHls =
-      resolvedIsStreamwish ||
-      isExtractableCleanHost({
-        serverName: payload.serverName,
-        url: finalEmbedUrl,
-      });
+      streamwishHls =
+        canExtractNativeHls && serverAllowsShieldMode
+          ? await extractDirectHlsFromStreamwishEmbed(finalEmbedUrl)
+          : null;
 
-    const streamwishHls =
-      canExtractNativeHls && serverAllowsShieldMode
-        ? await extractDirectHlsFromStreamwishEmbed(finalEmbedUrl)
-        : null;
-
-    let plusSafeFallbackUrl: string | null = null;
-    if (serverAllowsShieldMode) {
-      if (streamwishHls || !isSandboxCompatibleEmbedUrl(finalEmbedUrl)) {
-        const cleanReplacement =
-          await resolveContingencyFallbackFromPayload(payload);
-        if (cleanReplacement) {
-          plusSafeFallbackUrl = cleanReplacement;
-          if (!streamwishHls && !isSandboxCompatibleEmbedUrl(finalEmbedUrl)) {
-            finalEmbedUrl = cleanReplacement;
-            isSecondaryServer = true;
+      if (serverAllowsShieldMode) {
+        if (streamwishHls || !isSandboxCompatibleEmbedUrl(finalEmbedUrl)) {
+          const cleanReplacement =
+            await resolveContingencyFallbackFromPayload(payload);
+          if (cleanReplacement) {
+            plusSafeFallbackUrl = cleanReplacement;
+            if (!streamwishHls && !isSandboxCompatibleEmbedUrl(finalEmbedUrl)) {
+              finalEmbedUrl = cleanReplacement;
+              isSecondaryServer = true;
+            }
           }
         }
       }

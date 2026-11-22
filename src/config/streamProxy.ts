@@ -24,6 +24,15 @@ export function getStreamProxyBaseUrl(): string {
 }
 
 /**
+ * Indica si está configurado un proxy de streaming externo (p. ej. Cloudflare Worker)
+ * mediante `NEXT_PUBLIC_STREAM_PROXY_URL`.
+ */
+export function isExternalStreamProxyConfigured(): boolean {
+  const base = getStreamProxyBaseUrl();
+  return base.startsWith("https://") || base.startsWith("http://");
+}
+
+/**
  * Construye la URL completa del proxy de streaming con los parámetros `url` y `referer`.
  */
 export function buildStreamProxyUrl(

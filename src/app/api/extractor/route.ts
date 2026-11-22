@@ -5,6 +5,8 @@ import { prisma } from "@/infrastructure/database/prismaClient";
 import { getAuthenticatedUserSession } from "@/infrastructure/auth/sessionHelper";
 import { prismaMembershipRepository } from "@/infrastructure/repositories/PrismaMembershipRepository";
 import { isSafePublicHttpUrl } from "@/infrastructure/security/SecurityGuard";
+import { isExternalStreamProxyConfigured } from "@/config/streamProxy";
+import { isSandboxCompatibleEmbedUrl } from "@/domain/utils/contingencyMirrors";
 import {
   apiRateLimiter,
   getClientIp,
@@ -78,6 +80,27 @@ interface CachedExtractorSuccessPayload {
 }
 
 /**
+ * Envuelve una promesa con un tiempo límite máximo, devolviendo `fallbackValue` si vence.
+ */
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  fallbackValue: T
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallbackValue), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
  * Desempaqueta agregadores multi-embed (`embed69.org` y `playlatinsrc.co`) delegando en
  * `Embed69Decoder` y `PlayLatinClient`, y aplica `STRICT_STREAMWISH_ONLY` / `FALLBACK_IF_EMPTY`.
  *
@@ -119,8 +142,8 @@ async function resolveMultiEmbedAggregatorToDirectEmbeds(
 
   try {
     const [embed69Resolution, playLatinItems] = await Promise.all([
-      resolveRankedEmbedsFromEmbed69Url(rawAggregatorUrl, 4500),
-      resolveRankedEmbedsFromPlayLatinByUrl(rawAggregatorUrl, 4500),
+      resolveRankedEmbedsFromEmbed69Url(rawAggregatorUrl, 2800),
+      resolveRankedEmbedsFromPlayLatinByUrl(rawAggregatorUrl, 2800),
     ]);
 
     for (const item of embed69Resolution.items) {
@@ -171,7 +194,7 @@ async function probeSingleExtractionTarget(
           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       },
       redirect: "follow",
-      signal: AbortSignal.timeout(4000),
+      signal: AbortSignal.timeout(2600),
     });
 
     if (!response.ok) return null;
@@ -189,7 +212,7 @@ async function probeSingleExtractionTarget(
     );
     if (extractedCandidates.length === 0) return null;
 
-    const limitedCandidates = extractedCandidates.slice(0, 4);
+    const limitedCandidates = extractedCandidates.slice(0, 2);
     const aliveList: (ExtractedStreamCandidate | null)[] = new Array(
       limitedCandidates.length
     ).fill(null);
@@ -199,7 +222,7 @@ async function probeSingleExtractionTarget(
         const isAlive = await verifyExtractedStreamCandidateAlive(
           candidate,
           streamReferer,
-          2200
+          1500
         );
         if (isAlive) {
           aliveList[idx] = candidate;
@@ -411,6 +434,7 @@ export async function GET(request: NextRequest) {
   let tokenServerName: string | undefined;
 
   try {
+    const extractionStartedAt = Date.now();
     if (
       inputUrl.startsWith("/api/stream/") ||
       inputUrl.includes("/api/stream/")
@@ -470,7 +494,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const extractorCacheKey = `extractor:v2:${decryptedEpisodeId || decryptedMovieId || "direct"}:${targetEmbedUrl}`;
+    const extractorCacheKey = `extractor:v3:${isExternalStreamProxyConfigured() ? "ext" : "local"}:${decryptedEpisodeId || decryptedMovieId || "direct"}:${targetEmbedUrl}`;
     const cachedHit =
       cacheService.get<CachedExtractorSuccessPayload>(extractorCacheKey);
     if (cachedHit) {
@@ -498,6 +522,20 @@ export async function GET(request: NextRequest) {
         isStreamwish: initialBelongsToStreamwish,
         isDirty: !initialBelongsToStreamwish,
       });
+    }
+
+    if (isSandboxCompatibleEmbedUrl(targetEmbedUrl)) {
+      return NextResponse.json(
+        {
+          success: false,
+          fallbackUrl: fallbackIframeUrl,
+          isStreamwish: false,
+          isDirty: false,
+          checkedSiblings: true,
+          reason: "Reproductor embebido limpio compatible con Modo Escudo.",
+        },
+        { status: 200 }
+      );
     }
 
     const rawCandidates: {
@@ -632,38 +670,58 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // FASE 1 DETERMINISTA: Evaluar todos los targets de Streamwish en paralelo primero
+    // FASE UNIFICADA: Evaluar Streamwish y servidores extraíbles limpios en paralelo bajo presupuesto Netlify (< 4.8s)
     const streamwishDescriptors = prioritizedDescriptors.filter(
       (descriptor) => descriptor.isStreamwish
     );
-    let extractionHit = await executeParallelExtractionPhase(
-      streamwishDescriptors
+    const dirtyDescriptors = prioritizedDescriptors.filter(
+      (descriptor) => !descriptor.isStreamwish
+    );
+    const extractableDirty = dirtyDescriptors.filter((descriptor) =>
+      isExtractableCleanHost({
+        serverName: descriptor.serverName,
+        url: descriptor.url,
+      })
     );
 
-    // FASE 2 CONTINGENCIA: Solo si Streamwish falló por completo y está habilitado el fallback
-    if (!extractionHit && (!STRICT_STREAMWISH_ONLY || FALLBACK_IF_EMPTY)) {
-      const dirtyDescriptors = prioritizedDescriptors.filter(
-        (descriptor) => !descriptor.isStreamwish
-      );
-      const extractableDirty = dirtyDescriptors.filter((descriptor) =>
-        isExtractableCleanHost({
-          serverName: descriptor.serverName,
-          url: descriptor.url,
-        })
-      );
+    const primaryDescriptors =
+      !STRICT_STREAMWISH_ONLY || FALLBACK_IF_EMPTY
+        ? [...streamwishDescriptors, ...extractableDirty]
+        : streamwishDescriptors;
 
-      if (extractableDirty.length > 0) {
-        extractionHit = await executeParallelExtractionPhase(extractableDirty);
-      }
-      if (!extractionHit) {
-        const remainingDirty = dirtyDescriptors.filter(
-          (descriptor) =>
-            !isExtractableCleanHost({
-              serverName: descriptor.serverName,
-              url: descriptor.url,
-            })
+    const remainingPrimaryBudgetMs = Math.max(
+      1200,
+      4800 - (Date.now() - extractionStartedAt)
+    );
+    let extractionHit = await withTimeout(
+      executeParallelExtractionPhase(primaryDescriptors),
+      remainingPrimaryBudgetMs,
+      null
+    );
+
+    // Contingencia rápida solo si queda margen dentro del límite seguro
+    if (
+      !extractionHit &&
+      (!STRICT_STREAMWISH_ONLY || FALLBACK_IF_EMPTY) &&
+      Date.now() - extractionStartedAt < 2800
+    ) {
+      const remainingDirty = dirtyDescriptors.filter(
+        (descriptor) =>
+          !isExtractableCleanHost({
+            serverName: descriptor.serverName,
+            url: descriptor.url,
+          })
+      );
+      if (remainingDirty.length > 0) {
+        const remainingContingencyBudgetMs = Math.max(
+          800,
+          4800 - (Date.now() - extractionStartedAt)
         );
-        extractionHit = await executeParallelExtractionPhase(remainingDirty);
+        extractionHit = await withTimeout(
+          executeParallelExtractionPhase(remainingDirty),
+          remainingContingencyBudgetMs,
+          null
+        );
       }
     }
 

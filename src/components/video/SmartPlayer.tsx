@@ -352,6 +352,20 @@ export function SmartAdblockHelperBar({
   );
 }
 
+function appendQueryParamSafe(
+  url: string,
+  key: string,
+  value: string
+): string {
+  if (!url) return url;
+  const regex = new RegExp(`([?&])${key}=[^&]*`);
+  if (regex.test(url)) {
+    return url.replace(regex, `$1${key}=${encodeURIComponent(value)}`);
+  }
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}${key}=${encodeURIComponent(value)}`;
+}
+
 /**
  * PASO 4: Reproductor Libre de Fricción (Zero-Gate UX)
  * - Intenta primero extraer y reproducir el stream limpio (.m3u8 / .mp4) con hls.js.
@@ -386,6 +400,8 @@ export default function SmartPlayer({
     NativeStreamCandidate[]
   >([]);
   const [activeNativeIndex, setActiveNativeIndex] = useState<number>(0);
+  const [nativeFailedForIframe, setNativeFailedForIframe] =
+    useState<boolean>(false);
 
   const internalVideoRef = useRef<HTMLVideoElement | null>(null);
   const internalIframeRef = useRef<HTMLIFrameElement | null>(null);
@@ -490,6 +506,7 @@ export default function SmartPlayer({
 
     if (!modoEscudoActivo) {
       destroyHlsInstance();
+      setNativeFailedForIframe(false);
       initialSeekDoneRef.current = false;
       setNativeStreamQueue([]);
       setActiveNativeIndex(0);
@@ -505,8 +522,13 @@ export default function SmartPlayer({
 
     let cancelled = false;
     const controller = new AbortController();
+    const extractionTimeoutId = window.setTimeout(
+      () => controller.abort(),
+      5500
+    );
 
     destroyHlsInstance();
+    setNativeFailedForIframe(false);
     initialSeekDoneRef.current = false;
     setNativeStreamQueue([]);
     setActiveNativeIndex(0);
@@ -515,71 +537,80 @@ export default function SmartPlayer({
     onNativeStreamReadyRef.current?.(null);
 
     const runExtraction = async () => {
-      const candidateUrls = [
-        embedUrl,
-        ...backupEmbedUrlsRef.current.filter((u) => Boolean(u) && u !== embedUrl),
-      ].slice(0, 3);
+      const candidateUrls = embedUrl.includes("/api/stream/")
+        ? [embedUrl]
+        : [
+            embedUrl,
+            ...backupEmbedUrlsRef.current.filter(
+              (u) => Boolean(u) && u !== embedUrl
+            ),
+          ].slice(0, 2);
       let firstFailureData: ExtractorResponseData | null = null;
 
-      for (const candidateUrl of candidateUrls) {
-        if (cancelled) return;
-        try {
-          const res = await fetch(
-            `/api/extractor?url=${encodeURIComponent(candidateUrl)}`,
-            {
-              signal: controller.signal,
-              cache: "no-store",
-            }
-          );
-
+      try {
+        for (const candidateUrl of candidateUrls) {
           if (cancelled) return;
-
-          const data = (await res.json()) as ExtractorResponseData;
-          if (cancelled) return;
-
-          if (data.success && data.streamUrl) {
-            const queueMap = new Map<string, NativeStreamCandidate>();
-            queueMap.set(data.streamUrl, {
-              streamUrl: data.streamUrl,
-              type: data.type || "hls",
-              referer: data.referer,
-            });
-            for (const backup of data.backupStreams || []) {
-              if (backup?.streamUrl && !queueMap.has(backup.streamUrl)) {
-                queueMap.set(backup.streamUrl, {
-                  streamUrl: backup.streamUrl,
-                  type: backup.type || "hls",
-                  referer: backup.referer ?? data.referer,
-                });
+          try {
+            const res = await fetch(
+              `/api/extractor?url=${encodeURIComponent(candidateUrl)}`,
+              {
+                signal: controller.signal,
+                cache: "no-store",
               }
-            }
-            const nextQueue = Array.from(queueMap.values());
-            setNativeStreamQueue(nextQueue);
-            setActiveNativeIndex(0);
-            setStreamData(data);
-            onNativeStreamReadyRef.current?.({
-              streamUrl: data.streamUrl,
-              proxiedUrl: buildStreamProxyUrl(data.streamUrl, data.referer),
-              type: data.type || "hls",
-              referer: data.referer,
-              posterUrl: data.posterUrl,
-            });
-            if (data.durationSeconds && data.durationSeconds > 60) {
-              onDurationChangeRef.current?.(data.durationSeconds);
-            }
-            updateStatus("playing_native");
-            return;
-          }
+            );
 
-          if (!firstFailureData) {
-            firstFailureData = data;
+            if (cancelled) return;
+            if (!res.ok) continue;
+
+            const data = (await res.json()) as ExtractorResponseData;
+            if (cancelled) return;
+
+            if (data.success && data.streamUrl) {
+              const queueMap = new Map<string, NativeStreamCandidate>();
+              queueMap.set(data.streamUrl, {
+                streamUrl: data.streamUrl,
+                type: data.type || "hls",
+                referer: data.referer,
+              });
+              for (const backup of data.backupStreams || []) {
+                if (backup?.streamUrl && !queueMap.has(backup.streamUrl)) {
+                  queueMap.set(backup.streamUrl, {
+                    streamUrl: backup.streamUrl,
+                    type: backup.type || "hls",
+                    referer: backup.referer ?? data.referer,
+                  });
+                }
+              }
+              const nextQueue = Array.from(queueMap.values());
+              setNativeStreamQueue(nextQueue);
+              setActiveNativeIndex(0);
+              setStreamData(data);
+              onNativeStreamReadyRef.current?.({
+                streamUrl: data.streamUrl,
+                proxiedUrl: buildStreamProxyUrl(data.streamUrl, data.referer),
+                type: data.type || "hls",
+                referer: data.referer,
+                posterUrl: data.posterUrl,
+              });
+              if (data.durationSeconds && data.durationSeconds > 60) {
+                onDurationChangeRef.current?.(data.durationSeconds);
+              }
+              updateStatus("playing_native");
+              return;
+            }
+
+            if (!firstFailureData) {
+              firstFailureData = data;
+            }
+            if (data.checkedSiblings) {
+              break;
+            }
+          } catch {
+            if (cancelled) return;
           }
-          if (data.checkedSiblings) {
-            break;
-          }
-        } catch {
-          if (cancelled) return;
         }
+      } finally {
+        window.clearTimeout(extractionTimeoutId);
       }
 
       if (!cancelled) {
@@ -596,6 +627,7 @@ export default function SmartPlayer({
             isDirty,
           }
         );
+        setNativeFailedForIframe(true);
         switchToImmediateIframe();
       }
     };
@@ -604,6 +636,7 @@ export default function SmartPlayer({
 
     return () => {
       cancelled = true;
+      window.clearTimeout(extractionTimeoutId);
       controller.abort();
       destroyHlsInstance();
     };
@@ -646,6 +679,7 @@ export default function SmartPlayer({
       setActiveNativeIndex(nextIdx);
       return;
     }
+    setNativeFailedForIframe(true);
     switchToImmediateIframe();
   }, [
     activeNativeIndex,
@@ -705,12 +739,12 @@ export default function SmartPlayer({
           maxBufferLength: 20,
           maxMaxBufferLength: 45,
           backBufferLength: 30,
-          manifestLoadingTimeOut: 8000,
-          manifestLoadingMaxRetry: 3,
-          levelLoadingTimeOut: 8000,
-          levelLoadingMaxRetry: 3,
-          fragLoadingTimeOut: 12000,
-          fragLoadingMaxRetry: 4,
+          manifestLoadingTimeOut: 4500,
+          manifestLoadingMaxRetry: 1,
+          levelLoadingTimeOut: 4500,
+          levelLoadingMaxRetry: 1,
+          fragLoadingTimeOut: 8000,
+          fragLoadingMaxRetry: 2,
           startPosition: resumeTarget > 5 ? resumeTarget : -1,
         });
         hlsRef.current = hls;
@@ -725,12 +759,28 @@ export default function SmartPlayer({
 
         let mediaRecoveryCount = 0;
         let networkRecoveryCount = 0;
+        let handledFatalError = false;
         hls.on(Hls.Events.ERROR, (_event, data) => {
+          if (handledFatalError) return;
+          const httpStatus = data.response?.code;
+          const isPermanentHttpBlock =
+            httpStatus === 401 ||
+            httpStatus === 403 ||
+            httpStatus === 404 ||
+            httpStatus === 410 ||
+            httpStatus === 530;
+
+          if (isPermanentHttpBlock) {
+            handledFatalError = true;
+            advanceToNextNativeStreamOrFallback();
+            return;
+          }
+
           if (!data.fatal) return;
 
           if (
             data.type === Hls.ErrorTypes.NETWORK_ERROR &&
-            networkRecoveryCount < 2
+            networkRecoveryCount < 1
           ) {
             networkRecoveryCount += 1;
             hls.startLoad();
@@ -746,6 +796,7 @@ export default function SmartPlayer({
             return;
           }
 
+          handledFatalError = true;
           // Rota al siguiente stream nativo extraído (ej. hls2) antes de pasar a iframe limpio
           advanceToNextNativeStreamOrFallback();
         });
@@ -777,16 +828,16 @@ export default function SmartPlayer({
 
   const rawTargetIframeUrl = streamData?.fallbackUrl || embedUrl;
   const targetIframeUrl = useMemo(() => {
-    if (
-      !modoEscudoActivo &&
-      rawTargetIframeUrl &&
-      rawTargetIframeUrl.includes("/api/stream/")
-    ) {
-      const separator = rawTargetIframeUrl.includes("?") ? "&" : "?";
-      return `${rawTargetIframeUrl}${separator}escudo=0`;
+    if (rawTargetIframeUrl && rawTargetIframeUrl.includes("/api/stream/")) {
+      if (!modoEscudoActivo) {
+        return appendQueryParamSafe(rawTargetIframeUrl, "escudo", "0");
+      }
+      if (nativeFailedForIframe) {
+        return appendQueryParamSafe(rawTargetIframeUrl, "native_failed", "1");
+      }
     }
     return rawTargetIframeUrl;
-  }, [rawTargetIframeUrl, modoEscudoActivo]);
+  }, [rawTargetIframeUrl, modoEscudoActivo, nativeFailedForIframe]);
   const resolvedIsDirty = Boolean(
     isDirty ||
     streamData?.isDirty ||

@@ -2,6 +2,10 @@ import {
   buildStreamwishExtractionTargets,
   isStreamwishUrl,
 } from "@/domain/utils/streamwishMatcher";
+import {
+  buildStreamProxyUrl,
+  isExternalStreamProxyConfigured,
+} from "@/config/streamProxy";
 import { unpackDeanEdwardsPackedScripts } from "./DeanEdwardsUnpacker";
 import { DEFAULT_SCRAPER_USER_AGENT } from "./Embed69Decoder";
 
@@ -186,8 +190,13 @@ export async function resolveFirstNonNull<T>(
 export async function verifyExtractedStreamCandidateAlive(
   candidate: ExtractedStreamCandidate,
   referer: string,
-  timeoutMs: number = 2200
+  timeoutMs: number = 1500
 ): Promise<boolean> {
+  const useExternalProxy = isExternalStreamProxyConfigured();
+  const targetUrl = useExternalProxy
+    ? buildStreamProxyUrl(candidate.streamUrl, referer)
+    : candidate.streamUrl;
+
   if (candidate.type === "mp4") {
     try {
       const originHeader = (() => {
@@ -197,17 +206,29 @@ export async function verifyExtractedStreamCandidateAlive(
           return new URL(candidate.streamUrl).origin;
         }
       })();
-      const response = await fetch(candidate.streamUrl, {
-        method: "GET",
-        headers: {
-          "User-Agent": DEFAULT_SCRAPER_USER_AGENT,
-          Referer: referer,
-          Origin: originHeader,
-          Range: "bytes=0-1023",
-          Accept: "*/*",
-        },
-        signal: AbortSignal.timeout(timeoutMs),
-      });
+      const response = await fetch(
+        targetUrl,
+        useExternalProxy
+          ? {
+              method: "GET",
+              headers: {
+                Range: "bytes=0-1023",
+                Accept: "*/*",
+              },
+              signal: AbortSignal.timeout(timeoutMs),
+            }
+          : {
+              method: "GET",
+              headers: {
+                "User-Agent": DEFAULT_SCRAPER_USER_AGENT,
+                Referer: referer,
+                Origin: originHeader,
+                Range: "bytes=0-1023",
+                Accept: "*/*",
+              },
+              signal: AbortSignal.timeout(timeoutMs),
+            }
+      );
       await response.body?.cancel().catch(() => {});
       return response.ok || response.status === 206;
     } catch {
@@ -216,17 +237,29 @@ export async function verifyExtractedStreamCandidateAlive(
   }
 
   try {
-    const response = await fetch(candidate.streamUrl, {
-      method: "GET",
-      headers: {
-        "User-Agent": DEFAULT_SCRAPER_USER_AGENT,
-        Referer: referer,
-        Accept: "*/*",
-      },
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    const response = await fetch(
+      targetUrl,
+      useExternalProxy
+        ? {
+            method: "GET",
+            headers: {
+              Accept: "*/*",
+            },
+            signal: AbortSignal.timeout(timeoutMs),
+          }
+        : {
+            method: "GET",
+            headers: {
+              "User-Agent": DEFAULT_SCRAPER_USER_AGENT,
+              Referer: referer,
+              Accept: "*/*",
+            },
+            signal: AbortSignal.timeout(timeoutMs),
+          }
+    );
 
     if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
       return false;
     }
 
@@ -282,7 +315,7 @@ export async function extractDirectHlsFromStreamwishEmbed(
             "User-Agent": DEFAULT_SCRAPER_USER_AGENT,
             Referer: target.referer,
           },
-          signal: AbortSignal.timeout(3200),
+          signal: AbortSignal.timeout(2500),
         });
         if (!response.ok) return null;
 
@@ -300,11 +333,11 @@ export async function extractDirectHlsFromStreamwishEmbed(
         if (candidates.length === 0) return null;
 
         const firstAlive = await resolveFirstNonNull(
-          candidates.slice(0, 4).map(async (candidate) => {
+          candidates.slice(0, 2).map(async (candidate) => {
             const ok = await verifyExtractedStreamCandidateAlive(
               candidate,
               streamReferer,
-              2200
+              1500
             );
             return ok ? candidate : null;
           })
